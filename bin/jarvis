@@ -355,6 +355,12 @@ show_help() {
       jarvis auto                    Auto mode (smart filtering)
       jarvis status                  Show voice state
 
+    Wake Word ("Hey Jarvis"):
+      jarvis wake start              Start always-on listener (background)
+      jarvis wake stop               Stop the listener
+      jarvis wake status             Check if listener is running
+      jarvis wake logs               Tail listener logs
+
     Commands:
       jarvis greet                   Context-aware greeting + briefing
       jarvis boot                    Run boot-up sequence
@@ -574,6 +580,12 @@ main() {
             ;;
         boot)
             "$JARVIS_DIR/bin/jarvis-boot" "${2:-}"
+            ;;
+        wake)
+            # Pass through to jarvis-wake (e.g. "jarvis wake start", "jarvis wake stop")
+            shift
+            local subcmd="${1:-status}"
+            "$JARVIS_DIR/bin/jarvis-wake" "--$subcmd"
             ;;
 
         # ── Config ──
