@@ -151,7 +151,7 @@ echo -e "   ${GREEN}✓ Core dependencies present${NC}"
 echo ""
 
 # ─── Install files ────────────────────────────────────────────────────
-mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/config" "$INSTALL_DIR/cache" "$INSTALL_DIR/hooks"
+mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/config" "$INSTALL_DIR/cache" "$INSTALL_DIR/hooks" "$INSTALL_DIR/memory"
 
 # Copy binaries (rename to user's chosen name)
 for src_bin in "$SRC_BIN"/*; do

@@ -59,7 +59,7 @@ fi
 echo ""
 
 # ─── Install files ────────────────────────────────────────────────────
-mkdir -p "$ASSISTANT_DIR/bin" "$ASSISTANT_DIR/config" "$ASSISTANT_DIR/cache" "$ASSISTANT_DIR/hooks"
+mkdir -p "$ASSISTANT_DIR/bin" "$ASSISTANT_DIR/config" "$ASSISTANT_DIR/cache" "$ASSISTANT_DIR/hooks" "$ASSISTANT_DIR/memory"
 
 # If running from cloned repo, copy everything in bin/ — not just jarvis.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

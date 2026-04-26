@@ -52,135 +52,30 @@ speak_with_bargein() {
     wait "$speak_pid" 2>/dev/null || true
 }
 
-# ─── Conversation history ─────────────────────────────────────────────
-init_history() {
-    if [[ ! -f "$HISTORY_FILE" ]]; then
-        local system_prompt
-        system_prompt=$(cat "$PERSONALITY" 2>/dev/null || echo "You are JARVIS, an intelligent British AI assistant. Address the user as 'sir'. Be concise, witty, and helpful.")
+# ─── Think (delegates to jarvis-think.py for tool use + memory) ──────
+# History persistence and the API loop both live in jarvis-think.py now.
+# We keep this shell entry point thin so all the conversation logic is in
+# one place (Python) regardless of whether you reach it via voice loop,
+# --text, or the wake-listener.
+THINK_BIN="$ASSISTANT_DIR/bin/jarvis-think.py"
 
-        # Pass system prompt via stdin so any quotes/backticks/triple-quotes are safe
-        HISTORY_FILE="$HISTORY_FILE" python3 -c "
-import json, os, sys
-system = sys.stdin.read()
-history = [{'role': 'system', 'content': system}]
-with open(os.environ['HISTORY_FILE'], 'w') as f:
-    json.dump(history, f, indent=2)
-" <<< "$system_prompt"
-    fi
-}
-
-add_message() {
-    local role="$1"
-    local content="$2"
-    # Content goes via stdin — string interpolation is unsafe when content
-    # may contain ''' or other Python source-level escape sequences.
-    ROLE="$role" HISTORY_FILE="$HISTORY_FILE" python3 -c "
-import json, os, sys
-content = sys.stdin.read()
-with open(os.environ['HISTORY_FILE'], 'r') as f:
-    history = json.load(f)
-history.append({'role': os.environ['ROLE'], 'content': content})
-if len(history) > 21:
-    history = [history[0]] + history[-20:]
-with open(os.environ['HISTORY_FILE'], 'w') as f:
-    json.dump(history, f, indent=2)
-" <<< "$content"
-}
-
-# ─── Think (Claude API) ───────────────────────────────────────────────
 think() {
     local user_text="$1"
 
-    add_message "user" "$user_text"
-
     echo -ne "    ${DIM}JARVIS is thinking...${NC}"
 
-    # Single Python invocation: reads history, POSTs to Claude (urllib — no SDK needed),
-    # parses response. Avoids 3-4 subprocess starts and any JSON injection risk.
     local response
-    response=$(HISTORY_FILE="$HISTORY_FILE" \
-               CONFIG_FILE="$CONFIG_FILE" \
-               ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
-               python3 -c '
-import json, os, sys, time, urllib.request, urllib.error
-
-api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-if not api_key:
-    print("I cannot reach Claude — the ANTHROPIC_API_KEY is not set, sir.")
-    sys.exit(0)
-
-with open(os.environ["HISTORY_FILE"]) as f:
-    history = json.load(f)
-
-# Optional model override from settings.json — default to Haiku for voice
-# latency; users can switch to Sonnet for quality via:
-#   jarvis --set claude_model claude-sonnet-4-6
-model = "claude-haiku-4-5-20251001"
-try:
-    with open(os.environ["CONFIG_FILE"]) as f:
-        cfg = json.load(f)
-    if cfg.get("claude_model"):
-        model = cfg["claude_model"]
-except Exception:
-    pass
-
-system_msg = history[0]["content"] if history and history[0]["role"] == "system" else ""
-messages = [m for m in history if m["role"] != "system"]
-
-payload = json.dumps({
-    "model": model,
-    "max_tokens": 1024,
-    "system": system_msg,
-    "messages": messages,
-}).encode()
-
-req = urllib.request.Request(
-    "https://api.anthropic.com/v1/messages",
-    data=payload,
-    headers={
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    },
-)
-
-# Retry on 429/5xx with exponential backoff. Voice conversation is
-# interactive so we keep retries short — three attempts, ~1s + ~2s waits.
-last_err = None
-for attempt in range(3):
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read())
-        if data.get("content"):
-            print(data["content"][0].get("text", ""))
-        break
-    except urllib.error.HTTPError as e:
-        last_err = e
-        if e.code in (429, 500, 502, 503, 504) and attempt < 2:
-            time.sleep(1 + attempt * 1.5)
-            continue
-        try:
-            err = json.loads(e.read()).get("error", {}).get("message", str(e))
-        except Exception:
-            err = str(e)
-        print(f"I apologize sir, but the API returned an error: {err}")
-        break
-    except (urllib.error.URLError, TimeoutError) as e:
-        last_err = e
-        if attempt < 2:
-            time.sleep(1 + attempt * 1.5)
-            continue
-        print(f"I cannot reach Claude at the moment, sir — {e}")
-        break
-    except Exception as e:
-        print(f"I appear to be having a moment, sir — {e}")
-        break
-' 2>/dev/null)
+    response=$(
+        HISTORY_FILE="$HISTORY_FILE" \
+        CONFIG_FILE="$CONFIG_FILE" \
+        ASSISTANT_DIR="$ASSISTANT_DIR" \
+        ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+        python3 "$THINK_BIN" "$user_text" 2>/dev/null
+    )
 
     echo -e "\r                              "  # Clear "thinking..."
 
     if [[ -n "$response" ]]; then
-        add_message "assistant" "$response"
         echo "$response"
     else
         echo "I appear to be having a moment, sir. Could you repeat that?"
@@ -215,7 +110,6 @@ EOF
             exit 0
             ;;
         --text)
-            init_history
             local text_input="${2:-}"
             if [[ -z "$text_input" ]]; then
                 echo -e "${RED}Usage: jarvis-converse --text \"your message\"${NC}"
@@ -229,8 +123,6 @@ EOF
             exit 0
             ;;
     esac
-
-    init_history
 
     if [[ "${1:-}" == "--loop" ]]; then
         echo ""
