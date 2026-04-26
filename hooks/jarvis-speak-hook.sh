@@ -83,9 +83,12 @@ if len(content) > 2000:
 print(content)
 " <<< "$response" 2>/dev/null) || exit 0
 
-# Speak it (in background so we don't block Claude Code)
+# Speak it (in background so we don't block Claude Code).
+# nohup + disown makes the speech survive after this hook process exits;
+# without it, bash may HUP the child when the hook returns and cut audio off.
 if [[ -n "$assistant_text" ]]; then
-    "$JARVIS_BIN" "$assistant_text" &
+    nohup "$JARVIS_BIN" "$assistant_text" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
 fi
 
 exit 0
