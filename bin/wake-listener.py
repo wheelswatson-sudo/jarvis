@@ -39,6 +39,18 @@ CHUNK_SIZE = 1280  # 80ms chunks at 16kHz (OpenWakeWord requirement)
 WAKE_THRESHOLD = 0.5  # Confidence threshold (0-1)
 COOLDOWN_SECONDS = 3  # Prevent re-triggering immediately
 
+# Adaptive silence gate. The end-of-speech detector compares per-chunk mean
+# amplitude against a threshold derived from ambient noise. A hand-tuned
+# constant produced ~20% false negatives on AirPods (very low noise floor →
+# the gate sat above the user's quieter syllables) and in noisy rooms (gate
+# below ambient → recording never ended).
+NOISE_CALIBRATION_SECONDS = 1.5
+NOISE_PERCENTILE = 85          # robust to brief spikes during calibration
+NOISE_GATE_MULTIPLIER = 2.5    # gate sits comfortably above the floor
+NOISE_GATE_FLOOR = 80          # don't trust a near-zero floor (digital silence)
+NOISE_GATE_CEILING = 1500      # don't let a noisy room mask normal speech
+NOISE_GATE_FALLBACK = 300      # used if calibration itself fails
+
 # Get assistant name from settings
 def get_assistant_name():
     try:
@@ -86,6 +98,78 @@ def speak(text):
     except Exception as e:
         log(f"speak failed: {e}")
 
+# ─── Adaptive silence gate ────────────────────────────────────────────
+# Cached per input-device name; cleared on device hot-swap so AirPods
+# reconnects (or a switch to/from the built-in mic) trigger recalibration.
+_silence_gate_cache = {}
+
+
+def current_input_device_name():
+    """Return a stable name for the active default input device."""
+    try:
+        default = sd.default.device
+        idx = default[0] if isinstance(default, (list, tuple)) else default
+        if idx is None or idx == -1:
+            info = sd.query_devices(kind="input")
+        else:
+            info = sd.query_devices(idx)
+        return info.get("name", "default") if isinstance(info, dict) else "default"
+    except Exception:
+        return "default"
+
+
+def measure_silence_gate(duration_seconds=NOISE_CALIBRATION_SECONDS):
+    """Sample ambient noise and derive an int16 amplitude threshold.
+
+    Uses a percentile of per-chunk mean amplitudes (not max) so a stray
+    cough during calibration doesn't inflate the gate, and clamps the
+    result so neither digital-silence nor a loud room produces a useless
+    threshold.
+    """
+    chunks_needed = max(4, int(duration_seconds * SAMPLE_RATE / CHUNK_SIZE))
+    amps = []
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype=np.int16,
+            blocksize=CHUNK_SIZE,
+        ) as stream:
+            for _ in range(chunks_needed):
+                chunk, _ = stream.read(CHUNK_SIZE)
+                amps.append(float(np.abs(chunk.flatten()).mean()))
+    except Exception as e:
+        log(f"Noise calibration failed ({e}); using fallback gate {NOISE_GATE_FALLBACK}")
+        return NOISE_GATE_FALLBACK
+
+    if not amps:
+        return NOISE_GATE_FALLBACK
+
+    noise_floor = float(np.percentile(amps, NOISE_PERCENTILE))
+    gate = int(max(NOISE_GATE_FLOOR, min(NOISE_GATE_CEILING, noise_floor * NOISE_GATE_MULTIPLIER)))
+    log(f"Noise floor p{NOISE_PERCENTILE}={noise_floor:.0f} → silence gate={gate}")
+    return gate
+
+
+def get_silence_gate():
+    """Return the cached silence gate for the current device, calibrating if needed."""
+    device = current_input_device_name()
+    cached = _silence_gate_cache.get(device)
+    if cached is not None:
+        return cached
+    log(f"Calibrating silence gate for input device: {device}")
+    gate = measure_silence_gate()
+    _silence_gate_cache[device] = gate
+    return gate
+
+
+def reset_silence_gate_cache():
+    """Drop calibration so the next record_command recalibrates from scratch."""
+    if _silence_gate_cache:
+        log("Clearing silence-gate cache (device change or stream error)")
+    _silence_gate_cache.clear()
+
+
 # ─── Recording user command after wake ────────────────────────────────
 def record_command(max_seconds=15, silence_seconds=1.5):
     """Record from mic until user pauses speaking."""
@@ -96,7 +180,7 @@ def record_command(max_seconds=15, silence_seconds=1.5):
     chunks_per_second = SAMPLE_RATE // CHUNK_SIZE
     silence_threshold_chunks = int(silence_seconds * chunks_per_second)
     max_chunks = max_seconds * chunks_per_second
-    silence_amplitude = 500  # int16 amplitude threshold
+    silence_amplitude = get_silence_gate()
 
     started_speaking = False
     chunk_count = 0
@@ -270,6 +354,15 @@ def main():
             inference_framework="onnx",
         )
 
+    # Prime the silence gate before the wake stream opens so the first
+    # post-wake recording uses a calibrated threshold instead of the
+    # fallback. Runs in a tiny dedicated InputStream — the wake stream
+    # isn't open yet, so there's no contention.
+    try:
+        get_silence_gate()
+    except Exception as e:
+        log(f"Startup calibration skipped: {e}")
+
     log("Listening for 'Hey Jarvis'...")
 
     # Thread-safe signal from audio callback to main loop. Doing the
@@ -318,7 +411,22 @@ def main():
             log("Stopped by user")
             break
         except Exception as e:
+            msg = str(e).lower()
             log(f"Stream error: {e}")
+            # PaMacCore -50 (paramErr) and friends typically fire when the
+            # default input device disappears mid-stream — most often an
+            # AirPods reconnect. Drop the cached silence gate so the new
+            # device gets recalibrated when the wake-restart-then-record
+            # cycle runs again.
+            device_change_tokens = (
+                "pamaccore", "paramerr", "-50",
+                "device unavailable", "device disconnected", "device lost",
+                "invalidproperty", "format not supported",
+                "unanticipated host error",
+                "errno 19",  # ENODEV
+            )
+            if any(tok in msg for tok in device_change_tokens):
+                reset_silence_gate_cache()
             wake_event.clear()
             time.sleep(2)
             continue
