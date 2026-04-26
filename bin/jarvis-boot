@@ -1,75 +1,79 @@
 #!/usr/bin/env bash
 # JARVIS — First boot cinematic experience
-# Runs once on first launch, then never again (unless reset)
+# Runs once on first launch, then never again (unless --reset)
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-ENV_FILE="$JARVIS_DIR/config/.env"
-CONFIG_FILE="$JARVIS_DIR/config/settings.json"
-BOOT_FLAG="$JARVIS_DIR/.booted"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+ENV_FILE="$ASSISTANT_DIR/config/.env"
+CONFIG_FILE="$ASSISTANT_DIR/config/settings.json"
+BOOT_FLAG="$ASSISTANT_DIR/.booted"
+JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
 
-# Colors
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Check if already booted
+# Skip if already booted (unless --reset)
 if [[ -f "$BOOT_FLAG" && "${1:-}" != "--reset" ]]; then
     exit 0
 fi
 
-source "$ENV_FILE"
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 
-# ─── Speak helper (inline, no dependency on jarvis script) ─────────────
-boot_speak() {
-    local text="$1"
-    local voice_id model_id
-    voice_id=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['voice_id'])")
-    model_id=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE'))['model_id'])")
-
-    local audio_file="/tmp/jarvis_boot_$RANDOM.mp3"
-    local payload
-    payload=$(python3 -c "
+# ─── Identity (name-agnostic; works for any white-labeled assistant) ──
+ASSISTANT_NAME="$(python3 -c "
 import json
-text = '''$text'''
-print(json.dumps({
-    'text': text,
-    'model_id': '$model_id',
-    'voice_settings': {'stability': 0.5, 'similarity_boost': 0.85, 'style': 0.2}
-}))
-")
+try:
+    with open('$CONFIG_FILE') as f: cfg = json.load(f)
+    print(cfg.get('assistant_name', 'JARVIS'))
+except Exception:
+    print('JARVIS')
+" 2>/dev/null || echo "JARVIS")"
 
-    curl -s "https://api.elevenlabs.io/v1/text-to-speech/${voice_id}" \
-        -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d "$payload" \
-        --output "$audio_file" 2>/dev/null
+USER_NAME="$(python3 -c "
+import json
+try:
+    with open('$CONFIG_FILE') as f: cfg = json.load(f)
+    print(cfg.get('user_name') or '')
+except Exception:
+    pass
+" 2>/dev/null || echo "")"
+if [[ -z "$USER_NAME" ]]; then
+    USER_NAME="$(git config --global user.name 2>/dev/null | awk '{print $1}' || true)"
+    USER_NAME="${USER_NAME:-$(whoami)}"
+fi
 
-    afplay "$audio_file" 2>/dev/null || mpv --no-video "$audio_file" 2>/dev/null
-    rm -f "$audio_file"
+# ─── Banner — centered name in a frame, no hardcoded letters ─────────
+print_banner() {
+    local name_upper
+    name_upper=$(echo "$ASSISTANT_NAME" | tr '[:lower:]' '[:upper:]')
+    # Spaced letters for a cinematic feel: J A R V I S
+    local spaced=""
+    local i ch
+    for (( i=0; i<${#name_upper}; i++ )); do
+        ch="${name_upper:$i:1}"
+        spaced+="${ch} "
+    done
+    spaced="${spaced% }"
+
+    local total=58
+    local content_len=${#spaced}
+    local pad=$(( (total - content_len) / 2 ))
+    local left right
+    left=$(printf '%*s' "$pad" '')
+    right=$(printf '%*s' "$(( total - content_len - pad ))" '')
+
+    echo -e "${CYAN}"
+    echo "    ╔══════════════════════════════════════════════════════════╗"
+    echo "    ║${left}${spaced}${right}║"
+    echo "    ╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
 }
 
-# ─── Time awareness ───────────────────────────────────────────────────
-get_greeting() {
-    local hour
-    hour=$(date +%H)
-    if (( hour < 12 )); then
-        echo "Good morning"
-    elif (( hour < 17 )); then
-        echo "Good afternoon"
-    else
-        echo "Good evening"
-    fi
-}
-
-# ─── Boot sequence ────────────────────────────────────────────────────
+# ─── Boot animation ───────────────────────────────────────────────────
 clear
-
-# Phase 1: System initialization animation
 echo ""
 echo -e "${DIM}"
 sleep 0.3
@@ -85,67 +89,52 @@ echo "    [INIT] Memory subsystem........... OK"
 sleep 0.2
 echo -e "${NC}"
 
-# Phase 2: JARVIS logo reveal
-echo -e "${CYAN}"
-cat << 'BANNER'
-       ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
-       ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
-       ██║███████║██████╔╝██║   ██║██║███████╗
-  ██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
-  ╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
-   ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
-BANNER
-echo -e "${NC}"
-echo -e "    ${BOLD}Just A Rather Very Intelligent System${NC}"
-echo -e "    ${DIM}v1.0 — Powered by Claude + ElevenLabs${NC}"
+print_banner
+echo -e "    ${BOLD}${ASSISTANT_NAME}${NC}"
+echo -e "    ${DIM}Powered by Claude + ElevenLabs${NC}"
 echo ""
-
 sleep 0.5
 
-# Phase 3: Status bars
 echo -e "    ${CYAN}Systems${NC}"
-echo -ne "    Voice        "
-for i in $(seq 1 20); do echo -ne "${GREEN}█${NC}"; sleep 0.02; done
-echo -e " ${GREEN}ONLINE${NC}"
-
-echo -ne "    Intelligence "
-for i in $(seq 1 20); do echo -ne "${GREEN}█${NC}"; sleep 0.02; done
-echo -e " ${GREEN}ONLINE${NC}"
-
-echo -ne "    Personality  "
-for i in $(seq 1 20); do echo -ne "${GREEN}█${NC}"; sleep 0.02; done
-echo -e " ${GREEN}ONLINE${NC}"
-
+for label in "Voice       " "Intelligence" "Personality "; do
+    echo -ne "    $label "
+    for i in $(seq 1 20); do echo -ne "${GREEN}█${NC}"; sleep 0.02; done
+    echo -e " ${GREEN}ONLINE${NC}"
+done
 echo ""
 
-# Phase 4: Greeting (spoken)
-greeting=$(get_greeting)
+# ─── Greeting (spoken) — delegates to jarvis CLI for TTS ──────────────
+hour=$(date +%H)
+if (( hour < 12 )); then
+    greeting="Good morning"
+elif (( hour < 17 )); then
+    greeting="Good afternoon"
+else
+    greeting="Good evening"
+fi
 
-# Get user's name from git config or system
-user_name=$(git config --global user.name 2>/dev/null || whoami)
-first_name=$(echo "$user_name" | awk '{print $1}')
-
-# Check if this is the very first boot ever
 if [[ ! -f "$BOOT_FLAG" ]]; then
-    # First time ever — full introduction
-    boot_speak "${greeting}, sir. I am JARVIS. Your personal artificial intelligence system. I have been configured to assist you with whatever you require. My voice, my personality, and my judgment are all at your disposal. I look forward to working with you, ${first_name}. Shall we begin?"
+    msg="${greeting}, sir. I am ${ASSISTANT_NAME}. Your personal artificial intelligence system. I have been configured to assist you with whatever you require. My voice, my personality, and my judgment are all at your disposal. I look forward to working with you, ${USER_NAME}. Shall we begin?"
+else
+    msg="${greeting}, sir. Systems recalibrated. All modules are online and operational. Ready when you are."
+fi
 
-    echo -e "    ${GREEN}${BOLD}JARVIS is online.${NC}"
+if [[ -x "$JARVIS_BIN" ]]; then
+    "$JARVIS_BIN" --speak "$msg" 2>/dev/null || true
+fi
+
+if [[ ! -f "$BOOT_FLAG" ]]; then
+    echo -e "    ${GREEN}${BOLD}${ASSISTANT_NAME} is online.${NC}"
     echo ""
+    cmd=$(basename "$JARVIS_BIN")
     echo -e "    ${DIM}Voice control:${NC}"
-    echo -e "    ${CYAN}jarvis on${NC}    — I'll speak every response"
-    echo -e "    ${CYAN}jarvis off${NC}   — Silent mode"
-    echo -e "    ${CYAN}jarvis auto${NC}  — I speak when it matters"
-    echo ""
-    echo -e "    ${DIM}\"Will that be all, sir?\"${NC}"
+    echo -e "    ${CYAN}${cmd} on${NC}    — speak every response"
+    echo -e "    ${CYAN}${cmd} off${NC}   — silent mode"
+    echo -e "    ${CYAN}${cmd} auto${NC}  — speak when it matters"
     echo ""
 else
-    # Subsequent resets — shorter greeting
-    boot_speak "${greeting}, sir. Systems recalibrated. All modules are online and operational. Ready when you are."
-
-    echo -e "    ${GREEN}${BOLD}JARVIS recalibrated.${NC}"
+    echo -e "    ${GREEN}${BOLD}${ASSISTANT_NAME} recalibrated.${NC}"
     echo ""
 fi
 
-# Mark as booted
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "$BOOT_FLAG"

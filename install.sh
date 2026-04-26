@@ -3,7 +3,7 @@
 # curl -fsSL https://raw.githubusercontent.com/<user>/jarvis/main/install.sh | bash
 set -euo pipefail
 
-JARVIS_DIR="$HOME/.jarvis"
+ASSISTANT_DIR="$HOME/.jarvis"
 REPO_URL="${JARVIS_REPO_URL:-https://github.com/<user>/jarvis}"
 
 RED='\033[0;31m'
@@ -59,24 +59,26 @@ fi
 echo ""
 
 # ─── Install files ────────────────────────────────────────────────────
-mkdir -p "$JARVIS_DIR/bin" "$JARVIS_DIR/config" "$JARVIS_DIR/cache"
+mkdir -p "$ASSISTANT_DIR/bin" "$ASSISTANT_DIR/config" "$ASSISTANT_DIR/cache" "$ASSISTANT_DIR/hooks"
 
-# If running from cloned repo
+# If running from cloned repo, copy everything in bin/ — not just jarvis.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "$SCRIPT_DIR/bin/jarvis" ]]; then
+if [[ -d "$SCRIPT_DIR/bin" ]]; then
     echo -e "  ${CYAN}Installing from local files...${NC}"
-    cp "$SCRIPT_DIR/bin/jarvis" "$JARVIS_DIR/bin/jarvis"
-    cp "$SCRIPT_DIR/bin/jarvis-setup" "$JARVIS_DIR/bin/jarvis-setup"
-    cp "$SCRIPT_DIR/config/personality.md" "$JARVIS_DIR/config/personality.md"
+    cp "$SCRIPT_DIR"/bin/* "$ASSISTANT_DIR/bin/"
+    cp -R "$SCRIPT_DIR"/hooks/* "$ASSISTANT_DIR/hooks/" 2>/dev/null || true
+    cp "$SCRIPT_DIR/config/personality.md" "$ASSISTANT_DIR/config/personality.md"
 else
     echo -e "  ${CYAN}Downloading from repository...${NC}"
-    curl -fsSL "$REPO_URL/raw/main/bin/jarvis" -o "$JARVIS_DIR/bin/jarvis"
-    curl -fsSL "$REPO_URL/raw/main/bin/jarvis-setup" -o "$JARVIS_DIR/bin/jarvis-setup"
-    curl -fsSL "$REPO_URL/raw/main/config/personality.md" -o "$JARVIS_DIR/config/personality.md"
+    for f in jarvis jarvis-boot jarvis-converse jarvis-listen jarvis-setup jarvis-wake wake-listener.py; do
+        curl -fsSL "$REPO_URL/raw/main/bin/$f" -o "$ASSISTANT_DIR/bin/$f"
+    done
+    curl -fsSL "$REPO_URL/raw/main/hooks/jarvis-speak-hook.sh" -o "$ASSISTANT_DIR/hooks/jarvis-speak-hook.sh"
+    curl -fsSL "$REPO_URL/raw/main/config/personality.md" -o "$ASSISTANT_DIR/config/personality.md"
 fi
 
-chmod +x "$JARVIS_DIR/bin/jarvis"
-chmod +x "$JARVIS_DIR/bin/jarvis-setup"
+chmod +x "$ASSISTANT_DIR"/bin/* 2>/dev/null || true
+chmod +x "$ASSISTANT_DIR"/hooks/*.sh 2>/dev/null || true
 
 # ─── Add to PATH ──────────────────────────────────────────────────────
 SHELL_RC=""
@@ -89,7 +91,7 @@ elif [[ -f "$HOME/.bash_profile" ]]; then
 fi
 
 PATH_LINE='export PATH="$HOME/.jarvis/bin:$PATH"'
-ENV_LINE='export JARVIS_DIR="$HOME/.jarvis"'
+ENV_LINE='export ASSISTANT_DIR="$HOME/.jarvis"'
 
 if [[ -n "$SHELL_RC" ]]; then
     if ! grep -q ".jarvis/bin" "$SHELL_RC" 2>/dev/null; then
@@ -104,8 +106,8 @@ if [[ -n "$SHELL_RC" ]]; then
 fi
 
 # Export for current session
-export PATH="$JARVIS_DIR/bin:$PATH"
-export JARVIS_DIR="$JARVIS_DIR"
+export PATH="$ASSISTANT_DIR/bin:$PATH"
+export ASSISTANT_DIR="$ASSISTANT_DIR"
 
 echo ""
 echo -e "  ${GREEN}${BOLD}Installation complete.${NC}"

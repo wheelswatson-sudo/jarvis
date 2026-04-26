@@ -9,12 +9,12 @@
 
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-ENV_FILE="$JARVIS_DIR/config/.env"
-PERSONALITY="$JARVIS_DIR/config/personality.md"
-JARVIS_BIN="$JARVIS_DIR/bin/jarvis"
-LISTEN_BIN="$JARVIS_DIR/bin/jarvis-listen"
-HISTORY_FILE="$JARVIS_DIR/cache/conversation.json"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+ENV_FILE="$ASSISTANT_DIR/config/.env"
+PERSONALITY="$ASSISTANT_DIR/config/personality.md"
+JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
+LISTEN_BIN="$ASSISTANT_DIR/bin/jarvis-listen"
+HISTORY_FILE="$ASSISTANT_DIR/cache/conversation.json"
 
 # Colors
 RED='\033[0;31m'
@@ -34,30 +34,33 @@ init_history() {
         local system_prompt
         system_prompt=$(cat "$PERSONALITY" 2>/dev/null || echo "You are JARVIS, an intelligent British AI assistant. Address the user as 'sir'. Be concise, witty, and helpful.")
 
-        python3 -c "
-import json
-system = '''$(echo "$system_prompt" | sed "s/'/\\\\'/g")'''
+        # Pass system prompt via stdin so any quotes/backticks/triple-quotes are safe
+        HISTORY_FILE="$HISTORY_FILE" python3 -c "
+import json, os, sys
+system = sys.stdin.read()
 history = [{'role': 'system', 'content': system}]
-with open('$HISTORY_FILE', 'w') as f:
+with open(os.environ['HISTORY_FILE'], 'w') as f:
     json.dump(history, f, indent=2)
-"
+" <<< "$system_prompt"
     fi
 }
 
 add_message() {
     local role="$1"
     local content="$2"
-    python3 -c "
-import json
-with open('$HISTORY_FILE', 'r') as f:
+    # Content goes via stdin — string interpolation is unsafe when content
+    # may contain ''' or other Python source-level escape sequences.
+    ROLE="$role" HISTORY_FILE="$HISTORY_FILE" python3 -c "
+import json, os, sys
+content = sys.stdin.read()
+with open(os.environ['HISTORY_FILE'], 'r') as f:
     history = json.load(f)
-history.append({'role': '$role', 'content': '''$(echo "$content" | sed "s/'/\\\\'/g")'''})
-# Keep last 20 messages + system prompt
+history.append({'role': os.environ['ROLE'], 'content': content})
 if len(history) > 21:
     history = [history[0]] + history[-20:]
-with open('$HISTORY_FILE', 'w') as f:
+with open(os.environ['HISTORY_FILE'], 'w') as f:
     json.dump(history, f, indent=2)
-"
+" <<< "$content"
 }
 
 # ─── Think (Claude API) ───────────────────────────────────────────────
@@ -68,87 +71,66 @@ think() {
 
     echo -ne "    ${DIM}JARVIS is thinking...${NC}"
 
+    # Single Python invocation: reads history, POSTs to Claude (urllib — no SDK needed),
+    # parses response. Avoids 3-4 subprocess starts and any JSON injection risk.
     local response
-    response=$(python3 -c "
-import json, os, sys
+    response=$(HISTORY_FILE="$HISTORY_FILE" \
+               CONFIG_FILE="$CONFIG_FILE" \
+               ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+               python3 -c '
+import json, os, sys, urllib.request, urllib.error
 
+api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+if not api_key:
+    print("I cannot reach Claude — the ANTHROPIC_API_KEY is not set, sir.")
+    sys.exit(0)
+
+with open(os.environ["HISTORY_FILE"]) as f:
+    history = json.load(f)
+
+# Optional model override from settings.json
+model = "claude-haiku-4-5-20251001"
 try:
-    from anthropic import Anthropic
-except ImportError:
-    # Fallback: use curl
-    sys.exit(42)
+    with open(os.environ["CONFIG_FILE"]) as f:
+        cfg = json.load(f)
+    if cfg.get("claude_model"):
+        model = cfg["claude_model"]
+except Exception:
+    pass
 
-client = Anthropic()
+system_msg = history[0]["content"] if history and history[0]["role"] == "system" else ""
+messages = [m for m in history if m["role"] != "system"]
 
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
+payload = json.dumps({
+    "model": model,
+    "max_tokens": 1024,
+    "system": system_msg,
+    "messages": messages,
+}).encode()
 
-system_msg = history[0]['content'] if history and history[0]['role'] == 'system' else ''
-messages = [m for m in history if m['role'] != 'system']
-
-response = client.messages.create(
-    model='claude-sonnet-4-6',
-    max_tokens=1024,
-    system=system_msg,
-    messages=messages
+req = urllib.request.Request(
+    "https://api.anthropic.com/v1/messages",
+    data=payload,
+    headers={
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    },
 )
-
-text = response.content[0].text
-print(text)
-" 2>/dev/null)
-
-    local exit_code=$?
-
-    # Fallback to curl if anthropic SDK not available
-    if [[ $exit_code -eq 42 ]]; then
-        local api_key="${ANTHROPIC_API_KEY:-}"
-        if [[ -z "$api_key" ]]; then
-            echo -e "\r    ${RED}ANTHROPIC_API_KEY not set. Add it to $ENV_FILE${NC}"
-            return 1
-        fi
-
-        local messages_json
-        messages_json=$(python3 -c "
-import json
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
-messages = [m for m in history if m['role'] != 'system']
-print(json.dumps(messages))
-")
-
-        local system_text
-        system_text=$(python3 -c "
-import json
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
-print(history[0]['content'] if history and history[0]['role'] == 'system' else '')
-")
-
-        local payload
-        payload=$(python3 -c "
-import json, sys
-messages = json.loads(sys.stdin.read())
-print(json.dumps({
-    'model': 'claude-sonnet-4-6',
-    'max_tokens': 1024,
-    'system': '''$(echo "$system_text" | head -c 2000 | sed "s/'/\\\\'/g")''',
-    'messages': messages
-}))
-" <<< "$messages_json")
-
-        response=$(curl -s "https://api.anthropic.com/v1/messages" \
-            -H "x-api-key: ${api_key}" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "$payload" 2>/dev/null | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-if 'content' in data and data['content']:
-    print(data['content'][0].get('text', ''))
-elif 'error' in data:
-    print('I apologize sir, but I encountered an error: ' + data['error'].get('message', 'unknown'))
-" 2>/dev/null)
-    fi
+try:
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read())
+    if data.get("content"):
+        print(data["content"][0].get("text", ""))
+except urllib.error.HTTPError as e:
+    try:
+        err = json.loads(e.read()).get("error", {}).get("message", str(e))
+    except Exception:
+        err = str(e)
+    print(f"I apologize sir, but the API returned an error: {err}")
+except Exception as e:
+    print(f"I appear to be having a moment, sir — {e}")
+' 2>/dev/null)
 
     echo -e "\r                              "  # Clear "thinking..."
 

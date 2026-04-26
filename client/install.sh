@@ -15,6 +15,19 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Resolve canonical source for binaries/hooks/config.
+# - When run from a packaged zip: $SCRIPT_DIR/bin, $SCRIPT_DIR/hooks, $SCRIPT_DIR/config exist.
+# - When run from the dev repo: those live one level up at $SCRIPT_DIR/../{bin,hooks,config}.
+if [[ -d "$SCRIPT_DIR/bin" ]]; then
+    SRC_BIN="$SCRIPT_DIR/bin"
+    SRC_HOOKS="$SCRIPT_DIR/hooks"
+    SRC_CONFIG="$SCRIPT_DIR/config"
+else
+    SRC_BIN="$SCRIPT_DIR/../bin"
+    SRC_HOOKS="$SCRIPT_DIR/../hooks"
+    SRC_CONFIG="$SCRIPT_DIR/../config"
+fi
+
 clear
 echo ""
 echo -e "${CYAN}${BOLD}"
@@ -141,14 +154,17 @@ echo ""
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/config" "$INSTALL_DIR/cache" "$INSTALL_DIR/hooks"
 
 # Copy binaries (rename to user's chosen name)
-for src_bin in "$SCRIPT_DIR"/bin/*; do
+for src_bin in "$SRC_BIN"/*; do
     if [[ -f "$src_bin" ]]; then
         bin_name=$(basename "$src_bin")
         # Replace "jarvis" with user's slug in filenames
         new_name="${bin_name//jarvis/$ASSISTANT_SLUG}"
         cp "$src_bin" "$INSTALL_DIR/bin/$new_name"
 
-        # Replace references in script content
+        # Replace references in script content. Note: ASSISTANT_DIR (the env var
+        # name) intentionally contains no "JARVIS"/"Jarvis"/"jarvis" substring,
+        # so this sed never mangles it. The internal var name stays consistent
+        # across all installs regardless of brand.
         sed -i.bak "s/jarvis/$ASSISTANT_SLUG/g; s/JARVIS/$ASSISTANT_NAME/g; s/Jarvis/$ASSISTANT_NAME/g" "$INSTALL_DIR/bin/$new_name"
         rm -f "$INSTALL_DIR/bin/$new_name.bak"
 
@@ -157,20 +173,32 @@ for src_bin in "$SCRIPT_DIR"/bin/*; do
 done
 
 # Copy hooks
-if [[ -d "$SCRIPT_DIR/hooks" ]]; then
-    cp "$SCRIPT_DIR"/hooks/*.sh "$INSTALL_DIR/hooks/" 2>/dev/null || true
+if [[ -d "$SRC_HOOKS" ]]; then
+    cp "$SRC_HOOKS"/*.sh "$INSTALL_DIR/hooks/" 2>/dev/null || true
+    # Rename + substitute in hooks too
+    for hook_orig in "$INSTALL_DIR"/hooks/*.sh; do
+        [[ -f "$hook_orig" ]] || continue
+        hook_name=$(basename "$hook_orig")
+        new_hook_name="${hook_name//jarvis/$ASSISTANT_SLUG}"
+        if [[ "$hook_name" != "$new_hook_name" ]]; then
+            mv "$hook_orig" "$INSTALL_DIR/hooks/$new_hook_name"
+        fi
+    done
     for hook in "$INSTALL_DIR"/hooks/*.sh; do
         [[ -f "$hook" ]] || continue
-        sed -i.bak "s/jarvis/$ASSISTANT_SLUG/g" "$hook"
+        sed -i.bak "s/jarvis/$ASSISTANT_SLUG/g; s/JARVIS/$ASSISTANT_NAME/g; s/Jarvis/$ASSISTANT_NAME/g" "$hook"
         rm -f "$hook.bak"
         chmod +x "$hook"
     done
 fi
 
-# Copy personality config with substitution
+# Copy personality config with substitution. Prefer the templated client
+# version (with {{PLACEHOLDERS}}); fall back to the canonical one.
 if [[ -f "$SCRIPT_DIR/.claude/personality.md" ]]; then
     sed "s/{{ASSISTANT_NAME}}/$ASSISTANT_NAME/g; s/{{ASSISTANT_SLUG}}/$ASSISTANT_SLUG/g; s/{{USER_NAME}}/$USER_NAME/g" \
         "$SCRIPT_DIR/.claude/personality.md" > "$INSTALL_DIR/config/personality.md"
+elif [[ -f "$SRC_CONFIG/personality.md" ]]; then
+    cp "$SRC_CONFIG/personality.md" "$INSTALL_DIR/config/personality.md"
 fi
 
 # Write settings.json
@@ -306,7 +334,7 @@ if [[ -n "$SHELL_RC" ]] && ! grep -q "${ASSISTANT_SLUG}/bin" "$SHELL_RC" 2>/dev/
     cat >> "$SHELL_RC" << EOF
 
 # ${ASSISTANT_NAME} Voice Assistant
-export ${ASSISTANT_SLUG^^}_DIR="\$HOME/.${ASSISTANT_SLUG}"
+export ASSISTANT_DIR="\$HOME/.${ASSISTANT_SLUG}"
 export PATH="\$HOME/.${ASSISTANT_SLUG}/bin:\$PATH"
 EOF
 fi

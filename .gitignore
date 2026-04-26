@@ -1,3 +1,4 @@
 config/.env
 cache/
 *.mp3
+dist/

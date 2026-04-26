@@ -27,9 +27,9 @@ import sounddevice as sd
 from openwakeword.model import Model
 
 # ─── Configuration ────────────────────────────────────────────────────
-JARVIS_DIR = Path(os.environ.get("JARVIS_DIR", Path.home() / ".jarvis"))
-BIN_DIR = JARVIS_DIR / "bin"
-LOG_DIR = JARVIS_DIR / "logs"
+ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", Path.home() / ".jarvis"))
+BIN_DIR = ASSISTANT_DIR / "bin"
+LOG_DIR = ASSISTANT_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Audio config
@@ -41,7 +41,7 @@ COOLDOWN_SECONDS = 3  # Prevent re-triggering immediately
 # Get assistant name from settings
 def get_assistant_name():
     try:
-        with open(JARVIS_DIR / "config" / "settings.json") as f:
+        with open(ASSISTANT_DIR / "config" / "settings.json") as f:
             return json.load(f).get("assistant_name", "Jarvis")
     except Exception:
         return "Jarvis"
@@ -172,7 +172,7 @@ def transcribe(audio_path):
         return None
 
     # Find model
-    model_path = JARVIS_DIR / "models" / "ggml-base.en.bin"
+    model_path = ASSISTANT_DIR / "models" / "ggml-base.en.bin"
     if not model_path.exists():
         log(f"Model not found at {model_path}")
         return None

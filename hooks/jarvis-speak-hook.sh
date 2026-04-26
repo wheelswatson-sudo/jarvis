@@ -8,11 +8,11 @@
 
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-STATE_FILE="$JARVIS_DIR/state.json"
-ENV_FILE="$JARVIS_DIR/config/.env"
-CONFIG_FILE="$JARVIS_DIR/config/settings.json"
-JARVIS_BIN="$JARVIS_DIR/bin/jarvis"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+STATE_FILE="$ASSISTANT_DIR/state.json"
+ENV_FILE="$ASSISTANT_DIR/config/.env"
+CONFIG_FILE="$ASSISTANT_DIR/config/settings.json"
+JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
 
 # Quick exit if JARVIS isn't installed
 [[ -f "$JARVIS_BIN" ]] || exit 0

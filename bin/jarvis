@@ -15,11 +15,11 @@
 
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-CONFIG_FILE="$JARVIS_DIR/config/settings.json"
-ENV_FILE="$JARVIS_DIR/config/.env"
-STATE_FILE="$JARVIS_DIR/state.json"
-CACHE_DIR="$JARVIS_DIR/cache"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+CONFIG_FILE="$ASSISTANT_DIR/config/settings.json"
+ENV_FILE="$ASSISTANT_DIR/config/.env"
+STATE_FILE="$ASSISTANT_DIR/state.json"
+CACHE_DIR="$ASSISTANT_DIR/cache"
 
 # Colors
 RED='\033[0;31m'
@@ -579,13 +579,13 @@ main() {
             greet
             ;;
         boot)
-            "$JARVIS_DIR/bin/jarvis-boot" "${2:-}"
+            "$ASSISTANT_DIR/bin/jarvis-boot" "${2:-}"
             ;;
         wake)
             # Pass through to jarvis-wake (e.g. "jarvis wake start", "jarvis wake stop")
             shift
             local subcmd="${1:-status}"
-            "$JARVIS_DIR/bin/jarvis-wake" "--$subcmd"
+            "$ASSISTANT_DIR/bin/jarvis-wake" "--$subcmd"
             ;;
 
         # ── Config ──
@@ -628,6 +628,13 @@ main() {
             load_env
             if [[ -n "${2:-}" ]]; then
                 speak_streaming "$2"
+            fi
+            ;;
+        --speak)
+            # Force-speak (ignores voice on/off state) — used by boot, --test, etc.
+            load_env
+            if [[ -n "${2:-}" ]]; then
+                speak "$2" "true"
             fi
             ;;
 
