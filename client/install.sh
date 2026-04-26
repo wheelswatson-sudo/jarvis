@@ -206,7 +206,7 @@ cat > "$INSTALL_DIR/config/settings.json" << EOF
 {
     "voice_id": "JBFqnCBsd6RMkjVDRZzb",
     "voice_name": "George",
-    "model_id": "eleven_multilingual_v2",
+    "model_id": "eleven_turbo_v2_5",
     "stability": 0.5,
     "similarity_boost": 0.85,
     "style": 0.2,

@@ -200,7 +200,7 @@ cat > "$SETTINGS_FILE" << EOF
 {
     "voice_id": "${voice_id}",
     "voice_name": "${voice_name}",
-    "model_id": "eleven_multilingual_v2",
+    "model_id": "eleven_turbo_v2_5",
     "stability": 0.5,
     "similarity_boost": 0.85,
     "style": 0.2,

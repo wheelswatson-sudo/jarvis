@@ -72,7 +72,7 @@ load_settings() {
 {
     "voice_id": "JBFqnCBsd6RMkjVDRZzb",
     "voice_name": "George",
-    "model_id": "eleven_multilingual_v2",
+    "model_id": "eleven_turbo_v2_5",
     "stability": 0.5,
     "similarity_boost": 0.85,
     "style": 0.2,
@@ -107,49 +107,41 @@ print('Updated $1 to $2')
 "
 }
 
-# ─── Text processing ──────────────────────────────────────────────────
-strip_markdown() {
-    python3 -c "
-import sys, re
-text = sys.stdin.read()
-# Remove code blocks
-text = re.sub(r'\`\`\`[\s\S]*?\`\`\`', '', text)
-# Remove inline code
-text = re.sub(r'\`[^\`]+\`', '', text)
-# Remove headers
-text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-# Remove bold/italic
-text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
-text = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', text)
-# Remove links, keep text
-text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-# Remove images
-text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', '', text)
-# Remove tables
-text = re.sub(r'\|.*\|', '', text)
-text = re.sub(r'^[-:| ]+$', '', text, flags=re.MULTILINE)
-# Remove bullet points
-text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
-# Remove numbered lists prefix
-text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
-# Remove blockquotes
-text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
-# Remove horizontal rules
-text = re.sub(r'^---+$', '', text, flags=re.MULTILINE)
-# Collapse whitespace
-text = re.sub(r'\n{3,}', '\n\n', text)
-text = text.strip()
-print(text)
-"
-}
+# Text processing for speech (acronym expansion, markdown stripping) is handled
+# inside the consolidated TTS Python helper below — no separate subprocesses.
 
-clean_for_speech() {
-    python3 -c "
-import sys, re
-text = sys.stdin.read()
+# ─── Speak function ────────────────────────────────────────────────────
+# Single Python invocation does everything: read settings, strip markdown,
+# expand acronyms, hash for cache, hit cache OR call ElevenLabs (urllib —
+# no extra subprocess), write the audio file, print its path on stdout.
+# Bash then plays the file. This collapses ~8 sequential `python3 -c` calls
+# down to one — saves ~300-400 ms per utterance on cold path.
+speak() {
+    local text="$1"
+    local force="${2:-false}"
 
-# Spell out common acronyms
-acronyms = {
+    # Voice on/off check stays in bash so the off path has zero subprocess overhead.
+    if [[ "$force" != "true" ]]; then
+        local state
+        state=$(get_voice_state)
+        if [[ "$state" == "off" ]]; then
+            return 0
+        fi
+    fi
+
+    [[ -z "$text" ]] && return 0
+    mkdir -p "$CACHE_DIR"
+
+    local audio_file
+    audio_file=$(
+        CACHE_DIR="$CACHE_DIR" \
+        CONFIG_FILE="$CONFIG_FILE" \
+        ELEVENLABS_API_KEY="${ELEVENLABS_API_KEY:-}" \
+        ASSISTANT_DIR="$ASSISTANT_DIR" \
+        python3 - "$text" <<'PYEOF'
+import hashlib, json, os, re, sys, urllib.request, urllib.error
+
+ACRONYMS = {
     'API': 'A P I', 'APIs': 'A P Is', 'CLI': 'C L I',
     'URL': 'U R L', 'URLs': 'U R Ls', 'JSON': 'Jason',
     'HTML': 'H T M L', 'CSS': 'C S S', 'SQL': 'sequel',
@@ -164,147 +156,140 @@ acronyms = {
     'PRs': 'P Rs', 'CI': 'C I', 'CD': 'C D',
     'TTS': 'T T S', 'STT': 'S T T', 'LLM': 'L L M',
     'GPT': 'G P T', 'TLS': 'T L S', 'TCP': 'T C P',
-    'IP': 'I P', 'DB': 'D B', 'HVAC': 'H vac',
+    'IP': 'I P', 'DB': 'D B',
     'CRM': 'C R M', 'ETA': 'E T A', 'FAQ': 'F A Q',
     'ASAP': 'A S A P', 'CEO': 'C E O', 'CTO': 'C T O',
     'CFO': 'C F O', 'COO': 'C O O', 'VP': 'V P',
 }
-for acr, spoken in acronyms.items():
-    text = re.sub(r'\b' + acr + r'\b', spoken, text)
 
-# Remove file paths
-text = re.sub(r'[~/][a-zA-Z0-9_./-]+', '', text)
-# Remove URLs
-text = re.sub(r'https?://\S+', '', text)
-# Clean up punctuation clusters
-text = re.sub(r'[(){}\[\]<>]', '', text)
-# Remove backtick fragments
-text = re.sub(r'\`+', '', text)
-# Collapse whitespace
-text = re.sub(r'  +', ' ', text)
-text = re.sub(r'\n{3,}', '\n\n', text)
-text = text.strip()
-print(text)
-"
-}
+def strip_markdown(t):
+    t = re.sub(r'```[\s\S]*?```', '', t)
+    t = re.sub(r'`[^`]+`', '', t)
+    t = re.sub(r'^#{1,6}\s+', '', t, flags=re.MULTILINE)
+    t = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', t)
+    t = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', t)
+    t = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', t)
+    t = re.sub(r'!\[([^\]]*)\]\([^)]+\)', '', t)
+    t = re.sub(r'\|.*\|', '', t)
+    t = re.sub(r'^[-:| ]+$', '', t, flags=re.MULTILINE)
+    t = re.sub(r'^\s*[-*+]\s+', '', t, flags=re.MULTILINE)
+    t = re.sub(r'^\s*\d+\.\s+', '', t, flags=re.MULTILINE)
+    t = re.sub(r'^>\s+', '', t, flags=re.MULTILINE)
+    t = re.sub(r'^---+$', '', t, flags=re.MULTILINE)
+    return re.sub(r'\n{3,}', '\n\n', t).strip()
 
-# ─── TTS Cache ─────────────────────────────────────────────────────────
-get_cache_key() {
-    echo -n "$1" | md5sum 2>/dev/null | cut -d' ' -f1 || echo -n "$1" | md5 2>/dev/null
-}
+def clean_for_speech(t, extra_acronyms):
+    acronyms = dict(ACRONYMS)
+    acronyms.update(extra_acronyms or {})
+    for acr, spoken in acronyms.items():
+        t = re.sub(r'\b' + re.escape(acr) + r'\b', spoken, t)
+    t = re.sub(r'[~/][a-zA-Z0-9_./-]+', '', t)
+    t = re.sub(r'https?://\S+', '', t)
+    t = re.sub(r'[(){}\[\]<>]', '', t)
+    t = re.sub(r'`+', '', t)
+    t = re.sub(r'  +', ' ', t)
+    return re.sub(r'\n{3,}', '\n\n', t).strip()
 
-check_cache() {
-    local key
-    key=$(get_cache_key "$1")
-    local cached="$CACHE_DIR/${key}.mp3"
-    if [[ -f "$cached" ]]; then
-        echo "$cached"
+text = sys.argv[1]
+cache_dir = os.environ['CACHE_DIR']
+api_key = os.environ.get('ELEVENLABS_API_KEY', '')
+
+with open(os.environ['CONFIG_FILE']) as f:
+    cfg = json.load(f)
+
+text = clean_for_speech(strip_markdown(text), cfg.get('extra_acronyms') or {})
+if len(text) > 5000:
+    text = text[:4990] + '... I shall spare you the remainder, sir.'
+if not text:
+    sys.exit(0)
+
+voice_id = cfg.get('voice_id', 'JBFqnCBsd6RMkjVDRZzb')
+model_id = cfg.get('model_id', 'eleven_turbo_v2_5')
+stability = cfg.get('stability', 0.5)
+similarity = cfg.get('similarity_boost', 0.85)
+style = cfg.get('style', 0.2)
+
+cache_key = hashlib.md5(f'{voice_id}:{model_id}:{text}'.encode()).hexdigest()
+audio_file = os.path.join(cache_dir, f'{cache_key}.mp3')
+
+if os.path.isfile(audio_file) and os.path.getsize(audio_file) > 0:
+    print(audio_file)
+    sys.exit(0)
+
+if not api_key:
+    print('NO_API_KEY', file=sys.stderr)
+    sys.exit(2)
+
+payload = json.dumps({
+    'text': text,
+    'model_id': model_id,
+    'voice_settings': {
+        'stability': stability,
+        'similarity_boost': similarity,
+        'style': style,
+    },
+}).encode()
+
+req = urllib.request.Request(
+    f'https://api.elevenlabs.io/v1/text-to-speech/{voice_id}',
+    data=payload,
+    headers={'xi-api-key': api_key, 'Content-Type': 'application/json'},
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = r.read()
+    with open(audio_file, 'wb') as f:
+        f.write(data)
+    print(audio_file)
+except urllib.error.HTTPError as e:
+    print(f'HTTP_{e.code}', file=sys.stderr)
+    try:
+        sys.stderr.write(e.read().decode('utf-8', errors='replace') + '\n')
+    except Exception:
+        pass
+    sys.exit(3)
+except Exception as e:
+    print(f'ERR:{e}', file=sys.stderr)
+    sys.exit(4)
+PYEOF
+    )
+    local rc=$?
+
+    if [[ $rc -eq 0 && -n "$audio_file" && -f "$audio_file" ]]; then
+        echo -e "${CYAN}JARVIS${NC} ${DIM}is speaking...${NC}"
+        afplay "$audio_file" 2>/dev/null || mpv --no-video --really-quiet "$audio_file" 2>/dev/null || {
+            echo -e "${RED}No audio player found.${NC}"
+            return 1
+        }
+        # Trim cache if it's getting big (best-effort, fire-and-forget).
+        local cache_size
+        cache_size=$(du -sm "$CACHE_DIR" 2>/dev/null | cut -f1)
+        if [[ "${cache_size:-0}" -gt 50 ]]; then
+            find "$CACHE_DIR" -name '*.mp3' -type f -exec stat -f '%m %N' {} \; 2>/dev/null \
+                | sort -rn | tail -n +20 | cut -d' ' -f2- | xargs -I {} rm -f {} 2>/dev/null
+        fi
         return 0
     fi
+
+    # Failure paths: API key missing, HTTP error, or other. Fall back to system voice.
+    if [[ $rc -eq 2 ]]; then
+        echo -e "${RED}ELEVENLABS_API_KEY not set.${NC}" >&2
+    else
+        echo -e "${YELLOW}Voice synthesis failed — falling back to system voice.${NC}" >&2
+    fi
+    say "$text" 2>/dev/null || true
     return 1
 }
 
-# ─── Speak function ────────────────────────────────────────────────────
-speak() {
-    local text="$1"
-    local force="${2:-false}"
-
-    # Check voice state (unless forced)
-    if [[ "$force" != "true" ]]; then
-        local state
-        state=$(get_voice_state)
-        if [[ "$state" == "off" ]]; then
-            return 0
-        fi
-    fi
-
-    local voice_id model_id stability similarity style
-    voice_id=$(get_setting "voice_id")
-    model_id=$(get_setting "model_id")
-    stability=$(get_setting "stability")
-    similarity=$(get_setting "similarity_boost")
-    style=$(get_setting "style")
-
-    # Process text for speech
-    text=$(echo "$text" | strip_markdown | clean_for_speech)
-
-    # Truncate if too long
-    if [[ ${#text} -gt 5000 ]]; then
-        text="${text:0:4990}... I shall spare you the remainder, sir."
-    fi
-
-    # Skip if empty
-    if [[ -z "$text" ]]; then
-        return 0
-    fi
-
-    mkdir -p "$CACHE_DIR"
-
-    # Check cache first
-    local cached_file
-    if cached_file=$(check_cache "${voice_id}:${text}"); then
-        afplay "$cached_file" 2>/dev/null || mpv --no-video "$cached_file" 2>/dev/null
-        return 0
-    fi
-
-    local cache_key audio_file
-    cache_key=$(get_cache_key "${voice_id}:${text}")
-    audio_file="$CACHE_DIR/${cache_key}.mp3"
-
-    echo -e "${CYAN}JARVIS${NC} ${DIM}is speaking...${NC}"
-
-    # Build JSON payload safely with python
-    local payload
-    payload=$(python3 -c "
-import json, sys
-text = sys.stdin.read()
-print(json.dumps({
-    'text': text,
-    'model_id': '${model_id}',
-    'voice_settings': {
-        'stability': ${stability},
-        'similarity_boost': ${similarity},
-        'style': ${style}
-    }
-}))
-" <<< "$text")
-
-    local http_code
-    http_code=$(curl -s -w "%{http_code}" \
-        "https://api.elevenlabs.io/v1/text-to-speech/${voice_id}" \
-        -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d "$payload" \
-        --output "$audio_file")
-
-    if [[ "$http_code" != "200" ]]; then
-        echo -e "${RED}Voice synthesis failed (HTTP $http_code).${NC}"
-        echo -e "${YELLOW}Falling back to system voice...${NC}"
-        say "$text" 2>/dev/null || true
-        rm -f "$audio_file"
-        return 1
-    fi
-
-    # Play audio
-    afplay "$audio_file" 2>/dev/null || mpv --no-video "$audio_file" 2>/dev/null || {
-        echo -e "${RED}No audio player found.${NC}"
-        return 1
-    }
-
-    # Cleanup — keep cache under 50MB
-    local cache_size
-    cache_size=$(du -sm "$CACHE_DIR" 2>/dev/null | cut -f1)
-    if [[ "${cache_size:-0}" -gt 50 ]]; then
-        ls -t "$CACHE_DIR"/*.mp3 2>/dev/null | tail -n +20 | xargs rm -f 2>/dev/null
-    fi
-}
-
 # ─── Streaming speak (sentence by sentence) ───────────────────────────
+# Split input into ~120-char sentence chunks (single Python call), then speak
+# each chunk. Each speak() invocation hits cache or fetches independently — for
+# large responses this gives the user audio while later chunks are still
+# downloading. Use jarvis --stream "long text" for this mode.
 speak_streaming() {
     local text="$1"
     local force="${2:-false}"
 
-    # Check voice state
     if [[ "$force" != "true" ]]; then
         local state
         state=$(get_voice_state)
@@ -313,18 +298,17 @@ speak_streaming() {
         fi
     fi
 
-    # Split into sentences and speak each one
-    echo "$text" | strip_markdown | clean_for_speech | python3 -c "
+    python3 -c '
 import sys, re
 text = sys.stdin.read().strip()
-# Split on sentence boundaries
-sentences = re.split(r'(?<=[.!?])\s+', text)
-# Group short sentences together (min ~40 chars per chunk for natural flow)
-chunks = []
-current = ''
+# Strip markdown noise so chunk splitting works on prose
+text = re.sub(r"```[\s\S]*?```", "", text)
+text = re.sub(r"`[^`]+`", "", text)
+sentences = re.split(r"(?<=[.!?])\s+", text)
+chunks, current = [], ""
 for s in sentences:
     if len(current) + len(s) < 120:
-        current = (current + ' ' + s).strip()
+        current = (current + " " + s).strip()
     else:
         if current:
             chunks.append(current)
@@ -333,7 +317,7 @@ if current:
     chunks.append(current)
 for chunk in chunks:
     print(chunk)
-" | while IFS= read -r sentence; do
+' <<< "$text" | while IFS= read -r sentence; do
         if [[ -n "$sentence" ]]; then
             speak "$sentence" "$force"
         fi
