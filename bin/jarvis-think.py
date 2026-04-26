@@ -454,12 +454,13 @@ def _load_config() -> dict:
         return {}
 
 
-def _build_system_prompt(history: list[dict], user_text: str) -> str:
-    """Personality + memory injection. Recomputed every turn so the most
-    relevant memories surface based on the current user query."""
-    base = ""
-    if history and history[0].get("role") == "system":
-        base = history[0].get("content") or ""
+def _build_system_prompt(data: dict, user_text: str) -> str:
+    """Personality + rolling-summary + memory injection. Recomputed every turn
+    so the most relevant memories surface based on the current user query."""
+    base = (data.get("system") or "").strip()
+    summary = (data.get("summary") or "").strip()
+    if summary:
+        base = f"{base}\n\n## Conversation summary so far\n{summary}".strip()
     mem = Memory()
     mem_block = mem.format_for_prompt(query=user_text, recent=8, relevant=5)
     if mem_block:
@@ -511,23 +512,103 @@ def _call_anthropic(api_key: str, model: str, system: str,
 
 
 # ── conversation persistence ──────────────────────────────────────────
-def _load_history() -> list[dict]:
+# On-disk format (cache/conversation.json):
+#   { "system":   "<personality>",
+#     "summary":  "<rolling memo of older turns, may be empty>",
+#     "messages": [ {"role": "user"|"assistant", "content": "..."}, ... ] }
+# Legacy list format `[{role, content}, ...]` is migrated on read.
+HISTORY_WINDOW = max(2, int(os.environ.get("JARVIS_HISTORY_WINDOW", "20")))
+SUMMARY_TRIGGER = max(HISTORY_WINDOW + 2, int(os.environ.get("JARVIS_SUMMARY_TRIGGER", "30")))
+SUMMARY_MODEL = os.environ.get("JARVIS_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
+
+
+def _empty_data() -> dict:
+    return {"system": "", "summary": "", "messages": []}
+
+
+def _load_history() -> dict:
     if not HISTORY_FILE.exists():
-        return []
+        return _empty_data()
     try:
         with HISTORY_FILE.open() as f:
-            return json.load(f)
+            raw = json.load(f)
     except Exception:
-        return []
+        return _empty_data()
+
+    # Migrate legacy list → dict on first read.
+    if isinstance(raw, list):
+        system = ""
+        messages: list[dict] = []
+        for m in raw:
+            if m.get("role") == "system":
+                system = m.get("content") or ""
+            elif m.get("role") in ("user", "assistant"):
+                messages.append({"role": m["role"], "content": m["content"]})
+        return {"system": system, "summary": "", "messages": messages}
+
+    raw.setdefault("system", "")
+    raw.setdefault("summary", "")
+    raw.setdefault("messages", [])
+    return raw
 
 
-def _save_history(history: list[dict]) -> None:
+def _save_history(data: dict) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Keep last 20 turns + system prompt
-    if len(history) > 21:
-        history = [history[0]] + history[-20:]
     with HISTORY_FILE.open("w") as f:
-        json.dump(history, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _maybe_summarize(data: dict, api_key: str) -> None:
+    """Compress older messages into a rolling memo when length exceeds trigger.
+    Mutates `data` in place. Failures are swallowed — we never lose history."""
+    messages = data.get("messages") or []
+    if len(messages) <= SUMMARY_TRIGGER:
+        return
+
+    # Keep the recent window, but advance the boundary so it begins on a user
+    # turn — Claude's API rejects message lists that don't start with `user`.
+    boundary = len(messages) - HISTORY_WINDOW
+    while boundary > 0 and messages[boundary].get("role") != "user":
+        boundary -= 1
+    if boundary <= 0:
+        return
+
+    to_summarize = messages[:boundary]
+    recent = messages[boundary:]
+    prior_summary = data.get("summary") or ""
+
+    transcript = "\n\n".join(
+        f"{m['role'].upper()}: {m.get('content', '')}" for m in to_summarize
+    )
+    prompt = (
+        "You are compressing an ongoing conversation between a user and an AI "
+        "assistant (JARVIS) into a running memo. Produce a tight third-person "
+        "summary that preserves: facts about the user, decisions made, ongoing "
+        "tasks, names, numbers, dates, and unresolved threads. Drop pleasantries "
+        "and verbatim phrasing. Aim for under 250 words.\n\n"
+        f"Existing memo (may be empty):\n{prior_summary or '(none yet)'}\n\n"
+        f"New conversation chunk to fold in:\n{transcript}\n\n"
+        "Return only the updated memo."
+    )
+
+    try:
+        resp = _call_anthropic(
+            api_key, SUMMARY_MODEL, "",
+            [{"role": "user", "content": prompt}], [],
+        )
+    except Exception as e:
+        sys.stderr.write(f"jarvis: summary skipped ({e})\n")
+        return
+
+    blocks = resp.get("content") or []
+    new_summary = "\n".join(
+        b.get("text", "") for b in blocks if b.get("type") == "text"
+    ).strip()
+    if not new_summary:
+        return
+
+    data["summary"] = new_summary
+    data["messages"] = recent
 
 
 # ── main turn ─────────────────────────────────────────────────────────
@@ -540,15 +621,27 @@ def run_turn(user_text: str) -> str:
     model = cfg.get("claude_model") or DEFAULT_MODEL
 
     history = _load_history()
+
+    # Seed personality on first turn so future turns + summaries have context.
+    if not history.get("system"):
+        try:
+            personality_path = ASSISTANT_DIR / "config" / "personality.md"
+            if personality_path.exists():
+                history["system"] = personality_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    # Compress old turns before this one if we're past the trigger.
+    _maybe_summarize(history, api_key)
+
     system = _build_system_prompt(history, user_text)
 
     # Working messages (tool round-trip) — does NOT touch persistent history
     # until the final assistant turn lands.
-    convo: list[dict] = []
-    for m in history:
-        if m.get("role") == "system":
-            continue
-        convo.append({"role": m["role"], "content": m["content"]})
+    convo: list[dict] = [
+        {"role": m["role"], "content": m["content"]}
+        for m in history.get("messages", [])
+    ]
     convo.append({"role": "user", "content": user_text})
 
     mem = Memory()
@@ -605,20 +698,8 @@ def run_turn(user_text: str) -> str:
 
     # Persist only the user/assistant text exchange — tool round-trip stays
     # ephemeral so conversation.json remains human-readable.
-    if not history:
-        # Seed system prompt for future turns. We store the BASE personality
-        # (without memory injection); _build_system_prompt re-derives memory
-        # injection on each call.
-        try:
-            personality_path = ASSISTANT_DIR / "config" / "personality.md"
-            base_system = personality_path.read_text(encoding="utf-8") if personality_path.exists() else ""
-        except Exception:
-            base_system = ""
-        if base_system:
-            history.append({"role": "system", "content": base_system})
-
-    history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": final_text})
+    history.setdefault("messages", []).append({"role": "user", "content": user_text})
+    history["messages"].append({"role": "assistant", "content": final_text})
     _save_history(history)
 
     return final_text or "I appear to be at a loss for words, sir."
