@@ -28,6 +28,30 @@ NC='\033[0m'
 # ─── Load env ──────────────────────────────────────────────────────────
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 
+# ─── Speak with Enter-to-interrupt barge-in ───────────────────────────
+# Background the speak; poll stdin for any keypress. If the user hits a key
+# we kill the speak script's afplay child (and the script itself). On macOS
+# bash 3.2 read -t fractional timeouts aren't supported, so we poll once a
+# second — interruption latency is up to ~1s, which is fine for skipping.
+speak_with_bargein() {
+    local text="$1"
+    [[ -z "$text" ]] && return 0
+
+    "$JARVIS_BIN" "$text" 2>/dev/null &
+    local speak_pid=$!
+
+    while kill -0 "$speak_pid" 2>/dev/null; do
+        if read -t 1 -s -n 1 _ </dev/tty 2>/dev/null; then
+            # Kill the audio first so it stops immediately, then the parent script
+            pkill -P "$speak_pid" 2>/dev/null || true
+            kill "$speak_pid" 2>/dev/null || true
+            echo -e "    ${DIM}(interrupted, sir)${NC}"
+            break
+        fi
+    done
+    wait "$speak_pid" 2>/dev/null || true
+}
+
 # ─── Conversation history ─────────────────────────────────────────────
 init_history() {
     if [[ ! -f "$HISTORY_FILE" ]]; then
@@ -78,7 +102,7 @@ think() {
                CONFIG_FILE="$CONFIG_FILE" \
                ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
                python3 -c '
-import json, os, sys, urllib.request, urllib.error
+import json, os, sys, time, urllib.request, urllib.error
 
 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 if not api_key:
@@ -88,7 +112,9 @@ if not api_key:
 with open(os.environ["HISTORY_FILE"]) as f:
     history = json.load(f)
 
-# Optional model override from settings.json
+# Optional model override from settings.json — default to Haiku for voice
+# latency; users can switch to Sonnet for quality via:
+#   jarvis --set claude_model claude-sonnet-4-6
 model = "claude-haiku-4-5-20251001"
 try:
     with open(os.environ["CONFIG_FILE"]) as f:
@@ -117,19 +143,38 @@ req = urllib.request.Request(
         "content-type": "application/json",
     },
 )
-try:
-    with urllib.request.urlopen(req, timeout=30) as r:
-        data = json.loads(r.read())
-    if data.get("content"):
-        print(data["content"][0].get("text", ""))
-except urllib.error.HTTPError as e:
+
+# Retry on 429/5xx with exponential backoff. Voice conversation is
+# interactive so we keep retries short — three attempts, ~1s + ~2s waits.
+last_err = None
+for attempt in range(3):
     try:
-        err = json.loads(e.read()).get("error", {}).get("message", str(e))
-    except Exception:
-        err = str(e)
-    print(f"I apologize sir, but the API returned an error: {err}")
-except Exception as e:
-    print(f"I appear to be having a moment, sir — {e}")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+        if data.get("content"):
+            print(data["content"][0].get("text", ""))
+        break
+    except urllib.error.HTTPError as e:
+        last_err = e
+        if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+            time.sleep(1 + attempt * 1.5)
+            continue
+        try:
+            err = json.loads(e.read()).get("error", {}).get("message", str(e))
+        except Exception:
+            err = str(e)
+        print(f"I apologize sir, but the API returned an error: {err}")
+        break
+    except (urllib.error.URLError, TimeoutError) as e:
+        last_err = e
+        if attempt < 2:
+            time.sleep(1 + attempt * 1.5)
+            continue
+        print(f"I cannot reach Claude at the moment, sir — {e}")
+        break
+    except Exception as e:
+        print(f"I appear to be having a moment, sir — {e}")
+        break
 ' 2>/dev/null)
 
     echo -e "\r                              "  # Clear "thinking..."
@@ -192,13 +237,12 @@ EOF
         echo -e "    ${CYAN}╔══════════════════════════════════════╗${NC}"
         echo -e "    ${CYAN}║${NC}   ${BOLD}JARVIS Conversation Mode${NC}           ${CYAN}║${NC}"
         echo -e "    ${CYAN}╚══════════════════════════════════════╝${NC}"
-        echo -e "    ${DIM}Press Enter to speak. Say \"goodbye\" to exit.${NC}"
+        echo -e "    ${DIM}Press Enter while JARVIS speaks to interrupt. Say \"goodbye\" to exit.${NC}"
         echo ""
 
-        "$JARVIS_BIN" "Conversation mode active, sir. I am listening." 2>/dev/null
+        speak_with_bargein "Conversation mode active, sir. I am listening."
 
         while true; do
-            # Listen
             local transcript
             transcript=$("$LISTEN_BIN" 2>/dev/null | tail -1)
 
@@ -208,20 +252,17 @@ EOF
 
             echo -e "    ${GREEN}You:${NC} $transcript"
 
-            # Check for exit
             if echo "$transcript" | grep -iqE "^(goodbye|exit|quit|stop|that will be all)"; then
-                "$JARVIS_BIN" "Very good, sir. Will that be all?" 2>/dev/null
+                speak_with_bargein "Very good, sir. Will that be all?"
                 echo -e "\n    ${DIM}Session ended.${NC}\n"
                 exit 0
             fi
 
-            # Think
             local response
             response=$(think "$transcript")
 
-            # Display + speak
             echo -e "    ${CYAN}JARVIS:${NC} $response"
-            "$JARVIS_BIN" "$response" 2>/dev/null
+            speak_with_bargein "$response"
             echo ""
         done
     else

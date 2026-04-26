@@ -20,6 +20,7 @@ import json
 import subprocess
 import tempfile
 import signal
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -252,11 +253,10 @@ def on_wake_detected():
 def main():
     log(f"JARVIS wake listener starting (assistant: {ASSISTANT_NAME})")
 
-    # Load OpenWakeWord with the pretrained "hey jarvis" model
     log("Loading wake word model...")
     try:
         model = Model(
-            wakeword_models=["hey_jarvis"],  # built-in pretrained model
+            wakeword_models=["hey_jarvis"],
             inference_framework="onnx",
         )
         log("Model loaded")
@@ -272,33 +272,31 @@ def main():
 
     log("Listening for 'Hey Jarvis'...")
 
-    last_trigger = 0
+    # Thread-safe signal from audio callback to main loop. Doing the
+    # conversation work (record/transcribe/respond) inside the audio callback
+    # blocks PortAudio's audio thread for 30+ seconds and risks deadlock when
+    # we try to open another InputStream from inside the first stream's
+    # callback. Instead the callback only flips a flag and stops the stream;
+    # the heavy lifting runs on the main thread.
+    wake_event = threading.Event()
+    last_trigger = [0.0]  # mutable for closure
 
     def audio_callback(indata, frames, time_info, status):
-        nonlocal last_trigger
-
         if status:
             log(f"Audio status: {status}")
 
-        # Convert to int16 mono
         audio = indata[:, 0] if indata.ndim > 1 else indata
         audio_int16 = (audio * 32767).astype(np.int16) if audio.dtype != np.int16 else audio
 
-        # Get prediction
         predictions = model.predict(audio_int16)
-
         for wakeword, score in predictions.items():
             if score > WAKE_THRESHOLD:
                 now = time.time()
-                if now - last_trigger > COOLDOWN_SECONDS:
-                    last_trigger = now
-                    # Trigger in main thread (safer than from audio callback)
-                    sd.stop()
-                    on_wake_detected()
-                    # Restart stream after handling
+                if now - last_trigger[0] > COOLDOWN_SECONDS:
+                    last_trigger[0] = now
+                    wake_event.set()
                     raise sd.CallbackStop()
 
-    # Continuous listening with restart capability
     while True:
         try:
             with sd.InputStream(
@@ -308,21 +306,23 @@ def main():
                 blocksize=CHUNK_SIZE,
                 callback=audio_callback,
             ):
-                while True:
+                # Park here until the callback flags a wake or the stream errors.
+                while not wake_event.is_set():
                     sd.sleep(100)
-        except sd.CallbackStop:
-            log("Stream stopped, restarting listener...")
+            # Stream is now closed (context-manager exit). Safe to record.
+            wake_event.clear()
+            on_wake_detected()
+            # brief pause prevents immediate re-trigger from our own playback tail
             time.sleep(0.5)
-            continue
         except KeyboardInterrupt:
             log("Stopped by user")
             break
         except Exception as e:
             log(f"Stream error: {e}")
+            wake_event.clear()
             time.sleep(2)
             continue
 
 if __name__ == "__main__":
-    # Handle SIGTERM gracefully (LaunchAgent stop)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     main()
