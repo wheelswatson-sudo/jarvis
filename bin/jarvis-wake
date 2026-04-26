@@ -11,11 +11,11 @@
 
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-VENV_PYTHON="$JARVIS_DIR/venv/bin/python3"
-LISTENER_PY="$JARVIS_DIR/bin/wake-listener.py"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+VENV_PYTHON="$ASSISTANT_DIR/venv/bin/python3"
+LISTENER_PY="$ASSISTANT_DIR/bin/wake-listener.py"
 LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/ai.jarvis.wake.plist"
-LOG_FILE="$JARVIS_DIR/logs/wake.log"
+LOG_FILE="$ASSISTANT_DIR/logs/wake.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,7 +25,7 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-mkdir -p "$JARVIS_DIR/logs"
+mkdir -p "$ASSISTANT_DIR/logs"
 
 # ─── Status check ──────────────────────────────────────────────────────
 check_running() {
@@ -60,8 +60,8 @@ start_service() {
     </array>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>JARVIS_DIR</key>
-        <string>${JARVIS_DIR}</string>
+        <key>ASSISTANT_DIR</key>
+        <string>${ASSISTANT_DIR}</string>
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>
@@ -142,13 +142,13 @@ install_deps() {
     done
 
     # Create venv
-    if [[ ! -d "$JARVIS_DIR/venv" ]]; then
-        python3 -m venv "$JARVIS_DIR/venv"
+    if [[ ! -d "$ASSISTANT_DIR/venv" ]]; then
+        python3 -m venv "$ASSISTANT_DIR/venv"
     fi
 
     # Install Python packages
-    "$JARVIS_DIR/venv/bin/pip" install --quiet --upgrade pip
-    "$JARVIS_DIR/venv/bin/pip" install --quiet openwakeword sounddevice numpy
+    "$ASSISTANT_DIR/venv/bin/pip" install --quiet --upgrade pip
+    "$ASSISTANT_DIR/venv/bin/pip" install --quiet openwakeword sounddevice numpy
 
     echo -e "${GREEN}✓ Dependencies installed${NC}"
     echo -e "${DIM}Now run: jarvis-wake --start${NC}"

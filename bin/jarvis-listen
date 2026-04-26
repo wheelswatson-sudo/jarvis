@@ -9,9 +9,9 @@
 
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-ENV_FILE="$JARVIS_DIR/config/.env"
-CACHE_DIR="$JARVIS_DIR/cache"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+ENV_FILE="$ASSISTANT_DIR/config/.env"
+CACHE_DIR="$ASSISTANT_DIR/cache"
 
 # Colors
 RED='\033[0;31m'
@@ -55,7 +55,7 @@ find_whisper_model() {
 
     # Check common locations
     for model_path in \
-        "$JARVIS_DIR/models/ggml-base.en.bin" \
+        "$ASSISTANT_DIR/models/ggml-base.en.bin" \
         "$prefix/models/ggml-base.en.bin" \
         "$HOME/.local/share/whisper-cpp/models/ggml-base.en.bin" \
         "/usr/local/share/whisper-cpp/models/ggml-base.en.bin"; do
@@ -122,14 +122,24 @@ record_until_enter() {
 
 record_until_silence() {
     local audio_file="$1"
+    local max_seconds="${LISTEN_MAX_SECONDS:-30}"
     echo ""
     echo -e "    ${CYAN}●${NC} ${BOLD}JARVIS is listening...${NC}"
-    echo -e "    ${DIM}I will stop when you pause speaking.${NC}"
+    echo -e "    ${DIM}I will stop when you pause speaking (max ${max_seconds}s).${NC}"
     echo ""
 
-    # Record until 2 seconds of silence
+    # Record until 2 seconds of silence — but cap total duration so we don't hang forever
     rec -q -r "$SAMPLE_RATE" -c "$CHANNELS" -b "$BIT_DEPTH" "$audio_file" \
-        silence 1 0.1 1% 1 2.0 1% 2>/dev/null
+        silence 1 0.1 1% 1 2.0 1% 2>/dev/null &
+    local rec_pid=$!
+
+    # Watchdog: kill rec if it runs too long
+    ( sleep "$max_seconds" && kill "$rec_pid" 2>/dev/null ) &
+    local watchdog_pid=$!
+
+    wait "$rec_pid" 2>/dev/null || true
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
 
     echo -e "    ${DIM}Recording stopped.${NC}"
 }
@@ -197,7 +207,7 @@ transcribe() {
 
 # ─── Download whisper model ───────────────────────────────────────────
 download_model() {
-    local model_dir="$JARVIS_DIR/models"
+    local model_dir="$ASSISTANT_DIR/models"
     mkdir -p "$model_dir"
 
     echo -e "${CYAN}Downloading whisper base.en model (~150MB)...${NC}"

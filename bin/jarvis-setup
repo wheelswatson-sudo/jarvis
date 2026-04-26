@@ -2,8 +2,8 @@
 # JARVIS — First-time setup wizard
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-CONFIG_DIR="$JARVIS_DIR/config"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+CONFIG_DIR="$ASSISTANT_DIR/config"
 ENV_FILE="$CONFIG_DIR/.env"
 SETTINGS_FILE="$CONFIG_DIR/settings.json"
 
@@ -34,7 +34,7 @@ echo -e "  ───────────────────────
 echo ""
 
 # ─── Create directories ───────────────────────────────────────────────
-mkdir -p "$CONFIG_DIR" "$JARVIS_DIR/cache"
+mkdir -p "$CONFIG_DIR" "$ASSISTANT_DIR/cache"
 
 # ─── ElevenLabs API Key ───────────────────────────────────────────────
 echo -e "${CYAN}Step 1/4:${NC} ElevenLabs API Key"
@@ -200,7 +200,7 @@ cat > "$SETTINGS_FILE" << EOF
 {
     "voice_id": "${voice_id}",
     "voice_name": "${voice_name}",
-    "model_id": "eleven_multilingual_v2",
+    "model_id": "eleven_turbo_v2_5",
     "stability": 0.5,
     "similarity_boost": 0.85,
     "style": 0.2,
@@ -216,7 +216,7 @@ echo ""
 
 # Source env and test
 source "$ENV_FILE"
-JARVIS_DIR="$JARVIS_DIR" "$(dirname "$0")/jarvis" --test
+ASSISTANT_DIR="$ASSISTANT_DIR" "$(dirname "$0")/jarvis" --test
 
 echo ""
 echo -e "  ${GREEN}╔══════════════════════════════════════════════════╗${NC}"

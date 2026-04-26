@@ -9,12 +9,12 @@
 
 set -euo pipefail
 
-JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
-ENV_FILE="$JARVIS_DIR/config/.env"
-PERSONALITY="$JARVIS_DIR/config/personality.md"
-JARVIS_BIN="$JARVIS_DIR/bin/jarvis"
-LISTEN_BIN="$JARVIS_DIR/bin/jarvis-listen"
-HISTORY_FILE="$JARVIS_DIR/cache/conversation.json"
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+ENV_FILE="$ASSISTANT_DIR/config/.env"
+PERSONALITY="$ASSISTANT_DIR/config/personality.md"
+JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
+LISTEN_BIN="$ASSISTANT_DIR/bin/jarvis-listen"
+HISTORY_FILE="$ASSISTANT_DIR/cache/conversation.json"
 
 # Colors
 RED='\033[0;31m'
@@ -28,132 +28,54 @@ NC='\033[0m'
 # ─── Load env ──────────────────────────────────────────────────────────
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 
-# ─── Conversation history ─────────────────────────────────────────────
-init_history() {
-    if [[ ! -f "$HISTORY_FILE" ]]; then
-        local system_prompt
-        system_prompt=$(cat "$PERSONALITY" 2>/dev/null || echo "You are JARVIS, an intelligent British AI assistant. Address the user as 'sir'. Be concise, witty, and helpful.")
+# ─── Speak with Enter-to-interrupt barge-in ───────────────────────────
+# Background the speak; poll stdin for any keypress. If the user hits a key
+# we kill the speak script's afplay child (and the script itself). On macOS
+# bash 3.2 read -t fractional timeouts aren't supported, so we poll once a
+# second — interruption latency is up to ~1s, which is fine for skipping.
+speak_with_bargein() {
+    local text="$1"
+    [[ -z "$text" ]] && return 0
 
-        python3 -c "
-import json
-system = '''$(echo "$system_prompt" | sed "s/'/\\\\'/g")'''
-history = [{'role': 'system', 'content': system}]
-with open('$HISTORY_FILE', 'w') as f:
-    json.dump(history, f, indent=2)
-"
-    fi
+    "$JARVIS_BIN" "$text" 2>/dev/null &
+    local speak_pid=$!
+
+    while kill -0 "$speak_pid" 2>/dev/null; do
+        if read -t 1 -s -n 1 _ </dev/tty 2>/dev/null; then
+            # Kill the audio first so it stops immediately, then the parent script
+            pkill -P "$speak_pid" 2>/dev/null || true
+            kill "$speak_pid" 2>/dev/null || true
+            echo -e "    ${DIM}(interrupted, sir)${NC}"
+            break
+        fi
+    done
+    wait "$speak_pid" 2>/dev/null || true
 }
 
-add_message() {
-    local role="$1"
-    local content="$2"
-    python3 -c "
-import json
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
-history.append({'role': '$role', 'content': '''$(echo "$content" | sed "s/'/\\\\'/g")'''})
-# Keep last 20 messages + system prompt
-if len(history) > 21:
-    history = [history[0]] + history[-20:]
-with open('$HISTORY_FILE', 'w') as f:
-    json.dump(history, f, indent=2)
-"
-}
+# ─── Think (delegates to jarvis-think.py for tool use + memory) ──────
+# History persistence and the API loop both live in jarvis-think.py now.
+# We keep this shell entry point thin so all the conversation logic is in
+# one place (Python) regardless of whether you reach it via voice loop,
+# --text, or the wake-listener.
+THINK_BIN="$ASSISTANT_DIR/bin/jarvis-think.py"
 
-# ─── Think (Claude API) ───────────────────────────────────────────────
 think() {
     local user_text="$1"
-
-    add_message "user" "$user_text"
 
     echo -ne "    ${DIM}JARVIS is thinking...${NC}"
 
     local response
-    response=$(python3 -c "
-import json, os, sys
-
-try:
-    from anthropic import Anthropic
-except ImportError:
-    # Fallback: use curl
-    sys.exit(42)
-
-client = Anthropic()
-
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
-
-system_msg = history[0]['content'] if history and history[0]['role'] == 'system' else ''
-messages = [m for m in history if m['role'] != 'system']
-
-response = client.messages.create(
-    model='claude-sonnet-4-6',
-    max_tokens=1024,
-    system=system_msg,
-    messages=messages
-)
-
-text = response.content[0].text
-print(text)
-" 2>/dev/null)
-
-    local exit_code=$?
-
-    # Fallback to curl if anthropic SDK not available
-    if [[ $exit_code -eq 42 ]]; then
-        local api_key="${ANTHROPIC_API_KEY:-}"
-        if [[ -z "$api_key" ]]; then
-            echo -e "\r    ${RED}ANTHROPIC_API_KEY not set. Add it to $ENV_FILE${NC}"
-            return 1
-        fi
-
-        local messages_json
-        messages_json=$(python3 -c "
-import json
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
-messages = [m for m in history if m['role'] != 'system']
-print(json.dumps(messages))
-")
-
-        local system_text
-        system_text=$(python3 -c "
-import json
-with open('$HISTORY_FILE', 'r') as f:
-    history = json.load(f)
-print(history[0]['content'] if history and history[0]['role'] == 'system' else '')
-")
-
-        local payload
-        payload=$(python3 -c "
-import json, sys
-messages = json.loads(sys.stdin.read())
-print(json.dumps({
-    'model': 'claude-sonnet-4-6',
-    'max_tokens': 1024,
-    'system': '''$(echo "$system_text" | head -c 2000 | sed "s/'/\\\\'/g")''',
-    'messages': messages
-}))
-" <<< "$messages_json")
-
-        response=$(curl -s "https://api.anthropic.com/v1/messages" \
-            -H "x-api-key: ${api_key}" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "$payload" 2>/dev/null | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-if 'content' in data and data['content']:
-    print(data['content'][0].get('text', ''))
-elif 'error' in data:
-    print('I apologize sir, but I encountered an error: ' + data['error'].get('message', 'unknown'))
-" 2>/dev/null)
-    fi
+    response=$(
+        HISTORY_FILE="$HISTORY_FILE" \
+        CONFIG_FILE="$CONFIG_FILE" \
+        ASSISTANT_DIR="$ASSISTANT_DIR" \
+        ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+        python3 "$THINK_BIN" "$user_text" 2>/dev/null
+    )
 
     echo -e "\r                              "  # Clear "thinking..."
 
     if [[ -n "$response" ]]; then
-        add_message "assistant" "$response"
         echo "$response"
     else
         echo "I appear to be having a moment, sir. Could you repeat that?"
@@ -188,7 +110,6 @@ EOF
             exit 0
             ;;
         --text)
-            init_history
             local text_input="${2:-}"
             if [[ -z "$text_input" ]]; then
                 echo -e "${RED}Usage: jarvis-converse --text \"your message\"${NC}"
@@ -203,20 +124,17 @@ EOF
             ;;
     esac
 
-    init_history
-
     if [[ "${1:-}" == "--loop" ]]; then
         echo ""
         echo -e "    ${CYAN}╔══════════════════════════════════════╗${NC}"
         echo -e "    ${CYAN}║${NC}   ${BOLD}JARVIS Conversation Mode${NC}           ${CYAN}║${NC}"
         echo -e "    ${CYAN}╚══════════════════════════════════════╝${NC}"
-        echo -e "    ${DIM}Press Enter to speak. Say \"goodbye\" to exit.${NC}"
+        echo -e "    ${DIM}Press Enter while JARVIS speaks to interrupt. Say \"goodbye\" to exit.${NC}"
         echo ""
 
-        "$JARVIS_BIN" "Conversation mode active, sir. I am listening." 2>/dev/null
+        speak_with_bargein "Conversation mode active, sir. I am listening."
 
         while true; do
-            # Listen
             local transcript
             transcript=$("$LISTEN_BIN" 2>/dev/null | tail -1)
 
@@ -226,20 +144,17 @@ EOF
 
             echo -e "    ${GREEN}You:${NC} $transcript"
 
-            # Check for exit
             if echo "$transcript" | grep -iqE "^(goodbye|exit|quit|stop|that will be all)"; then
-                "$JARVIS_BIN" "Very good, sir. Will that be all?" 2>/dev/null
+                speak_with_bargein "Very good, sir. Will that be all?"
                 echo -e "\n    ${DIM}Session ended.${NC}\n"
                 exit 0
             fi
 
-            # Think
             local response
             response=$(think "$transcript")
 
-            # Display + speak
             echo -e "    ${CYAN}JARVIS:${NC} $response"
-            "$JARVIS_BIN" "$response" 2>/dev/null
+            speak_with_bargein "$response"
             echo ""
         done
     else

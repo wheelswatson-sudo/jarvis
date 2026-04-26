@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Thin wrapper so jarvis_memory.py is callable as `jarvis-memory`.
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+exec python3 "$ASSISTANT_DIR/bin/jarvis_memory.py" "$@"
