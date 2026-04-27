@@ -26,7 +26,9 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # ─── Load env ──────────────────────────────────────────────────────────
+# Keychain takes precedence over .env when both exist; .env stays as fallback.
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+[[ -x "$ASSISTANT_DIR/bin/jarvis-secrets" ]] && eval "$("$ASSISTANT_DIR/bin/jarvis-secrets" --export 2>/dev/null)"
 
 # ─── Speak with Enter-to-interrupt barge-in ───────────────────────────
 # Background the speak; poll stdin for any keypress. If the user hits a key

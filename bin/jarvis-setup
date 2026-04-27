@@ -214,8 +214,9 @@ EOF
 echo -e "${CYAN}Step 4/4:${NC} Testing Voice"
 echo ""
 
-# Source env and test
+# Source env and test (Keychain → .env)
 source "$ENV_FILE"
+[[ -x "$(dirname "$0")/jarvis-secrets" ]] && eval "$("$(dirname "$0")/jarvis-secrets" --export 2>/dev/null)"
 ASSISTANT_DIR="$ASSISTANT_DIR" "$(dirname "$0")/jarvis" --test
 
 echo ""

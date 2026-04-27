@@ -70,7 +70,7 @@ if [[ -d "$SCRIPT_DIR/bin" ]]; then
     cp "$SCRIPT_DIR/config/personality.md" "$ASSISTANT_DIR/config/personality.md"
 else
     echo -e "  ${CYAN}Downloading from repository...${NC}"
-    for f in jarvis jarvis-boot jarvis-converse jarvis-listen jarvis-setup jarvis-wake wake-listener.py; do
+    for f in jarvis jarvis-boot jarvis-converse jarvis-listen jarvis-secrets jarvis-setup jarvis-wake wake-listener.py; do
         curl -fsSL "$REPO_URL/raw/main/bin/$f" -o "$ASSISTANT_DIR/bin/$f"
     done
     curl -fsSL "$REPO_URL/raw/main/hooks/jarvis-speak-hook.sh" -o "$ASSISTANT_DIR/hooks/jarvis-speak-hook.sh"

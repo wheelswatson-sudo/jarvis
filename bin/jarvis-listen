@@ -78,10 +78,9 @@ check_deps() {
     fi
 
     if ! command -v whisper-cpp &>/dev/null && ! command -v whisper-cli &>/dev/null && [[ ! -x "$(brew --prefix whisper-cpp 2>/dev/null)/bin/whisper-cli" ]]; then
-        # Check for OpenAI API key as fallback
-        if [[ -f "$ENV_FILE" ]]; then
-            source "$ENV_FILE"
-        fi
+        # Check for OpenAI API key as fallback (Keychain → .env)
+        [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+        [[ -x "$ASSISTANT_DIR/bin/jarvis-secrets" ]] && eval "$("$ASSISTANT_DIR/bin/jarvis-secrets" --export 2>/dev/null)"
         if [[ -z "${OPENAI_API_KEY:-}" ]]; then
             echo -e "${YELLOW}whisper-cpp not found. Using OpenAI Whisper API requires OPENAI_API_KEY.${NC}"
             echo -e "  For offline: ${CYAN}brew install whisper-cpp${NC}"

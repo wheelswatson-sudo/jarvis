@@ -58,11 +58,13 @@ with open('$STATE_FILE', 'w') as f:
 
 # ─── Load config ───────────────────────────────────────────────────────
 load_env() {
-    if [[ ! -f "$ENV_FILE" ]]; then
+    # Keychain takes precedence; .env stays as fallback.
+    [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+    [[ -x "$ASSISTANT_DIR/bin/jarvis-secrets" ]] && eval "$("$ASSISTANT_DIR/bin/jarvis-secrets" --export 2>/dev/null)"
+    if [[ -z "${ELEVENLABS_API_KEY:-}${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}" ]]; then
         echo -e "${RED}JARVIS is not configured.${NC} Run: jarvis-setup"
         exit 1
     fi
-    source "$ENV_FILE"
 }
 
 load_settings() {
