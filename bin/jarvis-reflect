@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""
+jarvis-reflect — distill recent episodes into structured lessons.
+
+Mechanical (non-LLM) reflection in v1: scans episode log for recurring patterns
+and emits candidate lessons. Lessons are merged into ~/.claude/memory/lessons.md
+with provenance tags so future cleanup can deprecate stale ones.
+
+Patterns detected:
+  - high_failure_rate: skill with n≥3 and success_rate < 0.7
+  - repeated_arg_failure: same args in ≥2 failed episodes within 24h
+  - new_skill: skill seen for the first time in last 24h
+  - latency_regression: p50 in last 7d ≥ 2× prior 7d (n≥3 in both)
+  - dormant_skill: success_rate ≥ 0.8 historically but unused for ≥14d
+
+Usage:
+  jarvis-reflect                  # write lessons to default path
+  jarvis-reflect --print          # print lessons (don't write)
+  jarvis-reflect --window 24h     # scan window (default: 24h)
+  jarvis-reflect --window 7d
+"""
+import argparse
+import json
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+HOME = Path.home()
+DEFAULT_LOG = HOME / ".jarvis/logs/episodes.jsonl"
+DEFAULT_MANIFEST = HOME / ".jarvis/skills/manifest.json"
+DEFAULT_LESSONS = HOME / ".claude/memory/lessons.md"
+
+
+def parse_ts(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def parse_window(s):
+    m = re.match(r"^(\d+)([hd])$", s.lower())
+    if not m:
+        raise ValueError(f"bad --window: {s}")
+    n, u = int(m.group(1)), m.group(2)
+    return timedelta(hours=n) if u == "h" else timedelta(days=n)
+
+
+def load_episodes(log_path):
+    if not log_path.exists():
+        return []
+    out = []
+    with log_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            out.append(e)
+    return out
+
+
+def detect_high_failure_rate(skills_in_manifest):
+    out = []
+    for s in skills_in_manifest:
+        if s["n"] >= 3 and s["success_rate"] < 0.70:
+            out.append({
+                "id_seed": f"highfail-{s['skill']}",
+                "skill": s["skill"],
+                "title": f"{s['skill']} failure rate {int(s['success_rate']*100)}% (n={s['n']})",
+                "pattern": f"{s['skill']} has succeeded {int(s['success_rate']*100)}% of the time across {s['n']} runs.",
+                "evidence": f"last failure: {s.get('last_failure_ts')}, args: {s.get('last_failure_args')}",
+                "recommendation": "Investigate root cause; consider adding input validation or retry logic.",
+            })
+    return out
+
+
+def detect_repeated_arg_failure(episodes, window):
+    cutoff = datetime.now(timezone.utc) - window
+    fails = [e for e in episodes if e.get("outcome") == "err" and parse_ts(e["ts"]) >= cutoff]
+    by_key = defaultdict(list)
+    for e in fails:
+        key = (e["skill"], json.dumps(e.get("args", []), sort_keys=True))
+        by_key[key].append(e)
+    out = []
+    for (skill, args_key), eps in by_key.items():
+        if len(eps) >= 2:
+            args = eps[0].get("args", [])
+            out.append({
+                "id_seed": f"repeatfail-{skill}-{args_key}",
+                "skill": skill,
+                "title": f"{skill} fails repeatedly with args {args}",
+                "pattern": f"{skill} called with {args} failed {len(eps)} times in last {format_window(window)}.",
+                "evidence": "; ".join(f"{e['ts']} exit={e.get('exit_code')}" for e in eps[-3:]),
+                "recommendation": f"Add validation that rejects this arg shape early, OR fix the underlying handler for {args}.",
+            })
+    return out
+
+
+def detect_new_skills(skills_in_manifest, window):
+    cutoff = datetime.now(timezone.utc) - window
+    out = []
+    for s in skills_in_manifest:
+        if not s.get("first_seen_ts"):
+            continue
+        if parse_ts(s["first_seen_ts"]) >= cutoff:
+            out.append({
+                "id_seed": f"newskill-{s['skill']}",
+                "skill": s["skill"],
+                "title": f"new skill observed: {s['skill']}",
+                "pattern": f"{s['skill']} appeared in episodes for the first time at {s['first_seen_ts']}.",
+                "evidence": f"n={s['n']}, success_rate={int(s['success_rate']*100)}%",
+                "recommendation": "Decide stakes level for jarvis-gate; consider documenting in capability registry.",
+            })
+    return out
+
+
+def detect_latency_regression(episodes):
+    now = datetime.now(timezone.utc)
+    cutoff_recent = now - timedelta(days=7)
+    cutoff_prior = now - timedelta(days=14)
+    by_skill = defaultdict(list)
+    for e in episodes:
+        if e.get("duration_ms"):
+            by_skill[e["skill"]].append(e)
+    out = []
+    for skill, eps in by_skill.items():
+        rec = [e["duration_ms"] for e in eps if parse_ts(e["ts"]) >= cutoff_recent]
+        prior = [e["duration_ms"] for e in eps if cutoff_prior <= parse_ts(e["ts"]) < cutoff_recent]
+        if len(rec) < 3 or len(prior) < 3:
+            continue
+        p50_rec = sorted(rec)[len(rec) // 2]
+        p50_prior = sorted(prior)[len(prior) // 2]
+        if p50_prior > 0 and p50_rec >= 2 * p50_prior:
+            out.append({
+                "id_seed": f"latency-{skill}",
+                "skill": skill,
+                "title": f"{skill} p50 latency doubled ({p50_prior}ms → {p50_rec}ms)",
+                "pattern": f"{skill} p50 latency went from {p50_prior}ms to {p50_rec}ms over the last week.",
+                "evidence": f"recent n={len(rec)}, prior n={len(prior)}",
+                "recommendation": "Profile the hot path; check for new external dependencies or unbounded loops.",
+            })
+    return out
+
+
+def detect_dormant_skills(skills_in_manifest):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+    out = []
+    for s in skills_in_manifest:
+        last = parse_ts(s["last_seen_ts"]) if s.get("last_seen_ts") else None
+        if last and last < cutoff and s["success_rate"] >= 0.8 and s["n"] >= 3:
+            days = (datetime.now(timezone.utc) - last).days
+            out.append({
+                "id_seed": f"dormant-{s['skill']}",
+                "skill": s["skill"],
+                "title": f"{s['skill']} dormant for {days}d (was reliable)",
+                "pattern": f"{s['skill']} has not run in {days} days, but historically succeeded {int(s['success_rate']*100)}%.",
+                "evidence": f"last run {s['last_seen_ts']}, n={s['n']}",
+                "recommendation": "Decide: deprecate, or re-engage if still in scope.",
+            })
+    return out
+
+
+def format_window(window):
+    if window.days >= 1:
+        return f"{window.days}d"
+    return f"{int(window.total_seconds() // 3600)}h"
+
+
+def stable_id(seed):
+    import hashlib
+    h = hashlib.sha1(seed.encode()).hexdigest()[:6]
+    return f"L-{h}"
+
+
+def render_lesson(l, today):
+    lid = stable_id(l["id_seed"])
+    return (
+        f"### {lid} · {today} · {l['title']}\n"
+        f"**Pattern:** {l['pattern']}\n"
+        f"**Evidence:** {l['evidence']}\n"
+        f"**Recommendation:** {l['recommendation']}\n"
+        f"**Status:** active\n"
+    )
+
+
+def merge_lessons(existing_text, new_lessons, today):
+    """Append new lessons that aren't already present (by id), under '## Active'.
+       Existing lessons are left untouched — pruning is a separate pass."""
+    existing_ids = set(re.findall(r"^### (L-[0-9a-f]+) ", existing_text or "", re.MULTILINE))
+    fresh = [l for l in new_lessons if stable_id(l["id_seed"]) not in existing_ids]
+    if not fresh:
+        return existing_text, 0
+
+    ACTIVE_MARKER = "<!-- JARVIS_LESSONS_ACTIVE -->"
+    DEPRECATED_MARKER = "<!-- JARVIS_LESSONS_DEPRECATED -->"
+
+    if not existing_text or "# Jarvis Lessons Learned" not in existing_text:
+        header = (
+            "# Jarvis Lessons Learned\n\n"
+            "_Auto-generated by jarvis-reflect. Active lessons sit under the first marker; deprecated under the second._\n"
+            "_Each lesson has a stable ID (sha1-derived) so re-runs are idempotent._\n\n"
+            "## Active\n"
+            f"{ACTIVE_MARKER}\n\n"
+            "## Deprecated\n"
+            f"{DEPRECATED_MARKER}\n"
+        )
+        existing_text = header
+
+    block = "\n".join(render_lesson(l, today) for l in fresh) + "\n"
+
+    if ACTIVE_MARKER in existing_text:
+        merged = existing_text.replace(ACTIVE_MARKER, ACTIVE_MARKER + "\n\n" + block, 1)
+    else:
+        # legacy file without marker — append at end
+        merged = existing_text.rstrip() + "\n\n" + block
+    return merged, len(fresh)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--log", default=os.environ.get("JARVIS_EPISODE_LOG", str(DEFAULT_LOG)))
+    ap.add_argument("--manifest", default=os.environ.get("JARVIS_SKILLS_MANIFEST", str(DEFAULT_MANIFEST)))
+    ap.add_argument("--out", default=os.environ.get("JARVIS_LESSONS", str(DEFAULT_LESSONS)))
+    ap.add_argument("--window", default="24h")
+    ap.add_argument("--print", action="store_true", help="print result instead of writing to lessons file")
+    args = ap.parse_args()
+
+    log_path = Path(args.log)
+    manifest_path = Path(args.manifest)
+    out_path = Path(args.out)
+    window = parse_window(args.window)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    episodes = load_episodes(log_path)
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"skills": []}
+    skills_in_manifest = manifest.get("skills", [])
+
+    candidates = (
+        detect_high_failure_rate(skills_in_manifest)
+        + detect_repeated_arg_failure(episodes, window)
+        + detect_new_skills(skills_in_manifest, window)
+        + detect_latency_regression(episodes)
+        + detect_dormant_skills(skills_in_manifest)
+    )
+
+    # Dedup by id
+    seen, deduped = set(), []
+    for c in candidates:
+        cid = stable_id(c["id_seed"])
+        if cid in seen:
+            continue
+        seen.add(cid)
+        deduped.append(c)
+
+    existing = out_path.read_text() if out_path.exists() else ""
+    merged, n_new = merge_lessons(existing, deduped, today)
+
+    if args.print:
+        sys.stdout.write(merged)
+        sys.stderr.write(f"\n[reflect] {len(deduped)} candidate lessons, {n_new} new since last run\n")
+        return
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(merged)
+    print(f"reflect: {len(deduped)} candidate lessons, {n_new} new appended to {out_path}")
+
+
+if __name__ == "__main__":
+    main()

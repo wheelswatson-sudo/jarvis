@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# jarvis-episode — append a structured execution event to ~/.jarvis/logs/episodes.jsonl
+#
+# This is the "spine" of Jarvis's metacognitive layer: every meaningful action
+# (skill invocation, tool call, autonomous-loop dispatch) writes one line here.
+# Reflection, success-rate tracking, and confidence gating all read from it.
+#
+# Usage:
+#   jarvis-episode <skill> <outcome> <exit_code> <duration_ms> [args_json] [notes]
+#
+# Outcomes: ok | err | skipped | partial
+# args_json: JSON array (default '[]')
+#
+# Optional env:
+#   JARVIS_CAPABILITY        — capability bucket (e.g., "pitch", "calendar")
+#   JARVIS_EPISODE_SESSION   — group id for related episodes (auto-set by jarvis-do)
+#   JARVIS_EPISODE_LOG       — override log path (for tests)
+#
+# Examples:
+#   jarvis-episode jarvis-fire-pitch ok 0 12340 '["dalton"]'
+#   JARVIS_CAPABILITY=pitch jarvis-episode jarvis-fire-pitch err 1 234 '["unknown"]' "bad slug"
+set -euo pipefail
+
+LOG="${JARVIS_EPISODE_LOG:-${HOME}/.jarvis/logs/episodes.jsonl}"
+mkdir -p "$(dirname "$LOG")"
+
+SKILL="${1:-}"
+OUTCOME="${2:-}"
+EXIT_CODE="${3:-0}"
+DURATION_MS="${4:-0}"
+ARGS_JSON="${5:-[]}"
+NOTES="${6:-}"
+
+if [[ -z "$SKILL" || -z "$OUTCOME" ]]; then
+  echo "Usage: jarvis-episode <skill> <outcome> <exit_code> <duration_ms> [args_json] [notes]" >&2
+  exit 1
+fi
+
+case "$OUTCOME" in
+  ok|err|skipped|partial) ;;
+  *)
+    echo "Unknown outcome: $OUTCOME (valid: ok|err|skipped|partial)" >&2
+    exit 1
+    ;;
+esac
+
+TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CAPABILITY="${JARVIS_CAPABILITY:-}"
+SESSION="${JARVIS_EPISODE_SESSION:-}"
+
+ENTRY=$(jq -nc \
+  --arg ts "$TS" \
+  --arg cap "$CAPABILITY" \
+  --arg skill "$SKILL" \
+  --argjson args "$ARGS_JSON" \
+  --arg outcome "$OUTCOME" \
+  --argjson exit_code "$EXIT_CODE" \
+  --argjson duration_ms "$DURATION_MS" \
+  --arg session "$SESSION" \
+  --arg notes "$NOTES" \
+  '{
+     ts:$ts,
+     capability:$cap,
+     skill:$skill,
+     args:$args,
+     outcome:$outcome,
+     exit_code:$exit_code,
+     duration_ms:$duration_ms,
+     session:$session,
+     notes:$notes
+   } | with_entries(select(.value != "" and .value != null))')
+
+echo "$ENTRY" >> "$LOG"

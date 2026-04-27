@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# jarvis-episode-status — read ~/.jarvis/logs/episodes.jsonl and summarize.
+#
+# Usage:
+#   jarvis-episode-status                       # summary: per-skill counts, success %, recent failures
+#   jarvis-episode-status --recent              # last 20 episodes (newest first)
+#   jarvis-episode-status --failures            # all err episodes
+#   jarvis-episode-status --skill=<name>        # filter to one skill
+#   jarvis-episode-status --capability=<name>   # filter to one capability bucket
+#   jarvis-episode-status --session=<id>        # all episodes in a session
+set -euo pipefail
+
+LOG="${JARVIS_EPISODE_LOG:-${HOME}/.jarvis/logs/episodes.jsonl}"
+
+if [[ ! -s "$LOG" ]]; then
+  echo "No episodes logged yet."
+  echo
+  echo "Wrap commands with: jarvis-do <skill> [args...]"
+  exit 0
+fi
+
+print_summary() {
+  echo "── Per-skill (n, ok/n, success %, last seen) ──"
+  jq -rs '
+    group_by(.skill)
+    | map({
+        skill: .[0].skill,
+        n: length,
+        ok: ([.[] | select(.outcome=="ok")] | length),
+        last_ts: (max_by(.ts).ts),
+        last_outcome: (max_by(.ts).outcome)
+      })
+    | sort_by(.skill)
+    | .[]
+    | [.skill, .n, "\(.ok)/\(.n)", "\((.ok * 100 / .n)|floor)%", .last_ts, .last_outcome]
+    | @tsv' "$LOG" \
+  | while IFS=$'\t' read -r skill n ratio pct last_ts last_outcome; do
+      printf "  %-30s n=%-5s %-9s %-5s last=%s (%s)\n" \
+        "$skill" "$n" "$ratio" "$pct" "$last_ts" "$last_outcome"
+    done
+}
+
+print_recent_failures() {
+  echo
+  echo "── Recent failures (last 5) ──"
+  local out
+  out=$(jq -c 'select(.outcome=="err")' "$LOG" | tail -5 \
+        | jq -r '"  \(.ts)  \(.skill)  exit=\(.exit_code)  args=\(.args|tostring)\((.notes // "") | if . == "" then "" else "  — " + . end)"')
+  if [[ -z "$out" ]]; then
+    echo "  (none)"
+  else
+    echo "$out"
+  fi
+}
+
+print_recent() {
+  echo "── Last 20 episodes (newest first) ──"
+  local reversed
+  if command -v tac >/dev/null 2>&1; then
+    reversed=$(tail -20 "$LOG" | tac)
+  else
+    reversed=$(tail -r "$LOG" | head -20)
+  fi
+  echo "$reversed" | jq -r '"\(.ts)  \(.outcome|ascii_upcase|.[0:3])  \(.skill)  \(.duration_ms)ms  args=\(.args|tostring)"'
+}
+
+print_failures() {
+  echo "── All failures ──"
+  jq -c 'select(.outcome=="err")' "$LOG" \
+    | jq -r '"  \(.ts)  \(.skill)  exit=\(.exit_code)  args=\(.args|tostring)\((.notes // "") | if . == "" then "" else "  — " + . end)"'
+}
+
+print_skill() {
+  local skill="$1"
+  echo "── Episodes for $skill ──"
+  jq -c --arg s "$skill" 'select(.skill==$s)' "$LOG" \
+    | jq -r '"\(.ts)  \(.outcome|ascii_upcase|.[0:3])  exit=\(.exit_code)  \(.duration_ms)ms  args=\(.args|tostring)"'
+}
+
+print_capability() {
+  local cap="$1"
+  echo "── Episodes for capability=$cap ──"
+  jq -c --arg c "$cap" 'select(.capability==$c)' "$LOG" \
+    | jq -r '"\(.ts)  \(.outcome|ascii_upcase|.[0:3])  \(.skill)  exit=\(.exit_code)  args=\(.args|tostring)"'
+}
+
+print_session() {
+  local sess="$1"
+  echo "── Episodes in session=$sess ──"
+  jq -c --arg s "$sess" 'select(.session==$s)' "$LOG" \
+    | jq -r '"\(.ts)  \(.outcome|ascii_upcase|.[0:3])  \(.skill)  \(.duration_ms)ms  args=\(.args|tostring)"'
+}
+
+MODE="${1:-summary}"
+case "$MODE" in
+  --recent)        print_recent ;;
+  --failures)      print_failures ;;
+  --skill=*)       print_skill "${MODE#--skill=}" ;;
+  --capability=*)  print_capability "${MODE#--capability=}" ;;
+  --session=*)     print_session "${MODE#--session=}" ;;
+  *)
+    print_summary
+    print_recent_failures
+    ;;
+esac

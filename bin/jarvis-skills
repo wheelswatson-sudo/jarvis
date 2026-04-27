@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# jarvis-skills — read the skill manifest and report.
+#
+# Usage:
+#   jarvis-skills                       # summary table
+#   jarvis-skills --regressing          # only skills flagged regressing
+#   jarvis-skills --skill=<name>        # full record for one skill
+#   jarvis-skills --json                # raw manifest JSON
+#   jarvis-skills --refresh             # rebuild manifest first, then print summary
+set -euo pipefail
+
+MANIFEST="${JARVIS_SKILLS_MANIFEST:-${HOME}/.jarvis/skills/manifest.json}"
+
+MODE="${1:-summary}"
+
+if [[ "$MODE" == "--refresh" ]]; then
+  "$(dirname "$0")/jarvis-skills-recompute" >/dev/null
+  MODE="summary"
+fi
+
+if [[ ! -s "$MANIFEST" ]]; then
+  echo "No manifest yet. Run: jarvis-skills-recompute"
+  exit 0
+fi
+
+print_summary() {
+  local generated total_episodes total_skills regressing_count
+  generated=$(jq -r '.generated_at' "$MANIFEST")
+  total_episodes=$(jq -r '.total_episodes' "$MANIFEST")
+  total_skills=$(jq -r '.total_skills' "$MANIFEST")
+  regressing_count=$(jq -r '.regressing_skills | length' "$MANIFEST")
+
+  echo "── Manifest (generated $generated) ──"
+  echo "  episodes: $total_episodes   skills: $total_skills   regressing: $regressing_count"
+  echo
+  echo "── Per-skill (n=total, ok/attempted, success% excludes skipped) ──"
+  jq -r '.skills | sort_by(-.n) | .[] |
+    [.skill, .n, "\(.ok)/\(.n_attempted)", "\(.success_rate * 100 | floor)%", (.p50_latency_ms // "?"|tostring) + "ms", .trend_7d, .skipped, .last_seen_ts]
+    | @tsv' "$MANIFEST" \
+    | while IFS=$'\t' read -r skill n ratio pct p50 trend skipped last; do
+        sk=""
+        if [[ "$skipped" -gt 0 ]]; then sk="(skip=$skipped) "; fi
+        printf "  %-28s n=%-4s %-9s %-5s p50=%-7s %-17s %slast=%s\n" \
+          "$skill" "$n" "$ratio" "$pct" "$p50" "$trend" "$sk" "$last"
+      done
+}
+
+print_regressing() {
+  local count
+  count=$(jq -r '.regressing_skills | length' "$MANIFEST")
+  if [[ "$count" -eq 0 ]]; then
+    echo "No regressing skills."
+    return
+  fi
+  echo "── Regressing skills (success rate dropped ≥20pp vs prior week) ──"
+  jq -r --argjson r "$(jq '.regressing_skills' "$MANIFEST")" '
+    .skills[]
+    | select(.skill as $s | $r | index($s))
+    | "  \(.skill)  n=\(.n)  succ=\(.success_rate*100|floor)%  last_failure=\(.last_failure_ts // "n/a")  args=\(.last_failure_args // [] | tostring)"' "$MANIFEST"
+}
+
+print_skill() {
+  local skill="$1"
+  jq --arg s "$skill" '.skills[] | select(.skill==$s)' "$MANIFEST"
+}
+
+case "$MODE" in
+  --regressing) print_regressing ;;
+  --skill=*)    print_skill "${MODE#--skill=}" ;;
+  --json)       cat "$MANIFEST" ;;
+  *)            print_summary ;;
+esac

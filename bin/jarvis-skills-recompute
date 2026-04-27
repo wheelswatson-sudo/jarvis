@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+jarvis-skills-recompute — read ~/.jarvis/logs/episodes.jsonl, write skill manifest.
+
+The manifest is Jarvis's procedural self-model: per-skill counts, success rates,
+latency percentiles, last success/failure timestamps, and a 7-day-vs-prior trend
+flag. Other tools (jarvis-gate, jarvis-reflect, session-brief) read from it.
+
+Usage:
+  jarvis-skills-recompute                  # write ~/.jarvis/skills/manifest.json
+  jarvis-skills-recompute --print          # print to stdout, don't write
+  jarvis-skills-recompute --log /path/x.jsonl --out /path/y.json   # custom paths
+
+Idempotent. Safe to run from cron and on-demand.
+"""
+import argparse
+import json
+import os
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+HOME = Path.home()
+DEFAULT_LOG = HOME / ".jarvis/logs/episodes.jsonl"
+DEFAULT_OUT = HOME / ".jarvis/skills/manifest.json"
+
+
+def parse_ts(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def percentile(values, p):
+    if not values:
+        return None
+    s = sorted(values)
+    k = (len(s) - 1) * (p / 100)
+    f = int(k)
+    c = min(f + 1, len(s) - 1)
+    if f == c:
+        return s[f]
+    return s[f] + (s[c] - s[f]) * (k - f)
+
+
+def trend(recent, prior, min_n=3, regress_drop=0.20, improve_gain=0.20):
+    rec_attempted = [e for e in recent if e["outcome"] in ("ok", "err", "partial")]
+    pri_attempted = [e for e in prior if e["outcome"] in ("ok", "err", "partial")]
+    if len(rec_attempted) < min_n or len(pri_attempted) < min_n:
+        return "insufficient_data"
+    r = sum(1 for e in rec_attempted if e["outcome"] == "ok") / len(rec_attempted)
+    p = sum(1 for e in pri_attempted if e["outcome"] == "ok") / len(pri_attempted)
+    if r - p <= -regress_drop:
+        return "regressing"
+    if r - p >= improve_gain:
+        return "improving"
+    return "stable"
+
+
+def build_manifest(log_path):
+    if not log_path.exists():
+        return {
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": str(log_path),
+            "total_episodes": 0,
+            "total_skills": 0,
+            "regressing_skills": [],
+            "skills": [],
+        }
+
+    by_skill = defaultdict(list)
+    total = 0
+    with log_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "skill" not in e or "outcome" not in e or "ts" not in e:
+                continue
+            by_skill[e["skill"]].append(e)
+            total += 1
+
+    now = datetime.now(timezone.utc)
+    cutoff_recent = now - timedelta(days=7)
+    cutoff_prior = now - timedelta(days=14)
+
+    skills = []
+    regressing = []
+    for skill, eps in sorted(by_skill.items()):
+        eps_sorted = sorted(eps, key=lambda e: e["ts"])
+        n = len(eps_sorted)
+        ok = sum(1 for e in eps_sorted if e["outcome"] == "ok")
+        err = sum(1 for e in eps_sorted if e["outcome"] == "err")
+        skipped = sum(1 for e in eps_sorted if e["outcome"] == "skipped")
+        partial = sum(1 for e in eps_sorted if e["outcome"] == "partial")
+
+        latencies = [e.get("duration_ms", 0) for e in eps_sorted if e.get("duration_ms")]
+        p50 = percentile(latencies, 50)
+        p95 = percentile(latencies, 95)
+
+        successes = [e for e in eps_sorted if e["outcome"] == "ok"]
+        failures = [e for e in eps_sorted if e["outcome"] == "err"]
+        last_success = successes[-1] if successes else None
+        last_failure = failures[-1] if failures else None
+
+        recent = [e for e in eps_sorted if parse_ts(e["ts"]) >= cutoff_recent]
+        prior = [e for e in eps_sorted if cutoff_prior <= parse_ts(e["ts"]) < cutoff_recent]
+        t = trend(recent, prior)
+
+        capabilities = sorted({e.get("capability", "") for e in eps_sorted if e.get("capability")})
+
+        n_attempted = ok + err + partial  # excludes skipped (gate-blocked, never executed)
+        entry = {
+            "skill": skill,
+            "capabilities": capabilities,
+            "n": n,
+            "n_attempted": n_attempted,
+            "ok": ok,
+            "err": err,
+            "skipped": skipped,
+            "partial": partial,
+            "success_rate": round(ok / n_attempted, 3) if n_attempted else 0.0,
+            "p50_latency_ms": int(p50) if p50 is not None else None,
+            "p95_latency_ms": int(p95) if p95 is not None else None,
+            "first_seen_ts": eps_sorted[0]["ts"],
+            "last_seen_ts": eps_sorted[-1]["ts"],
+            "last_success_ts": last_success["ts"] if last_success else None,
+            "last_failure_ts": last_failure["ts"] if last_failure else None,
+            "last_failure_args": last_failure.get("args") if last_failure else None,
+            "trend_7d": t,
+            "n_recent_7d": len(recent),
+        }
+        skills.append(entry)
+        if t == "regressing":
+            regressing.append(skill)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": str(log_path),
+        "total_episodes": total,
+        "total_skills": len(skills),
+        "regressing_skills": regressing,
+        "skills": skills,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--log", default=os.environ.get("JARVIS_EPISODE_LOG", str(DEFAULT_LOG)))
+    ap.add_argument("--out", default=os.environ.get("JARVIS_SKILLS_MANIFEST", str(DEFAULT_OUT)))
+    ap.add_argument("--print", action="store_true", help="print manifest to stdout instead of writing")
+    args = ap.parse_args()
+
+    log_path = Path(args.log)
+    manifest = build_manifest(log_path)
+
+    if args.print:
+        json.dump(manifest, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"wrote {out_path} — {manifest['total_skills']} skills, {manifest['total_episodes']} episodes, {len(manifest['regressing_skills'])} regressing")
+
+
+if __name__ == "__main__":
+    main()

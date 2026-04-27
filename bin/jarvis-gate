@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# jarvis-gate — confidence-gated abstention check before a side-effect action.
+#
+# The "control arm" of Jarvis's metacognitive loop (Nelson-Narens regulation):
+# given a proposed action and its stakes level, consult the skill manifest and
+# recent episode history; decide whether to proceed, require confirmation, or
+# block. Blocked decisions are themselves logged as episodes (outcome=skipped).
+#
+# Usage:
+#   jarvis-gate <skill> [stakes] [reason]
+#
+# Stakes (default: medium):
+#   low      — proceed unless very recent failure spree
+#   medium   — require success_rate ≥ 70% (or n < 3 with no failures)
+#   high     — require success_rate ≥ 90% AND interactive confirmation
+#
+# Exit codes:
+#   0  proceed
+#   1  blocked (caller should NOT execute the action)
+#   2  usage error
+#
+# Override env:
+#   JARVIS_AUTO_APPROVE=1   bypass interactive confirmation (use sparingly)
+#   JARVIS_GATE_STRICT=1    treat unknown skills as untrusted (default: cautious-permit)
+#   JARVIS_GATE_EXPLAIN=1   print decision + rationale to stderr
+#
+# Wiring example (in a side-effect script):
+#   ~/jarvis/bin/jarvis-gate jarvis-fire-pitch high "send to $CONTACT" || exit 1
+set -euo pipefail
+
+SKILL="${1:-}"
+STAKES="${2:-medium}"
+REASON="${3:-}"
+
+if [[ -z "$SKILL" ]]; then
+  echo "Usage: jarvis-gate <skill> [low|medium|high] [reason]" >&2
+  exit 2
+fi
+
+case "$STAKES" in
+  low|medium|high) ;;
+  *) echo "Invalid stakes: $STAKES (use low|medium|high)" >&2; exit 2 ;;
+esac
+
+MANIFEST="${JARVIS_SKILLS_MANIFEST:-${HOME}/.jarvis/skills/manifest.json}"
+EXPLAIN="${JARVIS_GATE_EXPLAIN:-0}"
+AUTO_APPROVE="${JARVIS_AUTO_APPROVE:-0}"
+STRICT="${JARVIS_GATE_STRICT:-0}"
+
+explain() {
+  if [[ "$EXPLAIN" == "1" ]]; then
+    echo "[gate] $*" >&2
+  fi
+}
+
+log_skip() {
+  local note="$1"
+  local args_json="[]"
+  if [[ -n "$REASON" ]]; then
+    args_json=$(jq -nc --arg r "$REASON" '[$r]')
+  fi
+  JARVIS_CAPABILITY="gate" "$(dirname "$0")/jarvis-episode" \
+    "$SKILL" "skipped" 0 0 "$args_json" "gate-blocked: $note" >/dev/null 2>&1 || true
+}
+
+# --- Read manifest stats for this skill ---
+N=0
+SUCCESS_RATE=1.0
+LAST_FAILURE_AGE_HR=99999
+RECENT_FAILS_24H=0
+
+if [[ -s "$MANIFEST" ]]; then
+  STATS=$(jq -r --arg s "$SKILL" '
+    (.skills[] | select(.skill == $s)) // null
+    | if . == null then "0\t1.0\tnull"
+      else
+        "\(.n)\t\(.success_rate)\t\(.last_failure_ts // "null")"
+      end
+  ' "$MANIFEST")
+  IFS=$'\t' read -r N SUCCESS_RATE LAST_FAIL_TS <<< "$STATS"
+
+  if [[ "$LAST_FAIL_TS" != "null" && -n "$LAST_FAIL_TS" ]]; then
+    NOW_EPOCH=$(date +%s)
+    FAIL_EPOCH=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_FAIL_TS" +%s 2>/dev/null || echo 0)
+    if [[ "$FAIL_EPOCH" != "0" ]]; then
+      LAST_FAILURE_AGE_HR=$(( (NOW_EPOCH - FAIL_EPOCH) / 3600 ))
+    fi
+  fi
+fi
+
+# Count failures in last 24h (cheap scan of episode log)
+EPISODE_LOG="${JARVIS_EPISODE_LOG:-${HOME}/.jarvis/logs/episodes.jsonl}"
+if [[ -s "$EPISODE_LOG" ]]; then
+  CUTOFF=$(date -u -v-1d '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '1 day ago' '+%Y-%m-%dT%H:%M:%SZ')
+  RECENT_FAILS_24H=$(jq -rc --arg s "$SKILL" --arg cutoff "$CUTOFF" \
+    'select(.skill == $s and .outcome == "err" and .ts >= $cutoff)' "$EPISODE_LOG" \
+    | wc -l | tr -d ' ')
+fi
+
+explain "skill=$SKILL stakes=$STAKES n=$N success_rate=$SUCCESS_RATE last_failure_age_hr=$LAST_FAILURE_AGE_HR recent_fails_24h=$RECENT_FAILS_24H"
+
+# --- Decision logic ---
+unknown=0
+if [[ "$N" == "0" ]]; then unknown=1; fi
+
+require_confirm=0
+block=0
+reason=""
+
+case "$STAKES" in
+  low)
+    # Block only on a very recent failure spree (3+ in 24h)
+    if [[ "$RECENT_FAILS_24H" -ge 3 ]]; then
+      block=1
+      reason="$RECENT_FAILS_24H failures in last 24h"
+    fi
+    ;;
+  medium)
+    if [[ "$unknown" == "1" ]]; then
+      if [[ "$STRICT" == "1" ]]; then
+        block=1
+        reason="unknown skill (strict mode)"
+      else
+        explain "unknown skill, proceeding (cautious-permit)"
+      fi
+    else
+      RATE_OK=$(python3 -c "print(1 if float('$SUCCESS_RATE') >= 0.70 else 0)")
+      if [[ "$RATE_OK" == "0" ]] && [[ "$N" -ge 3 ]]; then
+        block=1
+        reason="success_rate=$SUCCESS_RATE below 70% threshold (n=$N)"
+      elif [[ "$RECENT_FAILS_24H" -ge 2 ]]; then
+        block=1
+        reason="$RECENT_FAILS_24H failures in last 24h"
+      fi
+    fi
+    ;;
+  high)
+    if [[ "$unknown" == "1" ]]; then
+      if [[ "$STRICT" == "1" ]]; then
+        block=1
+        reason="unknown skill in high-stakes context (strict mode)"
+      else
+        require_confirm=1
+        reason="unknown skill in high-stakes context — requesting confirmation"
+      fi
+    else
+      RATE_OK=$(python3 -c "print(1 if float('$SUCCESS_RATE') >= 0.90 else 0)")
+      if [[ "$RATE_OK" == "0" ]] && [[ "$N" -ge 3 ]]; then
+        block=1
+        reason="high-stakes but success_rate=$SUCCESS_RATE below 90% (n=$N)"
+      elif [[ "$RECENT_FAILS_24H" -ge 1 ]]; then
+        block=1
+        reason="high-stakes and a failure occurred in last 24h"
+      else
+        require_confirm=1
+        reason="high-stakes confirmation"
+      fi
+    fi
+    ;;
+esac
+
+if [[ "$block" == "1" ]]; then
+  explain "BLOCK: $reason"
+  log_skip "$reason"
+  echo "jarvis-gate: BLOCKED ($reason)" >&2
+  echo "  override with: JARVIS_AUTO_APPROVE=1 (after manual review)" >&2
+  exit 1
+fi
+
+if [[ "$require_confirm" == "1" ]]; then
+  if [[ "$AUTO_APPROVE" == "1" ]]; then
+    explain "PROCEED (auto-approved): $reason"
+    exit 0
+  fi
+  if [[ ! -t 0 ]]; then
+    # Non-interactive context (autonomous-loop, cron) — must abort
+    explain "BLOCK: $reason (non-interactive, auto-approve not set)"
+    log_skip "$reason (non-interactive)"
+    echo "jarvis-gate: BLOCKED ($reason — non-interactive)" >&2
+    exit 1
+  fi
+  echo "jarvis-gate: $reason" >&2
+  if [[ -n "$REASON" ]]; then
+    echo "  proposed: $REASON" >&2
+  fi
+  echo "  skill: $SKILL  n=$N  success=$SUCCESS_RATE" >&2
+  read -p "  proceed? [y/N] " confirm
+  if [[ "${confirm:-N}" != [yY] ]]; then
+    explain "BLOCK: user declined"
+    log_skip "user declined"
+    exit 1
+  fi
+  explain "PROCEED: user confirmed"
+fi
+
+explain "PROCEED"
+exit 0

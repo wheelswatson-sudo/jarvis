@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# jarvis-do — run any command and log the execution as an episode.
+#
+# Wraps stdio transparently so interactive prompts (read, pbcopy, etc.) keep working.
+# Captures exit code and wall-clock duration; writes one episode event after.
+#
+# Usage:
+#   jarvis-do <command> [args...]
+#   jarvis-do --capability=pitch jarvis-fire-pitch dalton
+#   jarvis-do --capability=calendar jarvis-book "Tue 2pm"
+#
+# Optional flags:
+#   --capability=<name>   tag this episode with a capability bucket
+#
+# Optional env:
+#   JARVIS_EPISODE_SESSION  reuse an existing session id instead of generating
+#
+# Exit code is propagated from the wrapped command unchanged.
+set -euo pipefail
+
+CAPABILITY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --capability=*) CAPABILITY="${1#--capability=}"; shift ;;
+    --capability) CAPABILITY="$2"; shift 2 ;;
+    --) shift; break ;;
+    -h|--help)
+      sed -n '2,18p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "Unknown flag: $1" >&2
+      echo "Usage: jarvis-do [--capability=<name>] <command> [args...]" >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: jarvis-do [--capability=<name>] <command> [args...]" >&2
+  exit 2
+fi
+
+CMD="$1"; shift
+SKILL_NAME=$(basename "$CMD")
+
+if [[ $# -eq 0 ]]; then
+  ARGS_JSON="[]"
+else
+  ARGS_JSON=$(printf '%s\n' "$@" | jq -R . | jq -sc .)
+fi
+
+if ! command -v "$CMD" >/dev/null 2>&1 && [[ ! -x "$CMD" ]]; then
+  echo "jarvis-do: command not found: $CMD" >&2
+  exit 127
+fi
+
+SESSION="${JARVIS_EPISODE_SESSION:-$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z' | cut -c1-8)}"
+START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+
+set +e
+JARVIS_EPISODE_SESSION="$SESSION" "$CMD" "$@"
+EXIT_CODE=$?
+set -e
+
+END_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
+DURATION_MS=$(( END_MS - START_MS ))
+
+if [[ $EXIT_CODE -eq 0 ]]; then
+  OUTCOME="ok"
+else
+  OUTCOME="err"
+fi
+
+JARVIS_CAPABILITY="$CAPABILITY" \
+JARVIS_EPISODE_SESSION="$SESSION" \
+  "$(dirname "$0")/jarvis-episode" "$SKILL_NAME" "$OUTCOME" "$EXIT_CODE" "$DURATION_MS" "$ARGS_JSON" >/dev/null
+
+exit "$EXIT_CODE"
