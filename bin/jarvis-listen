@@ -207,15 +207,45 @@ transcribe() {
 # ─── Download whisper model ───────────────────────────────────────────
 download_model() {
     local model_dir="$ASSISTANT_DIR/models"
+    local model_path="$model_dir/ggml-base.en.bin"
+    local tmp_path="$model_path.partial"
     mkdir -p "$model_dir"
 
-    echo -e "${CYAN}Downloading whisper base.en model (~150MB)...${NC}"
-
+    # Pinned SHA256 of the upstream Git-LFS object for ggml-base.en.bin.
+    # Source: https://huggingface.co/ggerganov/whisper.cpp/raw/main/ggml-base.en.bin
+    local expected_sha="a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
     local model_url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
-    curl -L --progress-bar "$model_url" -o "$model_dir/ggml-base.en.bin"
 
-    if [[ -f "$model_dir/ggml-base.en.bin" ]]; then
-        echo -e "${GREEN}Model downloaded to $model_dir/ggml-base.en.bin${NC}"
+    echo -e "${CYAN}Downloading whisper base.en model (~150MB)...${NC}"
+    if ! curl -fL --progress-bar "$model_url" -o "$tmp_path"; then
+        rm -f "$tmp_path"
+        echo -e "${RED}Download failed.${NC}"
+        exit 1
+    fi
+
+    # Verify SHA256 before promoting the temp file to its final location.
+    local actual_sha
+    if command -v shasum &>/dev/null; then
+        actual_sha=$(shasum -a 256 "$tmp_path" | awk '{print $1}')
+    elif command -v sha256sum &>/dev/null; then
+        actual_sha=$(sha256sum "$tmp_path" | awk '{print $1}')
+    else
+        rm -f "$tmp_path"
+        echo -e "${RED}No SHA256 tool found (need shasum or sha256sum) — refusing to install unverified model.${NC}"
+        exit 1
+    fi
+
+    if [[ "$actual_sha" != "$expected_sha" ]]; then
+        rm -f "$tmp_path"
+        echo -e "${RED}SHA256 mismatch — refusing to install.${NC}"
+        echo -e "  expected: $expected_sha"
+        echo -e "  got:      $actual_sha"
+        exit 1
+    fi
+
+    mv "$tmp_path" "$model_path"
+    if [[ -f "$model_path" ]]; then
+        echo -e "${GREEN}Model downloaded and verified at $model_path${NC}"
     else
         echo -e "${RED}Download failed.${NC}"
         exit 1
@@ -224,8 +254,9 @@ download_model() {
 
 # ─── Main ──────────────────────────────────────────────────────────────
 main() {
-    # Load env if exists
+    # Load env if exists; layer Keychain values on top.
     [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+    [[ -x "$ASSISTANT_DIR/bin/jarvis-secrets" ]] && eval "$("$ASSISTANT_DIR/bin/jarvis-secrets" --export 2>/dev/null)"
 
     case "${1:-}" in
         --download-model)
