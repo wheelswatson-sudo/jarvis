@@ -20,6 +20,12 @@ CONFIG_FILE="$ASSISTANT_DIR/config/settings.json"
 ENV_FILE="$ASSISTANT_DIR/config/.env"
 STATE_FILE="$ASSISTANT_DIR/state.json"
 CACHE_DIR="$ASSISTANT_DIR/cache"
+TTS_LOG="$ASSISTANT_DIR/logs/tts.log"
+
+tts_log() {
+    mkdir -p "$(dirname "$TTS_LOG")" 2>/dev/null || true
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$TTS_LOG" 2>/dev/null || true
+}
 
 # Colors
 RED='\033[0;31m'
@@ -113,11 +119,12 @@ print('Updated $1 to $2')
 # inside the consolidated TTS Python helper below — no separate subprocesses.
 
 # ─── Speak function ────────────────────────────────────────────────────
-# Single Python invocation does everything: read settings, strip markdown,
-# expand acronyms, hash for cache, hit cache OR call ElevenLabs (urllib —
-# no extra subprocess), write the audio file, print its path on stdout.
-# Bash then plays the file. This collapses ~8 sequential `python3 -c` calls
-# down to one — saves ~300-400 ms per utterance on cold path.
+# Two-phase design: a single Python invocation does text processing (markdown
+# strip + acronym expansion + length cap) and cache lookup, printing either
+# `HIT <path>` for a populated cache file or `MISS <path>\n<payload-json>`
+# for a fresh fetch. Bash then either plays the cache (afplay, instant) or
+# streams from ElevenLabs's /stream endpoint piped through `tee → mpv stdin`,
+# starting playback on the first audio frame.
 speak() {
     local text="$1"
     local force="${2:-false}"
@@ -134,14 +141,13 @@ speak() {
     [[ -z "$text" ]] && return 0
     mkdir -p "$CACHE_DIR"
 
-    local audio_file
-    audio_file=$(
+    local plan
+    plan=$(
         CACHE_DIR="$CACHE_DIR" \
         CONFIG_FILE="$CONFIG_FILE" \
-        ELEVENLABS_API_KEY="${ELEVENLABS_API_KEY:-}" \
         ASSISTANT_DIR="$ASSISTANT_DIR" \
         python3 - "$text" <<'PYEOF'
-import hashlib, json, os, re, sys, urllib.request, urllib.error
+import hashlib, json, os, re, sys
 
 ACRONYMS = {
     'API': 'A P I', 'APIs': 'A P Is', 'CLI': 'C L I',
@@ -194,7 +200,6 @@ def clean_for_speech(t, extra_acronyms):
 
 text = sys.argv[1]
 cache_dir = os.environ['CACHE_DIR']
-api_key = os.environ.get('ELEVENLABS_API_KEY', '')
 
 with open(os.environ['CONFIG_FILE']) as f:
     cfg = json.load(f)
@@ -215,12 +220,8 @@ cache_key = hashlib.md5(f'{voice_id}:{model_id}:{text}'.encode()).hexdigest()
 audio_file = os.path.join(cache_dir, f'{cache_key}.mp3')
 
 if os.path.isfile(audio_file) and os.path.getsize(audio_file) > 0:
-    print(audio_file)
+    print(f'HIT\t{audio_file}')
     sys.exit(0)
-
-if not api_key:
-    print('NO_API_KEY', file=sys.stderr)
-    sys.exit(2)
 
 payload = json.dumps({
     'text': text,
@@ -230,59 +231,84 @@ payload = json.dumps({
         'similarity_boost': similarity,
         'style': style,
     },
-}).encode()
-
-req = urllib.request.Request(
-    f'https://api.elevenlabs.io/v1/text-to-speech/{voice_id}',
-    data=payload,
-    headers={'xi-api-key': api_key, 'Content-Type': 'application/json'},
-)
-try:
-    with urllib.request.urlopen(req, timeout=20) as r:
-        data = r.read()
-    with open(audio_file, 'wb') as f:
-        f.write(data)
-    print(audio_file)
-except urllib.error.HTTPError as e:
-    print(f'HTTP_{e.code}', file=sys.stderr)
-    try:
-        sys.stderr.write(e.read().decode('utf-8', errors='replace') + '\n')
-    except Exception:
-        pass
-    sys.exit(3)
-except Exception as e:
-    print(f'ERR:{e}', file=sys.stderr)
-    sys.exit(4)
+})
+print(f'MISS\t{audio_file}\t{voice_id}')
+print(payload)
 PYEOF
     )
     local rc=$?
+    [[ $rc -ne 0 || -z "$plan" ]] && return 0  # empty/cleaned-to-zero-length text
 
-    if [[ $rc -eq 0 && -n "$audio_file" && -f "$audio_file" ]]; then
-        echo -e "${CYAN}JARVIS${NC} ${DIM}is speaking...${NC}"
+    local status audio_file voice_id payload
+    status=$(echo "$plan" | head -1 | cut -f1)
+    audio_file=$(echo "$plan" | head -1 | cut -f2)
+    voice_id=$(echo "$plan" | head -1 | cut -f3)
+    payload=$(echo "$plan" | tail -n +2)
+
+    # ── Cache hit: play instantly via afplay (or mpv fallback) ──
+    if [[ "$status" == "HIT" ]]; then
         afplay "$audio_file" 2>/dev/null || mpv --no-video --really-quiet "$audio_file" 2>/dev/null || {
             echo -e "${RED}No audio player found.${NC}"
             return 1
         }
-        # Trim cache if it's getting big (best-effort, fire-and-forget).
-        local cache_size
-        cache_size=$(du -sm "$CACHE_DIR" 2>/dev/null | cut -f1)
-        if [[ "${cache_size:-0}" -gt 50 ]]; then
-            find "$CACHE_DIR" -name '*.mp3' -type f -exec stat -f '%m %N' {} \; 2>/dev/null \
-                | sort -rn | tail -n +20 | cut -d' ' -f2- | xargs -I {} rm -f {} 2>/dev/null
-        fi
         return 0
     fi
 
-    # Failure paths: API key missing, HTTP error, or other. Fall back to system voice.
-    if [[ $rc -eq 2 ]]; then
+    # ── Cache miss: stream curl → mpv stdin for sub-second first-audio ──
+    if [[ -z "${ELEVENLABS_API_KEY:-}" ]]; then
+        tts_log "ELEVENLABS_API_KEY not set — falling back to say"
         echo -e "${RED}ELEVENLABS_API_KEY not set.${NC}" >&2
-    else
-        echo -e "${YELLOW}Voice synthesis failed — falling back to system voice.${NC}" >&2
+        say "$text" 2>/dev/null || true
+        return 1
     fi
-    say "$text" 2>/dev/null || true
-    return 1
-}
 
+    if ! command -v mpv >/dev/null 2>&1; then
+        tts_log "mpv not installed — streaming unavailable, falling back to say"
+        echo -e "${YELLOW}Install mpv for streaming TTS. Falling back to system voice...${NC}" >&2
+        say "$text" 2>/dev/null || true
+        return 1
+    fi
+
+    echo -e "${CYAN}JARVIS${NC} ${DIM}is speaking...${NC}"
+
+    local tmp_file curl_rc=0
+    tmp_file="${audio_file}.partial"
+    set +e
+    set +o pipefail
+    curl -sN --fail \
+            "https://api.elevenlabs.io/v1/text-to-speech/${voice_id}/stream?optimize_streaming_latency=2&output_format=mp3_44100_128" \
+            -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+        | tee "$tmp_file" \
+        | mpv --no-video --cache=no --really-quiet --no-terminal - 2>/dev/null
+    curl_rc="${PIPESTATUS[0]}"
+    set -e
+    set -o pipefail
+
+    if [[ "$curl_rc" -ne 0 ]]; then
+        rm -f "$tmp_file"
+        tts_log "ElevenLabs streaming failed (curl exit $curl_rc) — falling back to macOS say"
+        echo -e "${YELLOW}Voice synthesis failed — falling back to system voice.${NC}" >&2
+        say "$text" 2>/dev/null || true
+        return 1
+    fi
+
+    if [[ -s "$tmp_file" ]]; then
+        mv -f "$tmp_file" "$audio_file"
+    else
+        rm -f "$tmp_file"
+    fi
+
+    # Trim cache if it's getting big (best-effort, fire-and-forget).
+    local cache_size
+    cache_size=$(du -sm "$CACHE_DIR" 2>/dev/null | cut -f1)
+    if [[ "${cache_size:-0}" -gt 50 ]]; then
+        find "$CACHE_DIR" -name '*.mp3' -type f -exec stat -f '%m %N' {} \; 2>/dev/null \
+            | sort -rn | tail -n +20 | cut -d' ' -f2- | xargs -I {} rm -f {} 2>/dev/null
+    fi
+    return 0
+}
 # ─── Streaming speak (sentence by sentence) ───────────────────────────
 # Split input into ~120-char sentence chunks (single Python call), then speak
 # each chunk. Each speak() invocation hits cache or fetches independently — for
