@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# jarvis-hotkey — voice loop triggered by Hammerspoon (alt+cmd+J).
+#
+# Pipeline: jarvis-listen → claude -p (with JARVIS personality) → jarvis (speak).
+# Stateless: no conversation memory — for memory-aware mode use jarvis-converse.
+#
+# Hammerspoon binding (~/.hammerspoon/init.lua):
+#   hs.execute("/Users/watsonwheeler/jarvis/bin/jarvis-hotkey > /tmp/jarvis-hotkey.log 2>&1 &", true)
+#
+# Spec (per master_todo 2026-04-25):
+#   - Apple Silicon `/opt/homebrew` PATH fallback
+#   - 60s timeout on `claude -p`
+#   - JARVIS personality injected via `--append-system-prompt`
+set -euo pipefail
+
+# PATH portable to Intel + Apple Silicon
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
+PERSONALITY="$JARVIS_DIR/config/personality.md"
+SPEAK="$JARVIS_DIR/bin/jarvis"
+LISTEN="$HOME/jarvis/bin/jarvis-listen"
+
+# Load secrets (Keychain → .env fallback) so claude has ANTHROPIC_API_KEY if needed
+if [[ -x "$HOME/jarvis/bin/jarvis-secrets" ]]; then
+  eval "$("$HOME/jarvis/bin/jarvis-secrets" --export 2>/dev/null)" || true
+fi
+
+# 60s budget on the claude call — try gtimeout (coreutils), fall back to perl alarm
+run_with_timeout() {
+  local secs="$1"; shift
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  else
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  fi
+}
+
+speak() {
+  local text="$1"
+  [[ -z "$text" ]] && return 0
+  if [[ -x "$SPEAK" ]]; then
+    "$SPEAK" "$text" >/dev/null 2>&1 || true
+  else
+    say "$text" 2>/dev/null || true
+  fi
+}
+
+# 1. Listen — record + transcribe
+if [[ ! -x "$LISTEN" ]]; then
+  echo "jarvis-hotkey: $LISTEN not found or not executable" >&2
+  speak "I cannot hear you, sir. The listener is missing."
+  exit 1
+fi
+
+TRANSCRIPT=$("$LISTEN" --auto 2>/dev/null | tail -1 || true)
+
+if [[ -z "$TRANSCRIPT" ]]; then
+  echo "jarvis-hotkey: empty transcript, exiting silently"
+  exit 0
+fi
+
+echo "jarvis-hotkey: heard: $TRANSCRIPT"
+
+# 2. Think — claude -p with JARVIS personality
+PERSONA=""
+if [[ -f "$PERSONALITY" ]]; then
+  PERSONA=$(cat "$PERSONALITY")
+fi
+
+RESPONSE=""
+if [[ -n "$PERSONA" ]]; then
+  RESPONSE=$(run_with_timeout 60 claude -p "$TRANSCRIPT" --model haiku --append-system-prompt "$PERSONA" 2>&1) || true
+else
+  RESPONSE=$(run_with_timeout 60 claude -p "$TRANSCRIPT" --model haiku 2>&1) || true
+fi
+
+if [[ -z "$RESPONSE" ]] || echo "$RESPONSE" | grep -q "Not logged in"; then
+  echo "jarvis-hotkey: claude returned empty/failed: $RESPONSE"
+  speak "I appear to be having a moment, sir. The thinking failed."
+  exit 1
+fi
+
+echo "jarvis-hotkey: response: $RESPONSE"
+
+# 3. Speak
+speak "$RESPONSE"
