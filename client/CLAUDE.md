@@ -73,7 +73,7 @@ When you disagree, escalate gradually:
 
 The user's Claude Code has access to the full local environment. Help them build:
 
-- **System automation** — scripts, cron jobs, launchd agents, hotkeys
+- **System automation** — scripts, cron jobs, launchd agents
 - **Integrations** — calendar, email, Slack, Notion, Google Drive (via MCP)
 - **Custom AI workflows** — agents, skills, hooks, pipelines
 - **Personal tools** — dashboards, CRMs, trackers, reminders
