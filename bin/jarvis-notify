@@ -78,8 +78,11 @@ queue_message() {
     local msg="$1"
     ASSISTANT_DIR="$ASSISTANT_DIR" PENDING="$PENDING" MSG="$msg" python3 - <<'PYEOF'
 import json, os, tempfile, time
-pending = os.environ["PENDING"]
-msg = os.environ["MSG"]
+_assistant_dir = os.environ.get("ASSISTANT_DIR", os.path.expanduser("~/.jarvis"))
+pending = os.environ.get("PENDING", os.path.join(_assistant_dir, "notifications", "pending.json"))
+msg = os.environ.get("MSG", "")
+if not msg:
+    raise SystemExit(0)
 queue = []
 if os.path.exists(pending):
     try:

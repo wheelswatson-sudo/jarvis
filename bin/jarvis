@@ -234,9 +234,11 @@ def clean_for_speech(t, extra_acronyms):
     return re.sub(r'\n{3,}', '\n\n', t).strip()
 
 text = sys.argv[1]
-cache_dir = os.environ['CACHE_DIR']
+_assistant_dir = os.environ.get('ASSISTANT_DIR', os.path.expanduser('~/.jarvis'))
+cache_dir = os.environ.get('CACHE_DIR', os.path.join(_assistant_dir, 'cache'))
+config_file = os.environ.get('CONFIG_FILE', os.path.join(_assistant_dir, 'config', 'settings.json'))
 
-with open(os.environ['CONFIG_FILE']) as f:
+with open(config_file) as f:
     cfg = json.load(f)
 
 text = clean_for_speech(strip_markdown(text), cfg.get('extra_acronyms') or {})

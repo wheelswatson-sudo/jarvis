@@ -49,6 +49,13 @@ SCOPES = [
 ]
 
 
+GOOGLE_LIBS_INSTALL_HINT = (
+    "google-api-python-client not installed. "
+    "Run: pip install google-api-python-client google-auth-httplib2 "
+    "google-auth-oauthlib --break-system-packages"
+)
+
+
 def _try_import_google():
     """Lazy import — google-api-python-client is heavy. Returns the bag of
     handles or None on any failure. Each call to get_service() reuses cached
@@ -67,12 +74,20 @@ def _try_import_google():
             "HttpError": HttpError,
         }
     except ImportError as e:
-        sys.stderr.write(
-            f"jarvis-email: google-api-python-client missing ({e})\n"
-            "  pip install google-api-python-client google-auth-httplib2 "
-            "google-auth-oauthlib --break-system-packages\n"
-        )
+        sys.stderr.write(f"jarvis-email: {GOOGLE_LIBS_INSTALL_HINT} ({e})\n")
         return None
+
+
+GOOGLE_LIBS_AVAILABLE: bool = _try_import_google() is not None
+
+
+def _service_error() -> dict:
+    """Return the right diagnostic depending on whether libs are missing
+    or merely the auth token. Distinct messages so Claude can tell the user
+    what to actually fix."""
+    if not GOOGLE_LIBS_AVAILABLE:
+        return {"error": GOOGLE_LIBS_INSTALL_HINT}
+    return {"error": "gmail service unavailable — run `jarvis-email --auth`"}
 
 
 def _load_credentials():
@@ -172,7 +187,7 @@ def check_email(max_results: int = 5, query: str = "is:unread") -> dict:
         return gate
     svc, _ = _gmail_service()
     if svc is None:
-        return {"error": "gmail service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
     try:
         resp = svc.users().messages().list(
             userId="me", q=query, maxResults=max(1, min(int(max_results), 25)),
@@ -213,7 +228,7 @@ def draft_email(to: str, subject: str, body: str,
         return {"error": "to, subject, body all required"}
     svc, _ = _gmail_service()
     if svc is None:
-        return {"error": "gmail service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
     raw = _build_raw(to, subject, body)
     msg_body: dict = {"message": {"raw": raw}}
     if thread_id:
@@ -237,7 +252,7 @@ def list_drafts(max_results: int = 5) -> dict:
         return gate
     svc, _ = _gmail_service()
     if svc is None:
-        return {"error": "gmail service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
     try:
         resp = svc.users().drafts().list(
             userId="me", maxResults=max(1, min(int(max_results), 25)),
@@ -281,7 +296,7 @@ def send_email(draft_id: str | None = None,
         }
     svc, _ = _gmail_service()
     if svc is None:
-        return {"error": "gmail service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
     try:
         if draft_id:
             sent = svc.users().drafts().send(
@@ -312,7 +327,7 @@ def reply_email(thread_id: str, body: str, confirm: bool = False) -> dict:
         }
     svc, _ = _gmail_service()
     if svc is None:
-        return {"error": "gmail service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
     try:
         thread = svc.users().threads().get(
             userId="me", id=thread_id, format="metadata",

@@ -49,6 +49,13 @@ SCOPES = [
 ]
 
 
+GOOGLE_LIBS_INSTALL_HINT = (
+    "google-api-python-client not installed. "
+    "Run: pip install google-api-python-client google-auth-httplib2 "
+    "google-auth-oauthlib --break-system-packages"
+)
+
+
 def _try_import_google():
     try:
         from google.oauth2.credentials import Credentials  # type: ignore
@@ -56,12 +63,20 @@ def _try_import_google():
         from googleapiclient.discovery import build  # type: ignore
         return {"Credentials": Credentials, "Request": Request, "build": build}
     except ImportError as e:
-        sys.stderr.write(
-            f"jarvis-calendar: google-api-python-client missing ({e})\n"
-            "  install: pip install google-api-python-client google-auth-httplib2 "
-            "google-auth-oauthlib --break-system-packages\n"
-        )
+        sys.stderr.write(f"jarvis-calendar: {GOOGLE_LIBS_INSTALL_HINT} ({e})\n")
         return None
+
+
+GOOGLE_LIBS_AVAILABLE: bool = _try_import_google() is not None
+
+
+def _service_error() -> dict:
+    """Return libs-missing vs auth-missing diagnostic — distinct messages
+    so Claude can relay the actual fix instead of suggesting --auth when
+    the real issue is uninstalled packages."""
+    if not GOOGLE_LIBS_AVAILABLE:
+        return {"error": GOOGLE_LIBS_INSTALL_HINT}
+    return {"error": "calendar service unavailable — run `jarvis-email --auth`"}
 
 
 def _load_credentials():
@@ -214,7 +229,7 @@ def check_calendar(date: str | None = None, days: int = 1,
         return gate
     svc = _calendar_service()
     if svc is None:
-        return {"error": "calendar service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
 
     tz = _local_tz()
     if date:
@@ -260,7 +275,7 @@ def create_event(summary: str, start: str, end: str | None = None,
         return {"error": "summary and start required"}
     svc = _calendar_service()
     if svc is None:
-        return {"error": "calendar service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
 
     try:
         start_dt, end_default, all_day = _parse_when(start, default_duration_min=30)
@@ -309,7 +324,7 @@ def update_event(event_id: str, summary: str | None = None,
         return {"error": "event_id required"}
     svc = _calendar_service()
     if svc is None:
-        return {"error": "calendar service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
 
     patch: dict = {}
     if summary is not None:
@@ -372,7 +387,7 @@ def delete_event(event_id: str, confirm: bool = False,
         }
     svc = _calendar_service()
     if svc is None:
-        return {"error": "calendar service unavailable — run `jarvis-email --auth`"}
+        return _service_error()
     try:
         svc.events().delete(calendarId=calendar_id, eventId=event_id).execute()
     except Exception as e:
