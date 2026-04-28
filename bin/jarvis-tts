@@ -9,10 +9,12 @@
 set -euo pipefail
 
 VOICE_ID="JBFqnCBsd6RMkjVDRZzb"  # George
-MODEL_ID="eleven_multilingual_v2"
-STABILITY=0.5
-SIMILARITY=0.85
-STYLE=0.2
+# Defaults are env-overridable so naturalness tuning in one place (jarvis-tts
+# and bin/jarvis speak()) stays in sync. style=0 + use_speaker_boost=false
+# are pinned for the same naturalness reasons as the live speak path.
+MODEL_ID="${JARVIS_TTS_MODEL:-eleven_turbo_v2_5}"
+STABILITY="${JARVIS_TTS_STABILITY:-0.5}"
+SIMILARITY="${JARVIS_TTS_SIMILARITY:-0.7}"
 
 # Parse --voice
 while [[ $# -gt 0 ]] && [[ "$1" == --* ]]; do
@@ -57,10 +59,11 @@ print(json.dumps({
   'voice_settings': {
     'stability': float(sys.argv[3]),
     'similarity_boost': float(sys.argv[4]),
-    'style': float(sys.argv[5]),
+    'style': 0,
+    'use_speaker_boost': False,
   }
 }))
-" "$TEXT" "$MODEL_ID" "$STABILITY" "$SIMILARITY" "$STYLE")
+" "$TEXT" "$MODEL_ID" "$STABILITY" "$SIMILARITY")
 
 http_code=$(curl -s -o "$OUTFILE" -w "%{http_code}" \
   "https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}" \

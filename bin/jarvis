@@ -225,10 +225,21 @@ if not text:
     sys.exit(0)
 
 voice_id = cfg.get('voice_id', 'JBFqnCBsd6RMkjVDRZzb')
-model_id = cfg.get('model_id', 'eleven_turbo_v2_5')
-stability = cfg.get('stability', 0.5)
-similarity = cfg.get('similarity_boost', 0.85)
-style = cfg.get('style', 0.2)
+
+# Env vars override settings.json so users can A/B test naturalness
+# without rewriting config. style=0 + use_speaker_boost=false are the
+# naturalness sweet spot for Turbo v2.5: less style exaggeration, fewer
+# processing artifacts. stability=0.5 and similarity=0.7 balance
+# consistency against expressiveness.
+def _envf(name, fallback):
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return fallback
+
+model_id = os.environ.get('JARVIS_TTS_MODEL') or cfg.get('model_id') or 'eleven_turbo_v2_5'
+stability = _envf('JARVIS_TTS_STABILITY', cfg.get('stability', 0.5))
+similarity = _envf('JARVIS_TTS_SIMILARITY', cfg.get('similarity_boost', 0.7))
 
 cache_key = hashlib.md5(f'{voice_id}:{model_id}:{text}'.encode()).hexdigest()
 audio_file = os.path.join(cache_dir, f'{cache_key}.mp3')
@@ -243,7 +254,8 @@ payload = json.dumps({
     'voice_settings': {
         'stability': stability,
         'similarity_boost': similarity,
-        'style': style,
+        'style': 0,
+        'use_speaker_boost': False,
     },
 })
 print(f'MISS\t{audio_file}\t{voice_id}')
