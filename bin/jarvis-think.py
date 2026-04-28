@@ -1288,6 +1288,175 @@ def _with_history_cache_breakpoint(convo: list[dict]) -> list[dict]:
     return convo
 
 
+# ── Parallel thought streams (Innovation 2) ──────────────────────────
+# For open-ended / analytical queries, fire 3 Claude calls concurrently with
+# different framings, then a cheap Haiku judge picks the most helpful. Trades
+# 4× API spend for diverse perspectives on the kind of question that benefits
+# most from them. Simple queries (under 15 words, no analytical keyword) skip
+# this path entirely.
+_PARALLEL_KEYWORDS_RE = re.compile(
+    r'\b(should|how do i|how should|what do you think|what would you|'
+    r'what\'?s the best|best way|trade.?off|pros?\s+and\s+cons?|'
+    r'why (do|did|does|would|should)|recommend|suggest|advise|'
+    r'analyz[ei]|compare|opinion|approach|strategy)\b',
+    re.I,
+)
+PARALLEL_TIMEOUT_S = 8.0
+PARALLEL_LOG = ASSISTANT_DIR / "logs" / "parallel.log"
+
+
+def _is_complex_query(text: str) -> bool:
+    """Heuristic: long-enough message OR contains an analytical keyword."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    word_count = len(t.split())
+    if word_count > 15:
+        return True
+    return bool(_PARALLEL_KEYWORDS_RE.search(t))
+
+
+_STREAM_FRAMES = [
+    ("A", ""),
+    ("B", "\n\nThink creatively and offer unexpected angles. "
+          "Surface useful framings the obvious answer would miss."),
+    ("C", "\n\nPlay devil's advocate — lead with the strongest counter-argument "
+          "to the most likely default position. Then, only after, offer your honest take."),
+]
+
+
+def _stream_one_response(api_key: str, model: str, system_text: str,
+                        messages: list[dict], label: str) -> tuple[str, str]:
+    """One parallel stream — text only, no tools, single round. Returns
+    (label, text). Failures return (label, '') so the judge can skip."""
+    try:
+        text_acc = ""
+        for evt, payload in _stream_anthropic(api_key, model, system_text, messages, []):
+            if evt == "text_delta":
+                text_acc += payload
+            elif evt == "message_stop":
+                blocks = payload.get("blocks") or []
+                tps = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+                merged = "\n".join(t for t in tps if t).strip()
+                if merged:
+                    text_acc = merged
+                break
+        return label, text_acc
+    except Exception as e:
+        return label, ""
+
+
+def _judge_responses(api_key: str, user_text: str,
+                     candidates: list[tuple[str, str]]) -> str:
+    """Ask Haiku to pick the most helpful response. Returns 'A' / 'B' / 'C'.
+    On any error, default to 'A' (the analytical/normal stream)."""
+    valid = [(lbl, txt) for lbl, txt in candidates if txt.strip()]
+    if not valid:
+        return "A"
+    if len(valid) == 1:
+        return valid[0][0]
+
+    prompt_parts = [
+        f"User asked: {user_text!r}\n",
+        "Three candidate responses follow. Pick the one most helpful to the user.",
+        "Reply with a single letter (A, B, or C) and nothing else.\n",
+    ]
+    for lbl, txt in valid:
+        snippet = txt[:600] + ("…" if len(txt) > 600 else "")
+        prompt_parts.append(f"=== {lbl} ===\n{snippet}\n")
+    judge_prompt = "\n".join(prompt_parts)
+
+    body = {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 6,
+        "messages": [{"role": "user", "content": judge_prompt}],
+    }
+    payload = json.dumps(body).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return valid[0][0]
+
+    blocks = data.get("content") or []
+    txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip().upper()
+    for ch in txt:
+        if ch in ("A", "B", "C"):
+            return ch
+    return valid[0][0]
+
+
+def _log_parallel(user_text: str, candidates: list[tuple[str, str]],
+                  winner: str) -> None:
+    try:
+        PARALLEL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        entry = {
+            "ts": ts,
+            "user": user_text,
+            "winner": winner,
+            "candidates": [{"label": lbl, "text": txt} for lbl, txt in candidates],
+        }
+        with PARALLEL_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _parallel_think(api_key: str, model: str,
+                    system_blocks: list[dict],
+                    convo: list[dict]) -> str:
+    """Fire three Claude streams concurrently with different framings, then
+    have Haiku pick. Returns the winning response text. Tools intentionally
+    omitted — parallel mode targets open-ended analysis, not tool use."""
+    import concurrent.futures as cf
+
+    # Flatten system blocks back to a single string for the alternative
+    # streams since we're not using cache_control for these short-lived
+    # variants. Ordering preserved.
+    system_text = "\n\n".join(
+        b.get("text", "") for b in system_blocks if isinstance(b, dict) and b.get("type") == "text"
+    )
+
+    threads: list[cf.Future] = []
+    with cf.ThreadPoolExecutor(max_workers=3) as pool:
+        for label, addendum in _STREAM_FRAMES:
+            sys_text = (system_text + addendum).strip() if addendum else system_text
+            threads.append(pool.submit(
+                _stream_one_response, api_key, model, sys_text, list(convo), label,
+            ))
+        candidates: list[tuple[str, str]] = []
+        for fut in cf.as_completed(threads, timeout=PARALLEL_TIMEOUT_S + 1.0):
+            try:
+                candidates.append(fut.result(timeout=0.1))
+            except Exception:
+                pass
+
+    # Order candidates A-B-C for the judge prompt regardless of finish order
+    candidates.sort(key=lambda x: x[0])
+
+    winner_label = _judge_responses(api_key, convo[-1]["content"], candidates)
+    _log_parallel(convo[-1]["content"], candidates, winner_label)
+
+    for lbl, txt in candidates:
+        if lbl == winner_label and txt.strip():
+            return txt.strip()
+    # Fallback — first non-empty candidate
+    for _, txt in candidates:
+        if txt.strip():
+            return txt.strip()
+    return ""
+
+
 def run_turn(user_text: str) -> str:
     # Fast path — caller already has the response (e.g. speculator hit). Skip
     # the API entirely; just record the user/assistant exchange in history so
@@ -1338,6 +1507,28 @@ def run_turn(user_text: str) -> str:
 
     voice_stream = os.environ.get("JARVIS_VOICE_STREAM") == "1"
     feeder = _TTSFeeder() if voice_stream else None
+
+    # Parallel thought streams — for open-ended/analytical queries, fan out
+    # 3 calls with different framings, judge, return the winner. No tools
+    # in this path; complex analysis usually doesn't need them. Falls back
+    # to the standard tool loop if parallel mode produces nothing usable.
+    if (
+        os.environ.get("JARVIS_PARALLEL_THINK", "1") == "1"
+        and _is_complex_query(user_text)
+    ):
+        try:
+            parallel_text = _parallel_think(api_key, model, system, convo)
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: parallel mode failed ({e}); falling back\n")
+            parallel_text = ""
+        if parallel_text:
+            if feeder:
+                feeder.feed(parallel_text)
+                feeder.close()
+            history.setdefault("messages", []).append({"role": "user", "content": user_text})
+            history["messages"].append({"role": "assistant", "content": parallel_text})
+            _save_history(history)
+            return parallel_text
 
     final_text = ""
     try:
