@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# jarvis-tts — synthesize text to MP3 file via ElevenLabs (George voice).
+# Unlike `jarvis "<text>"` which plays through speakers, this saves to disk.
+#
+# Usage:
+#   jarvis-tts "your text here" output.mp3
+#   echo "text" | jarvis-tts - output.mp3
+#   jarvis-tts --voice <voice_id> "text" out.mp3
+set -euo pipefail
+
+VOICE_ID="JBFqnCBsd6RMkjVDRZzb"  # George
+MODEL_ID="eleven_multilingual_v2"
+STABILITY=0.5
+SIMILARITY=0.85
+STYLE=0.2
+
+# Parse --voice
+while [[ $# -gt 0 ]] && [[ "$1" == --* ]]; do
+  case "$1" in
+    --voice) VOICE_ID="$2"; shift 2;;
+    --model) MODEL_ID="$2"; shift 2;;
+    *) echo "Unknown flag: $1"; exit 1;;
+  esac
+done
+
+TEXT="${1:-}"
+OUTFILE="${2:-}"
+
+if [[ -z "$TEXT" || -z "$OUTFILE" ]]; then
+  echo "Usage: jarvis-tts \"text\" output.mp3"
+  echo "       echo text | jarvis-tts - output.mp3"
+  exit 1
+fi
+
+# Read from stdin if text == "-"
+if [[ "$TEXT" == "-" ]]; then
+  TEXT=$(cat)
+fi
+
+# Load API key
+if [[ -f ~/.jarvis/config/.env ]]; then
+  set -a; source ~/.jarvis/config/.env; set +a
+fi
+if [[ -z "${ELEVENLABS_API_KEY:-}" ]]; then
+  echo "ERROR: ELEVENLABS_API_KEY not set in ~/.jarvis/config/.env"
+  exit 1
+fi
+
+mkdir -p "$(dirname "$OUTFILE")"
+
+# Use python for clean JSON encoding
+PAYLOAD=$(python3 -c "
+import json, sys
+print(json.dumps({
+  'text': sys.argv[1],
+  'model_id': sys.argv[2],
+  'voice_settings': {
+    'stability': float(sys.argv[3]),
+    'similarity_boost': float(sys.argv[4]),
+    'style': float(sys.argv[5]),
+  }
+}))
+" "$TEXT" "$MODEL_ID" "$STABILITY" "$SIMILARITY" "$STYLE")
+
+http_code=$(curl -s -o "$OUTFILE" -w "%{http_code}" \
+  "https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}" \
+  -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD")
+
+if [[ "$http_code" != "200" ]]; then
+  echo "ERROR: ElevenLabs returned $http_code"
+  cat "$OUTFILE"
+  rm -f "$OUTFILE"
+  exit 1
+fi
+
+SIZE=$(wc -c < "$OUTFILE" | tr -d ' ')
+echo "✓ Wrote $OUTFILE ($SIZE bytes)"

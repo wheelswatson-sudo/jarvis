@@ -60,12 +60,21 @@ speak_with_bargein() {
 # We keep this shell entry point thin so all the conversation logic is in
 # one place (Python) regardless of whether you reach it via voice loop,
 # --text, or the wake-listener.
+#
+# Voice modes pass stream=1 so jarvis-think.py streams sentence-by-sentence
+# audio via its TTSFeeder while Claude is still generating. The caller MUST
+# skip its trailing TTS call when stream=1 — otherwise the response is spoken
+# twice. --text mode passes stream=0 (legacy: think returns full text, then
+# the shell speaks it once at the end).
 THINK_BIN="$ASSISTANT_DIR/bin/jarvis-think.py"
 
 think() {
     local user_text="$1"
+    local stream="${2:-0}"
 
-    echo -ne "    ${DIM}JARVIS is thinking...${NC}"
+    if [[ "$stream" != "1" ]]; then
+        echo -ne "    ${DIM}JARVIS is thinking...${NC}"
+    fi
 
     local response
     response=$(
@@ -73,10 +82,13 @@ think() {
         CONFIG_FILE="$CONFIG_FILE" \
         ASSISTANT_DIR="$ASSISTANT_DIR" \
         ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+        JARVIS_VOICE_STREAM="$stream" \
         python3 "$THINK_BIN" "$user_text" 2>/dev/null
     )
 
-    echo -e "\r                              "  # Clear "thinking..."
+    if [[ "$stream" != "1" ]]; then
+        echo -e "\r                              "  # Clear "thinking..."
+    fi
 
     if [[ -n "$response" ]]; then
         echo "$response"
@@ -153,15 +165,17 @@ EOF
                 exit 0
             fi
 
+            # Voice loop: stream sentence-by-sentence audio from think.py.
+            # think.py owns TTS (via its TTSFeeder) — we just print the final
+            # text for the transcript and DO NOT speak it again ourselves.
             local response
-            response=$(think "$transcript")
+            response=$(think "$transcript" 1)
 
             echo -e "    ${CYAN}JARVIS:${NC} $response"
-            speak_with_bargein "$response"
             echo ""
         done
     else
-        # One-shot mode
+        # One-shot mode (mic in, voice out — also streams).
         local transcript
         transcript=$("$LISTEN_BIN" 2>/dev/null | tail -1)
 
@@ -173,10 +187,9 @@ EOF
         echo -e "    ${GREEN}You:${NC} $transcript"
 
         local response
-        response=$(think "$transcript")
+        response=$(think "$transcript" 1)
 
         echo -e "    ${CYAN}JARVIS:${NC} $response"
-        "$JARVIS_BIN" "$response" 2>/dev/null
     fi
 }
 

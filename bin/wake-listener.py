@@ -279,8 +279,21 @@ def transcribe(audio_path):
         return None
 
 # ─── Send to Claude and speak response ────────────────────────────────
+# Generous ceiling for the full think + TTS pipeline. The previous 30s killed
+# any response whose streamed audio took longer than that, leaking the orphan
+# mpv/think children that then overlapped the next wake's response.
+RESPOND_TIMEOUT_SECONDS = 90
+
+
 def respond(user_text):
-    """Send to Claude via jarvis-converse --text and speak the response."""
+    """Send to Claude via jarvis-converse --text and speak the response.
+
+    Spawned in its own process group (start_new_session=True) so a timeout
+    can SIGKILL the entire pipeline — bash wrapper, jarvis-think.py, the
+    jarvis TTS streamer, mpv. Without this, subprocess.run only kills the
+    immediate bash child; orphaned mpv keeps playing and overlaps the next
+    response when the wake re-fires (the "multiple responses at once" bug).
+    """
     converse_bin = BIN_DIR / f"{ASSISTANT_SLUG}-converse"
     if not converse_bin.exists():
         converse_bin = BIN_DIR / "jarvis-converse"
@@ -291,13 +304,26 @@ def respond(user_text):
         return
 
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [str(converse_bin), "--text", user_text],
-            timeout=30,
-            check=False,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        log(f"Response delivered (exit {result.returncode})")
+    except Exception as e:
+        log(f"respond failed to spawn: {e}")
+        return
+
+    try:
+        rc = proc.wait(timeout=RESPOND_TIMEOUT_SECONDS)
+        log(f"Response delivered (exit {rc})")
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=2)
+        except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+            pass
+        log(f"respond timed out after {RESPOND_TIMEOUT_SECONDS}s — process group killed")
     except Exception as e:
         log(f"respond failed: {e}")
 

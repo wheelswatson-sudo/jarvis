@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# jarvis-book — print a Google Calendar create-event payload for a Jarvis install booking.
+#
+# Doesn't auto-create the event (calendar MCP isn't available from CLI).
+# Outputs the parameters for Claude to run create_event.
+#
+# Usage:
+#   jarvis-book dalton 2026-04-28T11:30 forge
+#   jarvis-book corbin 2026-04-29T13:00 forge
+#   jarvis-book karina 2026-04-27T10:00 spark
+set -euo pipefail
+
+CONTACT_SLUG="${1:-}"
+START="${2:-}"      # ISO local time (no Z), e.g. 2026-04-28T11:30
+TIER="${3:-forge}"
+
+if [[ -z "$CONTACT_SLUG" || -z "$START" ]]; then
+  echo "Usage: jarvis-book <slug> <ISO-start-MDT> <tier>"
+  echo "   ex: jarvis-book dalton 2026-04-28T11:30 forge"
+  echo "Tiers: spark (30m) | forge (90m) | atlas (90m)"
+  exit 1
+fi
+
+case "$CONTACT_SLUG" in
+  dalton) NAME="Dalton Locke"; EMAIL="dalton@daltonlocke.com" ;;
+  corbin) NAME="Corbin McCabe"; EMAIL="corbin.mccabe.biz@gmail.com" ;;
+  karina) NAME="Karina Gonzalez"; EMAIL="kajoxiiz@gmail.com" ;;
+  atomm)  NAME="Atomm Sol"; EMAIL="atommsolhl@gmail.com" ;;
+  josh)   NAME="Josh Bailey"; EMAIL="dublintrail@gmail.com" ;;
+  lena)   NAME="Lena Schapiro"; EMAIL="" ;;
+  *)      NAME="$CONTACT_SLUG"; EMAIL="" ;;
+esac
+
+case "$TIER" in
+  spark) DURATION=30 ;;
+  forge) DURATION=90 ;;
+  atlas) DURATION=90 ;;
+  *)     DURATION=60 ;;
+esac
+
+# Resolve timezone — TZ env var → systemsetup default → fallback to America/Denver.
+# Watson is MDT but ship-portable for buyers in other zones.
+TZ_RESOLVED="${JARVIS_TZ:-${TZ:-}}"
+if [[ -z "$TZ_RESOLVED" ]]; then
+  TZ_RESOLVED=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')
+fi
+[[ -z "$TZ_RESOLVED" ]] && TZ_RESOLVED="America/Denver"
+
+# Capitalize tier for display
+TIER_CAP="$(echo "$TIER" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
+
+END=$(python3 -c "
+from datetime import datetime, timedelta
+s = datetime.fromisoformat('$START')
+print((s + timedelta(minutes=$DURATION)).isoformat(timespec='minutes'))
+")
+
+if [[ -n "$EMAIL" ]]; then
+  ATTENDEES="[\"$EMAIL\"]"
+else
+  ATTENDEES="[]   # no email on file; attach manually if needed"
+fi
+
+cat << EOF
+═══ READY TO BOOK ═══
+
+Tell me (Claude): "Book $NAME for ${TIER_CAP} on $START"
+
+I'll then call:
+
+  create_event(
+    summary="Jarvis ${TIER_CAP} Install — ${NAME}",
+    startTime="${START}:00",
+    endTime="${END}:00",
+    timeZone="${TZ_RESOLVED}",
+    addGoogleMeetUrl=true,
+    description="Jarvis ${TIER_CAP} install for ${NAME}.",
+    attendeeEmails=${ATTENDEES},
+    notificationLevel="EXTERNAL_ONLY"
+  )
+
+After event creates, the Google Meet URL will come back.
+Send it to ${NAME} via iMessage to confirm.
+
+EOF

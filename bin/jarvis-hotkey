@@ -20,6 +20,9 @@ JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
 PERSONALITY="$JARVIS_DIR/config/personality.md"
 SPEAK="$JARVIS_DIR/bin/jarvis"
 LISTEN="$HOME/jarvis/bin/jarvis-listen"
+# Prefer dev bin (newer features land here first), fall back to deployed copy
+STREAMSPEAK="$HOME/jarvis/bin/jarvis-streamspeak"
+[[ -x "$STREAMSPEAK" ]] || STREAMSPEAK="$JARVIS_DIR/bin/jarvis-streamspeak"
 
 # Load secrets (Keychain → .env fallback) so claude has ANTHROPIC_API_KEY if needed
 if [[ -x "$HOME/jarvis/bin/jarvis-secrets" ]]; then
@@ -64,26 +67,59 @@ fi
 
 echo "jarvis-hotkey: heard: $TRANSCRIPT"
 
-# 2. Think — claude -p with JARVIS personality
+# 2. Think + Speak — streamed end-to-end so first audio plays while Claude is
+#    still generating later text. Pipeline:
+#      claude -p --output-format stream-json   (emits ndjson events)
+#        ↓
+#      jq -rj  → extracts text-delta strings, joined with no separator
+#        ↓
+#      jarvis-streamspeak  → buffers into sentences, pipes each to `jarvis --speak`
+#                             (which blocks per-sentence so audio serializes)
+#
+# We run claude with stderr captured so we can detect auth failures and fall
+# back to a friendly spoken error rather than silence. jq's text deltas get
+# echoed to stderr by jarvis-streamspeak, so the response shows up in the
+# Hammerspoon log alongside diagnostic output.
 PERSONA=""
-if [[ -f "$PERSONALITY" ]]; then
-  PERSONA=$(cat "$PERSONALITY")
-fi
+[[ -f "$PERSONALITY" ]] && PERSONA=$(cat "$PERSONALITY")
 
-RESPONSE=""
-if [[ -n "$PERSONA" ]]; then
-  RESPONSE=$(run_with_timeout 60 claude -p "$TRANSCRIPT" --model haiku --append-system-prompt "$PERSONA" 2>&1) || true
-else
-  RESPONSE=$(run_with_timeout 60 claude -p "$TRANSCRIPT" --model haiku 2>&1) || true
-fi
+JQ_FILTER='select(.event.type=="content_block_delta" and .event.delta.type=="text_delta") | .event.delta.text'
+ERR_FILE=$(mktemp -t jarvis-hotkey.XXXXXX)
 
-if [[ -z "$RESPONSE" ]] || echo "$RESPONSE" | grep -q "Not logged in"; then
-  echo "jarvis-hotkey: claude returned empty/failed: $RESPONSE"
-  speak "I appear to be having a moment, sir. The thinking failed."
+if [[ ! -x "$STREAMSPEAK" ]]; then
+  echo "jarvis-hotkey: $STREAMSPEAK not found — install jarvis-streamspeak first" >&2
+  speak "I am missing my streaming voice, sir."
+  rm -f "$ERR_FILE"
   exit 1
 fi
 
-echo "jarvis-hotkey: response: $RESPONSE"
+set +e
+if [[ -n "$PERSONA" ]]; then
+  run_with_timeout 60 claude -p --output-format stream-json --include-partial-messages \
+      "$TRANSCRIPT" --model haiku --append-system-prompt "$PERSONA" 2>"$ERR_FILE" \
+    | jq -rj "$JQ_FILTER" 2>/dev/null \
+    | "$STREAMSPEAK"
+else
+  run_with_timeout 60 claude -p --output-format stream-json --include-partial-messages \
+      "$TRANSCRIPT" --model haiku 2>"$ERR_FILE" \
+    | jq -rj "$JQ_FILTER" 2>/dev/null \
+    | "$STREAMSPEAK"
+fi
+PIPE_RC=${PIPESTATUS[0]}
+set -e
 
-# 3. Speak
-speak "$RESPONSE"
+if grep -q "Not logged in" "$ERR_FILE" 2>/dev/null; then
+  echo "jarvis-hotkey: claude auth failed — run 'claude setup-token' to refresh" >&2
+  speak "My credentials have lapsed, sir. Please run setup-token."
+  rm -f "$ERR_FILE"
+  exit 1
+fi
+
+if [[ "$PIPE_RC" -ne 0 ]]; then
+  echo "jarvis-hotkey: claude exited $PIPE_RC. stderr:" >&2
+  cat "$ERR_FILE" >&2
+  rm -f "$ERR_FILE"
+  exit "$PIPE_RC"
+fi
+
+rm -f "$ERR_FILE"
