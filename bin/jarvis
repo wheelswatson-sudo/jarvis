@@ -193,7 +193,16 @@ def clean_for_speech(t, extra_acronyms):
         t = re.sub(r'\b' + re.escape(acr) + r'\b', spoken, t)
     t = re.sub(r'[~/][a-zA-Z0-9_./-]+', '', t)
     t = re.sub(r'https?://\S+', '', t)
+    # Stash <break .../> SSML tags so the bracket-stripper below leaves
+    # them intact — ElevenLabs Turbo v2.5 honours them as natural pauses.
+    breaks = []
+    def _stash(m):
+        breaks.append(m.group(0))
+        return f'\x00B{len(breaks)-1}\x00'
+    t = re.sub(r'<break\b[^>]*/>', _stash, t)
     t = re.sub(r'[(){}\[\]<>]', '', t)
+    for i, b in enumerate(breaks):
+        t = t.replace(f'\x00B{i}\x00', b)
     t = re.sub(r'`+', '', t)
     t = re.sub(r'  +', ' ', t)
     return re.sub(r'\n{3,}', '\n\n', t).strip()

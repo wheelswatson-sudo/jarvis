@@ -742,6 +742,28 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
     return blocks
 
 
+# ── Voice markup post-processor ───────────────────────────────────────
+# Inserts ElevenLabs-supported <break time="..."/> SSML tags so the TTS
+# layer pauses where the writing pauses. Applied only to the final
+# assistant reply — never to tool inputs or persisted history.
+_BREAK_OPENER_RE = re.compile(
+    r'(?m)((?:^|(?<=[.!?])\s+)(?:Well,|Hmm,|Let me think,?))'
+)
+
+
+def _apply_voice_markup(text: str) -> str:
+    if not text or os.environ.get("JARVIS_VOICE_MARKUP", "1") != "1":
+        return text
+    # Ellipses (unicode … or three+ ASCII dots) → long thinking pause.
+    text = text.replace("…", '<break time="0.8s"/>')
+    text = re.sub(r"\.{3,}", '<break time="0.8s"/>', text)
+    # Em dash → short rhetorical pause.
+    text = text.replace("—", '<break time="0.3s"/>')
+    # Reflective sentence openers — pause after the comma.
+    text = _BREAK_OPENER_RE.sub(r'\1<break time="0.5s"/>', text)
+    return text
+
+
 # ── Anthropic API call ────────────────────────────────────────────────
 # We always stream (`stream: true`) so callers can fire TTS sentence-by-sentence
 # as text arrives. The blocking wrapper drains the stream and returns the same
@@ -1248,12 +1270,15 @@ def run_turn(user_text: str) -> str:
             feeder.close()
 
     # Persist only the user/assistant text exchange — tool round-trip stays
-    # ephemeral so conversation.json remains human-readable.
+    # ephemeral so conversation.json remains human-readable. History stores
+    # the raw text; voice markup is applied only on the way out so future
+    # turns don't see SSML tags in their context.
     history.setdefault("messages", []).append({"role": "user", "content": user_text})
     history["messages"].append({"role": "assistant", "content": final_text})
     _save_history(history)
 
-    return final_text or "I appear to be at a loss for words, sir."
+    reply = final_text or "I appear to be at a loss for words, sir."
+    return _apply_voice_markup(reply)
 
 
 def main(argv: list[str]) -> int:
