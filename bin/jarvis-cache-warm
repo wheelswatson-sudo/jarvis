@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# JARVIS — Pre-warm the TTS response cache.
+#
+# Iterates over a list of common short phrases (greetings, acknowledgements,
+# farewells) and primes each into the response-audio cache via
+# `jarvis --prewarm "<phrase>"`. Prewarm calls fetch from ElevenLabs without
+# playing back, so they cost API credits but no audio.
+#
+# After this runs once, those phrases play with zero TTS latency on every
+# subsequent use — speak() finds the cached MP3 and afplays it directly.
+#
+# Re-running is safe and idempotent: existing cache entries are skipped at
+# the HIT check inside speak(), so the only cost on a warm boot is one
+# Python helper invocation per phrase (no network).
+#
+# Gating:
+#   JARVIS_RESPONSE_CACHE=1 (default) — pre-warming runs
+#   JARVIS_RESPONSE_CACHE=0           — skipped (no cache priming, ad-hoc
+#                                       caching from speak() still works)
+#
+# Usage:
+#   jarvis-cache-warm                 # prime the default phrase set
+#   jarvis-cache-warm --list          # print phrases that would be warmed
+#   jarvis-cache-warm "extra phrase"  # warm a custom phrase
+#
+# Designed to be invoked once at wake-listener startup as a detached
+# subprocess. Total cost is bounded: ~25 short phrases × ~150ms ElevenLabs
+# = ~4s wall, but in the background it doesn't block voice.
+
+set -euo pipefail
+
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
+LOG="$ASSISTANT_DIR/logs/cache-warm.log"
+mkdir -p "$(dirname "$LOG")"
+
+[[ "${JARVIS_RESPONSE_CACHE:-1}" == "1" ]] || exit 0
+
+# ─── Phrase set ───────────────────────────────────────────────────────
+# Picked for two qualities: spoken often (each save matters) and stable
+# (the exact wording rarely changes). Time/date answers are intentionally
+# absent — they vary per call and would just churn the cache.
+PHRASES=(
+    # Greetings — boot/greet path
+    "Good morning, sir."
+    "Good afternoon, sir."
+    "Good evening, sir."
+    "Burning the midnight oil, sir?"
+    "Working late, sir. I trust it is for good reason."
+    "I am at your disposal."
+
+    # Acknowledgements — common micro-responses
+    "Got it."
+    "Done."
+    "Right away."
+    "Sure thing."
+    "Of course, sir."
+    "As you wish, sir."
+    "Very good, sir."
+    "I do try, sir."
+    "I shall be here, sir."
+    "I am at your disposal, sir."
+    "Will that be all, sir?"
+
+    # Convo-mode toggle (must match wake-listener.py constants)
+    "I'm here. Just talk whenever you need me."
+    "I'll be listening for my name."
+
+    # Common failure modes — heard often during dev/onboarding
+    "I did not catch that, sir."
+    "I appear to be having a moment, sir."
+    "I appear to be having a moment, sir. Could you repeat that?"
+    "I cannot reach my brain at the moment, sir."
+
+    # Filler-bridge stems (jarvis-filler picks at random; pre-cache the
+    # ones the existing filler script knows about)
+    "Hmm..."
+    "Let me think..."
+    "So..."
+    "One sec..."
+    "Right..."
+    "Ah..."
+)
+
+log() {
+    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG" >&2
+}
+
+case "${1:-}" in
+    --list)
+        printf '%s\n' "${PHRASES[@]}"
+        exit 0
+        ;;
+    --help|-h)
+        sed -n '2,33p' "$0"
+        exit 0
+        ;;
+    "")
+        # Default: warm the standard set
+        ;;
+    *)
+        # Custom phrase
+        PHRASES=("$@")
+        ;;
+esac
+
+if [[ ! -x "$JARVIS_BIN" ]]; then
+    log "jarvis CLI not found at $JARVIS_BIN — aborting"
+    exit 1
+fi
+
+log "Pre-warming ${#PHRASES[@]} phrases"
+warmed=0
+failed=0
+for phrase in "${PHRASES[@]}"; do
+    if "$JARVIS_BIN" --prewarm "$phrase" >/dev/null 2>>"$LOG"; then
+        warmed=$((warmed + 1))
+    else
+        failed=$((failed + 1))
+        log "  FAIL: $phrase"
+    fi
+done
+log "Done — warmed=$warmed failed=$failed"

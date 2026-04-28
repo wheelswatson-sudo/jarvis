@@ -857,6 +857,22 @@ def main():
     if _is_persistent_convo_active():
         log("Persistent convo flag set on startup")
 
+    # Pre-warm the response audio cache in the background. Common phrases
+    # ("Got it.", "Good morning, sir.", etc.) get fetched from ElevenLabs
+    # once at boot so subsequent uses play instantly from the local cache.
+    # Detached + DEVNULL — we don't block listener startup on it.
+    cache_warm_bin = BIN_DIR / "jarvis-cache-warm"
+    if cache_warm_bin.exists() and os.environ.get("JARVIS_RESPONSE_CACHE", "1") == "1":
+        try:
+            subprocess.Popen(
+                [str(cache_warm_bin)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            log("Cache pre-warm started (background)")
+        except Exception as e:
+            log(f"Cache pre-warm failed to spawn: {e}")
+
     log("Listening for 'Hey Jarvis'...")
 
     # Thread-safe signal from audio callback to main loop. Doing the

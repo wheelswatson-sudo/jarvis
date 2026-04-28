@@ -128,9 +128,14 @@ print('Updated $1 to $2')
 speak() {
     local text="$1"
     local force="${2:-false}"
+    # JARVIS_PREWARM_ONLY=1 — caller wants the cache populated but no playback.
+    # Used by jarvis-cache-warm to fill the response cache at boot. On HIT we
+    # return immediately; on MISS we curl the audio to disk without piping to mpv.
+    local prewarm="${JARVIS_PREWARM_ONLY:-0}"
 
     # Voice on/off check stays in bash so the off path has zero subprocess overhead.
-    if [[ "$force" != "true" ]]; then
+    # Skipped in prewarm mode — the voice toggle shouldn't gate cache priming.
+    if [[ "$force" != "true" ]] && [[ "$prewarm" != "1" ]]; then
         local state
         state=$(get_voice_state)
         if [[ "$state" == "off" ]]; then
@@ -256,6 +261,10 @@ PYEOF
 
     # ── Cache hit: play instantly via afplay (or mpv fallback) ──
     if [[ "$status" == "HIT" ]]; then
+        # Prewarm callers just wanted to confirm the file exists.
+        if [[ "$prewarm" == "1" ]]; then
+            return 0
+        fi
         afplay "$audio_file" 2>/dev/null || mpv --no-video --really-quiet "$audio_file" 2>/dev/null || {
             echo -e "${RED}No audio player found.${NC}"
             return 1
@@ -268,6 +277,30 @@ PYEOF
         tts_log "ELEVENLABS_API_KEY not set — falling back to say"
         echo -e "${RED}ELEVENLABS_API_KEY not set.${NC}" >&2
         say "$text" 2>/dev/null || true
+        return 1
+    fi
+
+    # ── Prewarm path: cache miss + skip-playback ──
+    # Fetch directly to the cache file with no mpv pipe — pure download.
+    # Used by jarvis-cache-warm at boot.
+    if [[ "$prewarm" == "1" ]]; then
+        local tmp_file
+        tmp_file="${audio_file}.partial"
+        set +e
+        curl -sN --fail \
+            "https://api.elevenlabs.io/v1/text-to-speech/${voice_id}/stream?optimize_streaming_latency=2&output_format=mp3_44100_128" \
+            -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            -o "$tmp_file"
+        local prewarm_rc=$?
+        set -e
+        if [[ "$prewarm_rc" -eq 0 ]] && [[ -s "$tmp_file" ]]; then
+            mv -f "$tmp_file" "$audio_file"
+            return 0
+        fi
+        rm -f "$tmp_file"
+        tts_log "prewarm failed (curl exit $prewarm_rc) for: ${text:0:60}"
         return 1
     fi
 
@@ -310,9 +343,13 @@ PYEOF
     fi
 
     # Trim cache if it's getting big (best-effort, fire-and-forget).
+    # JARVIS_CACHE_SIZE_MB controls the ceiling; default 50MB. Eviction policy
+    # is "drop the oldest mp3s when total size exceeds the cap" — a coarse LRU
+    # approximation good enough for an at-most-thousands-of-files cache.
+    local cache_cap="${JARVIS_CACHE_SIZE_MB:-50}"
     local cache_size
     cache_size=$(du -sm "$CACHE_DIR" 2>/dev/null | cut -f1)
-    if [[ "${cache_size:-0}" -gt 50 ]]; then
+    if [[ "${cache_size:-0}" -gt "$cache_cap" ]]; then
         find "$CACHE_DIR" -name '*.mp3' -type f -exec stat -f '%m %N' {} \; 2>/dev/null \
             | sort -rn | tail -n +20 | cut -d' ' -f2- | xargs -I {} rm -f {} 2>/dev/null
     fi
@@ -656,6 +693,15 @@ main() {
             load_env
             if [[ -n "${2:-}" ]]; then
                 speak "$2" "true"
+            fi
+            ;;
+        --prewarm)
+            # Cache-only fetch — populate the response cache for a phrase
+            # without playing it. Used by jarvis-cache-warm at boot to make
+            # common responses (greetings, acknowledgements) play instantly.
+            load_env
+            if [[ -n "${2:-}" ]]; then
+                JARVIS_PREWARM_ONLY=1 speak "$2" "true"
             fi
             ;;
 
