@@ -18,10 +18,12 @@ import re
 import sys
 import time
 import json
+import select
 import subprocess
 import tempfile
 import signal
 import threading
+import importlib.util
 import collections
 from pathlib import Path
 
@@ -114,6 +116,13 @@ _DEACTIVATE_RE = re.compile(
 
 ACTIVATE_REPLY = "I'm here. Just talk whenever you need me."
 DEACTIVATE_REPLY = "I'll be listening for my name."
+
+# Speculative generation — fires Claude during user speech against partial
+# transcripts (only Deepgram emits partials; whisper users get a silent no-op).
+# Default: enabled when JARVIS_STT=deepgram, disabled otherwise.
+def _speculation_default() -> str:
+    return "1" if os.environ.get("JARVIS_STT") == "deepgram" else "0"
+SPECULATE_ENABLED = os.environ.get("JARVIS_SPECULATE", _speculation_default()) == "1"
 
 
 # Adaptive silence gate. The end-of-speech detector compares per-chunk mean
@@ -638,6 +647,217 @@ def on_wake_detected() -> str | None:
     respond(user_text)
     return None
 
+# ─── Speculative generation (Innovation 1+3) ──────────────────────────
+# Lazy-loaded so non-Deepgram installs don't pay the import cost. The module
+# lives at bin/jarvis-speculate.py and provides a Speculator class that fires
+# a cheap Haiku call during user speech against partial transcripts.
+_speculate_mod = None
+
+
+def _load_speculator():
+    global _speculate_mod
+    if _speculate_mod is not None:
+        return _speculate_mod
+    src = BIN_DIR / "jarvis-speculate.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_speculate", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _speculate_mod = mod
+        return mod
+    except Exception as e:
+        log(f"speculator import failed: {e}")
+        return None
+
+
+def _read_personality_text() -> str:
+    try:
+        p = ASSISTANT_DIR / "config" / "personality.md"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+    except Exception:
+        return ""
+
+
+def _read_history_messages() -> list[dict]:
+    history_file = ASSISTANT_DIR / "cache" / "conversation.json"
+    if not history_file.exists():
+        return []
+    try:
+        with history_file.open() as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return [m for m in data if m.get("role") in ("user", "assistant")]
+    if isinstance(data, dict):
+        return list(data.get("messages") or [])
+    return []
+
+
+def _speak_speculation_text(text: str) -> None:
+    """Pipe speculation text to TTS as a single force-speak. Cache hits
+    (pre-warmed phrases) play instantly; cache misses still beat a fresh
+    Claude call."""
+    if not text:
+        return
+    jbin = BIN_DIR / "jarvis"
+    if not jbin.exists():
+        return
+    try:
+        subprocess.run(
+            [str(jbin), "--speak", text],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=60, check=False,
+        )
+    except Exception as e:
+        log(f"speculation TTS failed: {e}")
+
+
+def _record_speculative_turn(user_text: str, assistant_text: str) -> None:
+    """Drive a no-API-call jarvis-think.py via JARVIS_PREBAKED_RESPONSE so
+    history + the rolling summary stay coherent. We can't just append to
+    conversation.json directly because jarvis-think.py owns the format."""
+    converse_bin = BIN_DIR / "jarvis-converse"
+    if not converse_bin.exists():
+        log("can't record speculative turn — jarvis-converse missing")
+        return
+    env = os.environ.copy()
+    env["JARVIS_PREBAKED_RESPONSE"] = assistant_text
+    # Tell jarvis-converse not to fire its own TTS — we already spoke.
+    env["JARVIS_CONVERSE_SILENT"] = "1"
+    try:
+        subprocess.run(
+            [str(converse_bin), "--text", user_text],
+            env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=False,
+        )
+    except Exception as e:
+        log(f"speculative history record failed: {e}")
+
+
+def run_deepgram_turn_with_speculation(persistent: bool):
+    """One convo turn over Deepgram continuous streaming with speculation.
+
+    Returns one of:
+        ("transcript", text)            — got a final transcript, caller
+                                          handles special phrases + respond()
+        ("speculation_used", text)      — speculator hit; reply already played,
+                                          history already recorded
+        ("idle", None)                  — idle timeout (only meaningful in
+                                          session mode; persistent treats it
+                                          as a stream blip and retries)
+        ("error", reason)               — streamer or import failure; caller
+                                          should fall back to local-VAD path
+    """
+    stream_bin = BIN_DIR / "jarvis-listen-stream"
+    if not stream_bin.exists():
+        return ("error", "jarvis-listen-stream missing")
+
+    # Drain any queued notifications before opening the streamer — this is
+    # the safest moment (mic isn't open, speakers aren't busy with TTS).
+    # Notifications that fire mid-utterance wait at most one turn.
+    _drain_pending_notifications()
+
+    speculator_mod = _load_speculator() if SPECULATE_ENABLED else None
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    speculator = None
+    if speculator_mod and api_key:
+        try:
+            speculator = speculator_mod.Speculator(
+                api_key=api_key,
+                system_text=_read_personality_text(),
+                history_messages=_read_history_messages(),
+            )
+        except Exception as e:
+            log(f"speculator init failed: {e}")
+            speculator = None
+
+    env = os.environ.copy()
+    env["JARVIS_STT"] = "deepgram"
+
+    try:
+        proc = subprocess.Popen(
+            [str(stream_bin)],
+            env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+    except Exception as e:
+        return ("error", f"streamer spawn failed: {e}")
+
+    deadline = time.monotonic() + (86400.0 if persistent else CONVO_TIMEOUT_S)
+    speech_started = False
+    speech_ended_at: float | None = None
+    final_text: str | None = None
+
+    try:
+        while final_text is None:
+            if proc.poll() is not None:
+                # Streamer died (auth failure, network, etc). Surface so
+                # caller can fall back to the local-VAD whisper path.
+                return ("error", "streamer exited")
+
+            now = time.monotonic()
+            if not speech_started and now > deadline:
+                return ("idle", None)
+            if speech_ended_at is not None and (now - speech_ended_at) > 1.5:
+                # SPEECH_END landed but no FINAL came. Treat as no transcript.
+                return ("idle", None)
+
+            ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+            if not ready:
+                if speculator and speculator.fired:
+                    # Periodic notification check while streamer is quiet.
+                    pass
+                continue
+
+            line = proc.stdout.readline()
+            if not line:
+                continue
+            line = line.rstrip("\n\r")
+            if not line:
+                continue
+
+            if line.startswith("PARTIAL: "):
+                text = line[len("PARTIAL: "):]
+                if not speech_started:
+                    speech_started = True
+                if speculator:
+                    speculator.feed_partial(text)
+            elif line.startswith("FINAL: "):
+                final_text = line[len("FINAL: "):].strip()
+                break
+            elif line == "SPEECH_END":
+                if speech_ended_at is None:
+                    speech_ended_at = time.monotonic()
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except (subprocess.TimeoutExpired, ProcessLookupError):
+            try: proc.kill()
+            except Exception: pass
+
+    if not final_text:
+        return ("idle", None)
+
+    # Check speculation first — if it hit, we skip the real call entirely.
+    if speculator:
+        used, spec_text = speculator.consume_for_final(final_text)
+        if used and spec_text:
+            log(f"Speculation HIT (final={final_text[:60]!r})")
+            _speak_speculation_text(spec_text)
+            _record_speculative_turn(final_text, spec_text)
+            return ("speculation_used", spec_text)
+        elif speculator.fired:
+            log(f"Speculation MISS (final={final_text[:60]!r})")
+
+    return ("transcript", final_text)
+
+
 # ─── Continuous conversation mode ─────────────────────────────────────
 # After a wake-triggered turn, stay open for follow-up utterances without
 # requiring "Hey Jarvis" again. Listens via VAD on a fresh InputStream;
@@ -750,53 +970,77 @@ def run_conversation_mode(persistent: bool = False) -> None:
         "take a break"). Activated by saying "I'm working" / "work mode" /
         "stay on" — survives wake-listener restarts via state file.
 
+    Two transports:
+      - Deepgram continuous streaming when JARVIS_STT=deepgram. Partial
+        transcripts feed the speculator, which fires Claude during user
+        speech. On FINAL with >=60% overlap, the speculative response is
+        spoken immediately — overlapping STT, thinking, and TTS.
+      - Local VAD + whisper as the fallback. No partials → no speculation,
+        but the same loop semantics apply.
+
     History persists across turns automatically — every turn writes through
     jarvis-converse → jarvis-think.py → conversation.json.
 
     If user says an activation phrase mid-session, we promote to persistent.
     """
+    use_deepgram = os.environ.get("JARVIS_STT") == "deepgram"
     flavour = "persistent" if persistent else f"session ({CONVO_TIMEOUT_S:.0f}s idle)"
-    log(f"Entering conversation mode: {flavour}")
+    transport = "deepgram+speculation" if use_deepgram and SPECULATE_ENABLED else (
+        "deepgram" if use_deepgram else "whisper-vad"
+    )
+    log(f"Entering conversation mode: {flavour}, transport={transport}")
     _set_convo_flag(True)
     try:
         while True:
-            # Persistent mode disables the idle timer — we wait indefinitely
-            # for the next utterance. A very large timeout is functionally
-            # infinite but still bounded so an OS-level hang eventually
-            # frees the stream. 24h is plenty.
-            timeout = 86400.0 if persistent else CONVO_TIMEOUT_S
-            audio_path = record_with_idle_timeout(timeout)
+            user_text: str | None = None
 
-            # Sentinel: queue has pending notifications. Drain them (the
-            # input stream is now closed inside the helper) and resume.
-            if audio_path == "PENDING_NOTIFICATION":
-                _drain_pending_notifications()
-                continue
-
-            if audio_path is None:
-                if persistent:
-                    # Stream error or impossibly-long idle. Stay in convo —
-                    # drop back to the loop top to reopen the stream.
-                    log("Persistent convo: stream returned None, retrying")
-                    time.sleep(0.5)
+            if use_deepgram:
+                kind, payload = run_deepgram_turn_with_speculation(persistent)
+                if kind == "speculation_used":
+                    # Already spoken + history recorded by the speculator path.
+                    # Loop back for next turn.
                     continue
-                log("Conversation mode: idle timeout, returning to wake")
-                speak("I shall be here, sir.")
-                return
+                if kind == "transcript":
+                    user_text = payload
+                elif kind == "idle":
+                    if persistent:
+                        log("Persistent convo: deepgram idle, retrying")
+                        continue
+                    log("Conversation mode: idle timeout, returning to wake")
+                    speak("I shall be here, sir.")
+                    return
+                else:  # "error" — fall through to local-VAD path
+                    log(f"Deepgram convo error ({payload}); falling back to whisper VAD")
 
-            # Transcribe via whisper. Deepgram's --once mode opens its own
-            # input stream and would race with the one we just closed; for
-            # convo turns we use the local-capture path exclusively.
-            user_text = transcribe(audio_path)
-            try:
-                os.unlink(audio_path)
-            except Exception:
-                pass
+            if user_text is None:
+                # Local-VAD + whisper path. Used when JARVIS_STT != deepgram,
+                # or as a fallback when the streamer fails.
+                timeout = 86400.0 if persistent else CONVO_TIMEOUT_S
+                audio_path = record_with_idle_timeout(timeout)
+
+                if audio_path == "PENDING_NOTIFICATION":
+                    _drain_pending_notifications()
+                    continue
+
+                if audio_path is None:
+                    if persistent:
+                        log("Persistent convo: stream returned None, retrying")
+                        time.sleep(0.5)
+                        continue
+                    log("Conversation mode: idle timeout, returning to wake")
+                    speak("I shall be here, sir.")
+                    return
+
+                user_text = transcribe(audio_path)
+                try:
+                    os.unlink(audio_path)
+                except Exception:
+                    pass
 
             if not user_text:
                 log("Conversation mode: empty transcript")
                 if persistent:
-                    continue  # keep listening
+                    continue
                 return
 
             log(f"User said (convo): {user_text}")
@@ -806,7 +1050,6 @@ def run_conversation_mode(persistent: bool = False) -> None:
             if action == "deactivate":
                 return
             if action == "activate":
-                # Promote session → persistent. State file already written.
                 if not persistent:
                     log("Conversation mode: promoted to persistent")
                 persistent = True
@@ -822,8 +1065,9 @@ def run_conversation_mode(persistent: bool = False) -> None:
 def main():
     log(f"JARVIS wake listener starting (assistant: {ASSISTANT_NAME})")
     log(
-        "Config: silence_gate=%.2fs ring_buffer=%s convo_mode=%s convo_timeout=%.0fs"
-        % (VOICE_SILENCE_S, RING_BUFFER_ENABLED, CONVO_MODE_ENABLED, CONVO_TIMEOUT_S)
+        "Config: silence_gate=%.2fs ring_buffer=%s convo_mode=%s convo_timeout=%.0fs speculate=%s stt=%s"
+        % (VOICE_SILENCE_S, RING_BUFFER_ENABLED, CONVO_MODE_ENABLED,
+           CONVO_TIMEOUT_S, SPECULATE_ENABLED, os.environ.get("JARVIS_STT", "whisper"))
     )
 
     log("Loading wake word model...")

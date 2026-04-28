@@ -186,7 +186,12 @@ EOF
             local response
             response=$(think "$text_input")
             echo -e "    ${CYAN}JARVIS:${NC} $response"
-            "$JARVIS_BIN" "$response" 2>/dev/null
+            # JARVIS_CONVERSE_SILENT=1 — caller already played the audio (e.g.
+            # the speculator fast path in wake-listener.py). Skip the trailing
+            # speak so we don't double-talk.
+            if [[ "${JARVIS_CONVERSE_SILENT:-0}" != "1" ]]; then
+                "$JARVIS_BIN" "$response" 2>/dev/null
+            fi
             exit 0
             ;;
     esac
