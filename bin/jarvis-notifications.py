@@ -87,6 +87,7 @@ DEFAULT_SOURCE_WEIGHTS = {
     "reminder": 4,
     "manual": 2,
     "system": 1,
+    "social": 2,
 }
 
 # Urgency keyword categories — content-driven urgency signal.

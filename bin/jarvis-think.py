@@ -535,6 +535,7 @@ _telegram_mod = None
 _style_mod = None
 _contacts_mod = None
 _notif_mod = None
+_social_mod = None
 
 
 def _load_email_module():
@@ -713,6 +714,24 @@ def _load_notifications_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: notifications module load failed ({e})\n")
+        return None
+
+
+def _load_social_module():
+    global _social_mod
+    if _social_mod is not None:
+        return _social_mod
+    src = BIN_DIR / "jarvis-social.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_social", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _social_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: social module load failed ({e})\n")
         return None
 
 
@@ -1020,6 +1039,76 @@ def _tool_style_status(_args: dict, _mem: Memory) -> dict:
     if mod is None:
         return {"error": "jarvis-style module not installed"}
     return mod.status()
+
+
+def _tool_check_social(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    return mod.check_social(
+        platform=args.get("platform"),
+        hours=int(args.get("hours") or 4),
+    )
+
+
+def _tool_social_digest(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    return mod.social_digest(
+        hours=int(args.get("hours") or 12),
+        platform=args.get("platform"),
+    )
+
+
+def _tool_social_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    query = args.get("query") or ""
+    if not query:
+        return {"error": "query is required"}
+    return mod.social_search(
+        query=query,
+        platform=args.get("platform"),
+        hours=int(args.get("hours") or 48),
+    )
+
+
+def _tool_social_reply(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    platform = args.get("platform")
+    item_id = args.get("item_id")
+    message = args.get("message")
+    if not platform or not item_id or not message:
+        return {"error": "platform, item_id, and message required"}
+    confirm = bool(args.get("confirm"))
+    final_message = message
+    if not confirm:
+        final_message, _ = _maybe_apply_style(message, channel=None)
+    return mod.social_reply(
+        platform=platform, item_id=item_id,
+        message=final_message, confirm=confirm,
+    )
+
+
+def _tool_social_post(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    platform = args.get("platform")
+    message = args.get("message")
+    if not platform or not message:
+        return {"error": "platform and message required"}
+    confirm = bool(args.get("confirm"))
+    final_message = message
+    if not confirm:
+        final_message, _ = _maybe_apply_style(message, channel=None)
+    return mod.social_post(
+        platform=platform, message=final_message, confirm=confirm,
+    )
 
 
 def _tool_send_telegram(args: dict, _mem: Memory) -> dict:
@@ -1792,6 +1881,160 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     },
                 },
                 "required": ["group_name", "message"],
+            },
+        },
+    ),
+    "check_social": (
+        _tool_check_social,
+        {
+            "name": "check_social",
+            "description": (
+                "Pull recent items from Watson's social media monitoring "
+                "(Twitter, LinkedIn, Instagram, RSS). Reads the local "
+                "cache — instant, no network. Pass `platform` to filter "
+                "to one ('twitter' / 'linkedin' / 'instagram' / 'rss'); "
+                "leave empty for everything enabled. Returns raw items — "
+                "for a summarized read, use social_digest. Use this when "
+                "Watson wants the actual posts/tweets/headlines."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "enum": ["twitter", "linkedin", "instagram", "rss"],
+                        "description": "Optional platform filter.",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "How far back to look (default 4).",
+                    },
+                },
+            },
+        },
+    ),
+    "social_digest": (
+        _tool_social_digest,
+        {
+            "name": "social_digest",
+            "description": (
+                "AI-summarized digest of Watson's social activity: one "
+                "block per platform with summary, action items, urgency "
+                "flag, and key topics. Prefer this over multiple "
+                "check_social calls when Watson asks 'what's happening "
+                "online', 'catch me up on Twitter', 'any RSS news', "
+                "'anything in my feeds'. Pass `platform` to scope to one."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "Window in hours (default 12).",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "enum": ["twitter", "linkedin", "instagram", "rss"],
+                    },
+                },
+            },
+        },
+    ),
+    "social_search": (
+        _tool_social_search,
+        {
+            "name": "social_search",
+            "description": (
+                "Substring search across recent social cache (matches "
+                "text and author). Use when Watson asks 'did anyone "
+                "tweet about X', 'is X mentioned in my feeds', "
+                "'search RSS for the term sheet', etc."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Substring to search for (case-insensitive).",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "enum": ["twitter", "linkedin", "instagram", "rss"],
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "Window in hours (default 48).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    ),
+    "social_reply": (
+        _tool_social_reply,
+        {
+            "name": "social_reply",
+            "description": (
+                "Reply to a specific tweet/post/comment. REQUIRES "
+                "confirm=true — without it, returns a styled preview "
+                "for Watson to approve. Workflow: call with confirm=false "
+                "first, read the preview to Watson, ask 'Should I send "
+                "it, sir?', re-call with confirm=true after a clear yes. "
+                "Pull item_id from check_social or social_digest. "
+                "RSS is read-only — never call this with platform='rss'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "enum": ["twitter", "linkedin", "instagram"],
+                    },
+                    "item_id": {
+                        "type": "string",
+                        "description": "Tweet id / post URN / comment id.",
+                    },
+                    "message": {
+                        "type": "string",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to actually send.",
+                    },
+                },
+                "required": ["platform", "item_id", "message"],
+            },
+        },
+    ),
+    "social_post": (
+        _tool_social_post,
+        {
+            "name": "social_post",
+            "description": (
+                "Publish a new top-level post (tweet / LinkedIn share / "
+                "etc.). Same confirm=true safety as social_reply: preview "
+                "first, send only after Watson's clear yes. RSS is read-"
+                "only. Note: Twitter posting needs TWITTER_OAUTH_USER_TOKEN "
+                "(bearer-only is read-only); LinkedIn posting via the "
+                "Voyager cookie path is intentionally refused (TOS); "
+                "Instagram doesn't support text-only posts."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "enum": ["twitter", "linkedin", "instagram"],
+                    },
+                    "message": {
+                        "type": "string",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to actually send.",
+                    },
+                },
+                "required": ["platform", "message"],
             },
         },
     ),

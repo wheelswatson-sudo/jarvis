@@ -78,6 +78,7 @@ _email_mod = None
 _memory_mod = None
 _orch_mod = None
 _telegram_mod = None
+_social_mod = None
 
 
 def _calendar():
@@ -113,6 +114,13 @@ def _telegram():
     if _telegram_mod is None:
         _telegram_mod = _load_sibling("jarvis-telegram")
     return _telegram_mod
+
+
+def _social():
+    global _social_mod
+    if _social_mod is None:
+        _social_mod = _load_sibling("jarvis-social")
+    return _social_mod
 
 
 # ── Anthropic call (single-shot, blocking) ──────────────────────────
@@ -223,6 +231,21 @@ def _pull_telegram(hours: int = 12) -> dict:
         # Soft-fail — telegram is optional. Briefing must never block on it.
         return {"groups": [], "soft_error": rec["error"]}
     return rec or {"groups": []}
+
+
+def _pull_social(hours: int = 12) -> dict:
+    """Per-platform digest from jarvis-social. Soft-fails the same way as
+    telegram — social is optional and the briefing must never block on it."""
+    mod = _social()
+    if mod is None:
+        return {"platforms": []}
+    try:
+        rec = mod.social_digest(hours=hours)
+    except Exception as e:
+        return {"platforms": [], "soft_error": str(e)}
+    if isinstance(rec, dict) and rec.get("error"):
+        return {"platforms": [], "soft_error": rec["error"]}
+    return rec or {"platforms": []}
 
 
 def _pull_weather() -> dict:
@@ -349,6 +372,21 @@ def _build_synth_prompt(payload: dict) -> str:
             )
         parts.append("GROUP CHATS (Telegram):\n" + "\n".join(lines))
 
+    soc = payload.get("social") or {}
+    soc_platforms = [s for s in (soc.get("platforms") or [])
+                     if (s.get("item_count") or 0) > 0]
+    if soc_platforms:
+        lines = []
+        for s in soc_platforms[:4]:
+            urgency = "🔴 " if s.get("urgent") else ""
+            actions = s.get("action_items") or []
+            action_blob = (" Actions: " + " | ".join(actions[:3])) if actions else ""
+            lines.append(
+                f"- {urgency}{s.get('platform')} ({s.get('item_count')} items): "
+                f"{(s.get('summary') or '').strip()}{action_blob}"
+            )
+        parts.append("SOCIAL:\n" + "\n".join(lines))
+
     pending = payload.get("pending_notifications") or []
     if pending:
         parts.append(f"PENDING NOTIFICATIONS ({len(pending)}):\n" + "\n".join(
@@ -429,6 +467,13 @@ def _fallback_synth(payload: dict) -> str:
             f"In Telegram: {len(tg_groups)} group{'s' if len(tg_groups) != 1 else ''} "
             f"with activity{urgent_phrase}."
         )
+    soc_platforms = [s for s in ((payload.get("social") or {}).get("platforms") or [])
+                     if (s.get("item_count") or 0) > 0]
+    if soc_platforms:
+        urgent_n = sum(1 for s in soc_platforms if s.get("urgent"))
+        urgent_phrase = f", {urgent_n} urgent" if urgent_n else ""
+        names = ", ".join(s.get("platform") for s in soc_platforms[:4])
+        lines.append(f"Online ({names}): activity{urgent_phrase}.")
     weather = payload.get("weather") or {}
     if weather.get("now_temp_f"):
         lines.append(
@@ -526,6 +571,7 @@ def generate_today(force: bool = False) -> dict:
     payload["calendar"] = _pull_calendar()
     payload["email"] = _pull_email()
     payload["telegram"] = _pull_telegram()
+    payload["social"] = _pull_social()
     payload["pending_notifications"] = _pull_pending_notifications()
     payload["memory_recent"] = _pull_memory_recent()
     payload["weather"] = _pull_weather()

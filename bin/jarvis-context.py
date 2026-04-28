@@ -204,6 +204,27 @@ def _telegram_hint() -> str:
         return ""
 
 
+def _social_hint() -> str:
+    """One-liner when social monitoring sees urgent traffic in the last hour
+    (direct mentions, reply-at-you, urgency keywords). Same heuristic-only
+    contract as the telegram hint."""
+    if os.environ.get("JARVIS_SOCIAL", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-social.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-social.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_social_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint() or ""
+    except Exception:
+        return ""
+
+
 def _briefing_hint() -> str:
     """Pull the briefing-pending one-liner from jarvis-briefing if today's
     briefing is sitting unread. Lazy-loaded — same pattern as patterns.py."""
@@ -271,6 +292,10 @@ class ContextEngine:
         telegram = _telegram_hint()
         if telegram:
             lines.append(telegram)
+
+        social = _social_hint()
+        if social:
+            lines.append(social)
 
         notifications = _notifications_hint()
         if notifications:

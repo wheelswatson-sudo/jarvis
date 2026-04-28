@@ -782,6 +782,9 @@ _telegram_mod = None
 _telegram_thread = None
 _telegram_announced_ids: set = set()
 _notifications_mod = None
+_social_mod = None
+_social_thread = None
+_social_announced_ids: set = set()
 
 
 def _load_notifications_module():
@@ -820,6 +823,116 @@ def _load_telegram_module():
     except Exception as e:
         log(f"telegram module load failed: {e}")
         return None
+
+
+def _load_social_module():
+    """Lazy import of jarvis-social.py — same pattern as the others."""
+    global _social_mod
+    if _social_mod is not None:
+        return _social_mod
+    src = BIN_DIR / "jarvis-social.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_social_wl", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _social_mod = mod
+        return mod
+    except Exception as e:
+        log(f"social module load failed: {e}")
+        return None
+
+
+def _start_social_polling() -> None:
+    """Spawn one daemon thread that polls all enabled social platforms.
+    Idempotent. Silent no-op when the master gate is off or no platforms
+    have credentials configured."""
+    global _social_thread
+    if _social_thread is not None and _social_thread.is_alive():
+        return
+    if os.environ.get("JARVIS_SOCIAL", "1") != "1":
+        return
+    mod = _load_social_module()
+    if mod is None:
+        return
+    try:
+        if not mod.enabled_platforms():
+            return
+    except Exception as e:
+        log(f"social platform check failed: {e}")
+        return
+    try:
+        t = threading.Thread(target=mod.poll_loop, name="social-poller", daemon=True)
+        t.start()
+        _social_thread = t
+        log("Social polling thread started")
+    except Exception as e:
+        log(f"social thread spawn failed: {e}")
+
+
+def _flush_urgent_social() -> None:
+    """Push urgent social items from the last few minutes onto the
+    notification queue. Same pattern as _flush_urgent_telegram — runs on
+    conversation-exit so direct mentions get heard on the next idle moment.
+    Tracks already-announced item_ids in-process to avoid double-fires."""
+    if os.environ.get("JARVIS_SOCIAL", "1") != "1":
+        return
+    mod = _load_social_module()
+    if mod is None:
+        return
+    try:
+        urgent = mod.recent_urgent(minutes=10)
+    except Exception as e:
+        log(f"social urgent scan failed: {e}")
+        return
+    if not urgent:
+        return
+    fresh = [u for u in urgent if u.get("item_id") not in _social_announced_ids]
+    if not fresh:
+        return
+    try:
+        NOTIF_DIR.mkdir(parents=True, exist_ok=True)
+        existing: list = []
+        if PENDING_NOTIFICATIONS.exists():
+            try:
+                with PENDING_NOTIFICATIONS.open() as f:
+                    existing = json.load(f) or []
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+        notif_mod = _load_notifications_module()
+        for u in fresh:
+            author = u.get("author") or "(unknown)"
+            platform = u.get("platform") or "social"
+            text = (u.get("text") or "").strip()
+            preview = text[:140] + ("..." if len(text) > 140 else "")
+            tag = "Direct" if u.get("directed_at_self") else "Urgent"
+            msg = f"{tag} on {platform}: {author} — {preview}"
+            existing.append({
+                "message": msg, "ts": int(time.time()),
+                "source": "social", "item_id": u.get("item_id"),
+                "platform": platform,
+            })
+            _social_announced_ids.add(u.get("item_id"))
+            if notif_mod is not None:
+                try:
+                    notif_mod.enqueue(
+                        source="social",
+                        sender=author,
+                        content=msg,
+                        urgency_keywords=None,
+                        time_sensitivity=2 if u.get("directed_at_self") else 1,
+                        route="auto",
+                    )
+                except Exception as e:
+                    log(f"notifications enqueue failed: {e}")
+        with PENDING_NOTIFICATIONS.open("w") as f:
+            json.dump(existing, f, indent=2)
+        log(f"Queued {len(fresh)} urgent social item(s) for delivery")
+    except Exception as e:
+        log(f"social urgent flush failed: {e}")
 
 
 def _start_telegram_polling() -> None:
@@ -1368,6 +1481,9 @@ def run_conversation_mode(persistent: bool = False) -> None:
         # Flush any urgent Telegram messages that arrived during the
         # conversation. Watson hears them on the next idle moment.
         _flush_urgent_telegram()
+        # Same flush for social — direct mentions / urgent posts queued
+        # while Watson was talking get heard on the next idle moment.
+        _flush_urgent_social()
         # Spawn the self-improvement daemon detached. jarvis-improve
         # orchestrates the six systems (feedback → metacog → autopsy →
         # patterns → skills, plus weekly synthesis + evolution) so the
@@ -1450,6 +1566,10 @@ def main():
     # Start the Telegram poller in the background — daemon thread, dies with
     # the listener. Silent no-op when no TELEGRAM_BOT_TOKEN is configured.
     _start_telegram_polling()
+
+    # Same idea for social — daemon thread, dies with the listener. No-op
+    # when JARVIS_SOCIAL=0 or no platform credentials are set.
+    _start_social_polling()
 
     # Pre-warm the response audio cache in the background. Common phrases
     # ("Got it.", "Good morning, sir.", etc.) get fetched from ElevenLabs
