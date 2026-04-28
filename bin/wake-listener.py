@@ -49,6 +49,16 @@ RING_BUFFER_ENABLED = os.environ.get("JARVIS_RING_BUFFER", "1") == "1"
 _ring_buffer: collections.deque = collections.deque(maxlen=RING_BUFFER_CHUNKS)
 _ring_lock = threading.Lock()
 
+# End-of-speech silence gate (seconds of below-threshold audio before we stop
+# recording). The previous hardcoded 1.5s added 700ms of dead air per turn
+# beyond what users actually need to finish a sentence. 0.8s is conservative
+# enough to avoid clipping mid-thought while still feeling responsive.
+try:
+    VOICE_SILENCE_S = float(os.environ.get("JARVIS_VOICE_SILENCE_S", "0.8"))
+except ValueError:
+    VOICE_SILENCE_S = 0.8
+
+
 # Adaptive silence gate. The end-of-speech detector compares per-chunk mean
 # amplitude against a threshold derived from ambient noise. A hand-tuned
 # constant produced ~20% false negatives on AirPods (very low noise floor →
@@ -181,7 +191,7 @@ def reset_silence_gate_cache():
 
 
 # ─── Recording user command after wake ────────────────────────────────
-def record_command(max_seconds=15, silence_seconds=1.5):
+def record_command(max_seconds=15, silence_seconds=VOICE_SILENCE_S):
     """Record from mic until user pauses speaking."""
     log("Recording command...")
 
@@ -383,6 +393,10 @@ def on_wake_detected():
 # ─── Main loop ────────────────────────────────────────────────────────
 def main():
     log(f"JARVIS wake listener starting (assistant: {ASSISTANT_NAME})")
+    log(
+        "Config: silence_gate=%.2fs ring_buffer=%s"
+        % (VOICE_SILENCE_S, RING_BUFFER_ENABLED)
+    )
 
     log("Loading wake word model...")
     try:
