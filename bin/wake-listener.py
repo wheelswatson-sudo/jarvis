@@ -781,6 +781,26 @@ _briefing_mod = None
 _telegram_mod = None
 _telegram_thread = None
 _telegram_announced_ids: set = set()
+_notifications_mod = None
+
+
+def _load_notifications_module():
+    """Lazy import of jarvis-notifications.py — same pattern as the others."""
+    global _notifications_mod
+    if _notifications_mod is not None:
+        return _notifications_mod
+    src = BIN_DIR / "jarvis-notifications.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_notifications_wl", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _notifications_mod = mod
+        return mod
+    except Exception as e:
+        log(f"notifications module load failed: {e}")
+        return None
 
 
 def _load_telegram_module():
@@ -864,6 +884,7 @@ def _flush_urgent_telegram() -> None:
                     existing = []
             except Exception:
                 existing = []
+        notif_mod = _load_notifications_module()
         for u in fresh:
             sender = u.get("sender") or "(unknown)"
             group = u.get("group") or ""
@@ -873,6 +894,20 @@ def _flush_urgent_telegram() -> None:
             existing.append({"message": msg, "ts": int(time.time()),
                              "source": "telegram", "message_id": u.get("message_id")})
             _telegram_announced_ids.add(u.get("message_id"))
+            # Also feed the smart notification bus so contact priority,
+            # quiet hours, and per-source rules apply on the next read.
+            if notif_mod is not None:
+                try:
+                    notif_mod.enqueue(
+                        source="telegram",
+                        sender=sender,
+                        content=msg,
+                        urgency_keywords=None,
+                        time_sensitivity=2,
+                        route="auto",
+                    )
+                except Exception as e:
+                    log(f"notifications enqueue failed: {e}")
         with PENDING_NOTIFICATIONS.open("w") as f:
             json.dump(existing, f, indent=2)
         log(f"Queued {len(fresh)} urgent Telegram message(s) for delivery")

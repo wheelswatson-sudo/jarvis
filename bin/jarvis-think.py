@@ -698,6 +698,24 @@ def _load_style_module():
         return None
 
 
+def _load_notifications_module():
+    global _notif_mod
+    if _notif_mod is not None:
+        return _notif_mod
+    src = BIN_DIR / "jarvis-notifications.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_notifications", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _notif_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: notifications module load failed ({e})\n")
+        return None
+
+
 def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None]:
     """Run text through jarvis-style.apply_style if the module + profile
     are present. Returns (final_text, style_result) — style_result is None
@@ -926,6 +944,35 @@ def _tool_telegram_search(args: dict, _mem: Memory) -> dict:
         group_name=args.get("group_name"),
         hours=int(args.get("hours") or 48),
     )
+
+
+def _tool_check_notifications(args: dict, _mem: Memory) -> dict:
+    mod = _load_notifications_module()
+    if mod is None:
+        return {"error": "jarvis-notifications module not installed"}
+    return mod.get_notifications(filter=args.get("filter"))
+
+
+def _tool_dismiss_notification(args: dict, _mem: Memory) -> dict:
+    mod = _load_notifications_module()
+    if mod is None:
+        return {"error": "jarvis-notifications module not installed"}
+    nid = (args.get("id") or "").strip()
+    if not nid:
+        return {"error": "id is required"}
+    return mod.dismiss(nid)
+
+
+def _tool_notification_preferences(args: dict, _mem: Memory) -> dict:
+    mod = _load_notifications_module()
+    if mod is None:
+        return {"error": "jarvis-notifications module not installed"}
+    if args.get("show"):
+        return mod.get_rules()
+    rules = args.get("rules") or {}
+    if not isinstance(rules, dict):
+        return {"error": "rules must be an object"}
+    return mod.set_rules(rules)
 
 
 def _tool_lookup_contact(args: dict, _mem: Memory) -> dict:
@@ -1520,6 +1567,83 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    ),
+    "check_notifications": (
+        _tool_check_notifications,
+        {
+            "name": "check_notifications",
+            "description": (
+                "List Watson's queued notifications from the smart "
+                "notification bus — score, source, sender, content, "
+                "and route (interrupt/queue/batch). Use when Watson "
+                "asks 'anything urgent', 'what's pending', 'any "
+                "notifications', or before he wraps up the day. "
+                "Filter values: 'pending' (default), 'high' (above "
+                "interrupt threshold), 'low' (below queue threshold), "
+                "'all', a source name ('email', 'telegram', 'calendar'), "
+                "or 'delivered' / 'dropped' for the audit trail."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "description": "pending | high | low | all | <source>",
+                    },
+                },
+            },
+        },
+    ),
+    "dismiss_notification": (
+        _tool_dismiss_notification,
+        {
+            "name": "dismiss_notification",
+            "description": (
+                "Mark a queued notification as dismissed. Use after "
+                "Watson hears about it and tells you to drop it, or "
+                "after relaying a queued item out loud. Pass the id "
+                "from check_notifications. Note: dismiss is the right "
+                "call after Watson 'handles' or 'ignores' an item; "
+                "for items that were spoken to him, the sender code "
+                "already marks them delivered."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Notification id from check_notifications."},
+                },
+                "required": ["id"],
+            },
+        },
+    ),
+    "notification_preferences": (
+        _tool_notification_preferences,
+        {
+            "name": "notification_preferences",
+            "description": (
+                "Inspect or update Watson's notification rules. Pass "
+                "show=true to read the current rules. To change rules, "
+                "pass `rules` as an object — the keys are merged into "
+                "the stored config. Useful keys: "
+                "`source_filters`={'telegram':'queue_only'} (never "
+                "interrupt for that source), `sender_overrides`={'corbin@…':'high'} "
+                "(force a sender to high importance), `quiet_hours`={'start':'22:00','end':'07:00'}, "
+                "`interrupt_threshold` and `queue_threshold` (integers). "
+                "Use when Watson says things like 'don't interrupt me "
+                "for Telegram unless it's from Corbin' or 'no notifications "
+                "after 10pm'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "show": {"type": "boolean", "description": "Read current rules without modifying."},
+                    "rules": {
+                        "type": "object",
+                        "description": "Partial rules object to merge in.",
+                    },
+                },
             },
         },
     ),

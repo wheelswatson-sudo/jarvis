@@ -162,6 +162,27 @@ def _ambient_hint() -> str:
     return _AMBIENT_HINTS.get(label, "")
 
 
+def _notifications_hint() -> str:
+    """One-liner from the smart notification bus — high-priority pending
+    counts so Claude leads with check_notifications when Watson asks
+    'anything urgent'. Lazy-loaded; pays nothing when the bus is unused."""
+    if os.environ.get("JARVIS_NOTIFICATIONS", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-notifications.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-notifications.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_notifications_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint() or ""
+    except Exception:
+        return ""
+
+
 def _telegram_hint() -> str:
     """One-liner when monitored Telegram groups have urgent traffic in the
     last hour. Lazy-loads jarvis-telegram so installs without the bot pay
@@ -250,6 +271,10 @@ class ContextEngine:
         telegram = _telegram_hint()
         if telegram:
             lines.append(telegram)
+
+        notifications = _notifications_hint()
+        if notifications:
+            lines.append(notifications)
 
         body = "\n".join(lines).strip()
         if not body:
