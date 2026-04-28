@@ -417,6 +417,97 @@ def _tool_set_reminder(args: dict, _mem: Memory) -> dict:
     }
 
 
+# ── External agent loaders (Innovations 7 + 8) ──────────────────────
+# Email and calendar live in their own files so users without Google API
+# credentials never pay their import cost. Lazy-loaded — first call to a
+# tool triggers the import; subsequent calls use the cached module.
+_email_mod = None
+_calendar_mod = None
+
+
+def _load_email_module():
+    global _email_mod
+    if _email_mod is not None:
+        return _email_mod
+    src = BIN_DIR / "jarvis-email.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_email", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _email_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: email module load failed ({e})\n")
+        return None
+
+
+def _load_calendar_module():
+    global _calendar_mod
+    if _calendar_mod is not None:
+        return _calendar_mod
+    src = BIN_DIR / "jarvis-calendar.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_calendar", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _calendar_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: calendar module load failed ({e})\n")
+        return None
+
+
+def _tool_check_email(args: dict, _mem: Memory) -> dict:
+    mod = _load_email_module()
+    if mod is None:
+        return {"error": "jarvis-email module not installed"}
+    return mod.check_email(
+        max_results=int(args.get("max_results") or 5),
+        query=args.get("query") or "is:unread",
+    )
+
+
+def _tool_draft_email(args: dict, _mem: Memory) -> dict:
+    mod = _load_email_module()
+    if mod is None:
+        return {"error": "jarvis-email module not installed"}
+    return mod.draft_email(
+        to=args.get("to") or "",
+        subject=args.get("subject") or "",
+        body=args.get("body") or "",
+        thread_id=args.get("thread_id"),
+    )
+
+
+def _tool_send_email(args: dict, _mem: Memory) -> dict:
+    mod = _load_email_module()
+    if mod is None:
+        return {"error": "jarvis-email module not installed"}
+    return mod.send_email(
+        draft_id=args.get("draft_id"),
+        to=args.get("to"),
+        subject=args.get("subject"),
+        body=args.get("body"),
+        confirm=bool(args.get("confirm")),
+    )
+
+
+def _tool_reply_email(args: dict, _mem: Memory) -> dict:
+    mod = _load_email_module()
+    if mod is None:
+        return {"error": "jarvis-email module not installed"}
+    thread_id = args.get("thread_id")
+    body = args.get("body")
+    if not thread_id or not body:
+        return {"error": "thread_id and body required"}
+    return mod.reply_email(thread_id=thread_id, body=body,
+                            confirm=bool(args.get("confirm")))
+
+
 # Tool registry — name → (handler, schema)
 TOOLS: dict[str, tuple[Any, dict]] = {
     "remember": (
@@ -570,6 +661,90 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "message": {"type": "string", "description": "What to say."},
                 },
                 "required": ["when", "message"],
+            },
+        },
+    ),
+    "check_email": (
+        _tool_check_email,
+        {
+            "name": "check_email",
+            "description": (
+                "Fetch and summarize recent Gmail messages. Default returns the "
+                "user's unread inbox. Use `query` for Gmail search syntax (e.g. "
+                "'from:dalton', 'is:starred', 'newer_than:1d'). Read-only — does "
+                "not mark anything as read."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "max_results": {"type": "integer", "description": "1-25 (default 5)."},
+                    "query": {"type": "string", "description": "Gmail search query."},
+                },
+            },
+        },
+    ),
+    "draft_email": (
+        _tool_draft_email,
+        {
+            "name": "draft_email",
+            "description": (
+                "Save an email as a draft. Returns a draft_id you can pass to "
+                "send_email after the user confirms. Always draft first, read "
+                "the draft back to the user, and only send on explicit yes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient email."},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                    "thread_id": {"type": "string", "description": "Optional thread to attach to."},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    ),
+    "send_email": (
+        _tool_send_email,
+        {
+            "name": "send_email",
+            "description": (
+                "Send a previously-saved draft (preferred), or compose+send in "
+                "one shot. REQUIRES confirm=true — without it, the call is "
+                "refused as a safety net. Workflow: call draft_email, read the "
+                "draft to the user, ask 'Should I send it, sir?', then call "
+                "send_email with confirm=true after a clear yes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "draft_id": {"type": "string"},
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                    "confirm": {"type": "boolean", "description": "Must be true to actually send."},
+                },
+            },
+        },
+    ),
+    "reply_email": (
+        _tool_reply_email,
+        {
+            "name": "reply_email",
+            "description": (
+                "Send a reply on an existing Gmail thread. Pulls the recipient + "
+                "subject + headers from the latest message in the thread, so "
+                "you only supply thread_id + body. Same confirm=true safety as "
+                "send_email."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "body": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["thread_id", "body"],
             },
         },
     ),
