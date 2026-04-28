@@ -709,7 +709,11 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
       4. Live world state               — uncached (regenerated every turn)
 
     Tools array gets the 3rd cache breakpoint (in `_stream_anthropic`).
-    Last assistant message gets the 4th (in `_with_history_cache_breakpoint`)."""
+    Last assistant message gets the 4th (in `_with_history_cache_breakpoint`).
+
+    Memory injection uses focused top-k priming (Memory.format_priming_block)
+    rather than spray-and-pray recent+relevant. When no memory matches the
+    current query strongly, nothing is injected — avoiding context noise."""
     base = (data.get("system") or "").strip()
     summary = (data.get("summary") or "").strip()
     if summary:
@@ -718,7 +722,7 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
         cacheable = base
 
     mem = Memory()
-    mem_block = mem.format_for_prompt(query=user_text, recent=8, relevant=5)
+    primer = mem.format_priming_block(query=user_text, k=3)
     auto_mem = _load_auto_memory_index()
 
     blocks: list[dict] = []
@@ -734,8 +738,8 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
             "text": auto_mem,
             "cache_control": {"type": "ephemeral"},
         })
-    if mem_block:
-        blocks.append({"type": "text", "text": mem_block})
+    if primer:
+        blocks.append({"type": "text", "text": primer})
     ws = _world_state_text()
     if ws:
         blocks.append({"type": "text", "text": ws})
@@ -928,13 +932,60 @@ def _call_anthropic(api_key: str, model: str, system,
 # so the user hears the first sentence while Claude is still generating.
 _SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)")
 
+# Chain-of-thought: model wraps private reasoning in <thinking>…</thinking>.
+# We strip those blocks from the spoken stream and capture them for logging.
+_THINK_OPEN = "<thinking>"
+_THINK_CLOSE = "</thinking>"
+_THINKING_BLOCK_RE = re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> tuple[str, list[str]]:
+    """Pull <thinking>…</thinking> blocks out of `text`. Returns (clean, blocks)."""
+    if not text or "<thinking>" not in text.lower():
+        return text, []
+    blocks = [m.strip() for m in _THINKING_BLOCK_RE.findall(text) if m.strip()]
+    cleaned = _THINKING_BLOCK_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, blocks
+
+
+def _log_thinking(blocks: list[str]) -> None:
+    """Append reasoning blocks to ~/.jarvis/logs/reasoning.log. Best-effort."""
+    if not blocks:
+        return
+    log_path = ASSISTANT_DIR / "logs" / "reasoning.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8") as f:
+            for blk in blocks:
+                f.write(f"[{ts}] {blk}\n")
+    except Exception:
+        pass
+
 
 class _TTSFeeder:
+    """Streams sentences to a `jarvis --speak` bash subprocess as they finish.
+
+    Two layers of filtering before audio fires:
+      1. <thinking>…</thinking> blocks are stripped in real time — the
+         reasoning goes to self.thinking_log (and gets persisted by run_turn),
+         never to the speakers. Partial open/close tags are held back across
+         chunk boundaries so a tag split mid-stream never leaks.
+      2. The remaining spoken buffer is emitted on sentence terminators (or
+         a comma after 80 chars) so first audio fires early.
+    """
+
     def __init__(self) -> None:
         jbin = BIN_DIR / "jarvis"
         self.alive = jbin.exists()
         self.proc: subprocess.Popen | None = None
-        self._buf = ""
+        # Buffers — mirror _SentenceStreamer's state machine.
+        self._buf = ""              # spoken-text buffer (pending sentence detection)
+        self._pending = ""          # raw chunk tail held back when a partial tag is possible
+        self._think_buf = ""        # accumulator for the current open <thinking> block
+        self._in_think = False
+        self.thinking_log: list[str] = []
         if not self.alive:
             return
         # Bash loop: read line, force-speak it, repeat. --speak ignores the
@@ -961,7 +1012,10 @@ class _TTSFeeder:
     def feed(self, text: str) -> None:
         if not (self.alive and self.proc and self.proc.stdin):
             return
-        self._buf += text
+        if not text:
+            return
+        self._pending += text
+        self._consume()
         # Emit every complete sentence we can find.
         while True:
             m = _SENTENCE_END_RE.search(self._buf)
@@ -985,8 +1039,50 @@ class _TTSFeeder:
             if sentence:
                 self._send(sentence)
 
+    def _consume(self) -> None:
+        """Drain self._pending into either self._buf (spoken) or self._think_buf
+        (logged). Holds back the tail when it could be a partial open/close tag
+        so we never speak half a `<thinking>` token."""
+        while self._pending:
+            if self._in_think:
+                close_idx = self._pending.find(_THINK_CLOSE)
+                if close_idx >= 0:
+                    self._think_buf += self._pending[:close_idx]
+                    self.thinking_log.append(self._think_buf.strip())
+                    self._think_buf = ""
+                    self._in_think = False
+                    self._pending = self._pending[close_idx + len(_THINK_CLOSE):]
+                else:
+                    safe_len = max(0, len(self._pending) - (len(_THINK_CLOSE) - 1))
+                    self._think_buf += self._pending[:safe_len]
+                    self._pending = self._pending[safe_len:]
+                    return
+            else:
+                open_idx = self._pending.find(_THINK_OPEN)
+                if open_idx >= 0:
+                    self._buf += self._pending[:open_idx]
+                    self._in_think = True
+                    self._pending = self._pending[open_idx + len(_THINK_OPEN):]
+                else:
+                    safe_len = max(0, len(self._pending) - (len(_THINK_OPEN) - 1))
+                    self._buf += self._pending[:safe_len]
+                    self._pending = self._pending[safe_len:]
+                    return
+
     def flush(self) -> None:
         """Emit anything buffered (used at end of round / end of turn)."""
+        # Stream is settling — anything in _pending is no longer a partial tag.
+        if self._pending:
+            if self._in_think:
+                self._think_buf += self._pending
+            else:
+                self._buf += self._pending
+            self._pending = ""
+        if self._in_think and self._think_buf.strip():
+            # Defensive: model emitted <thinking> without a matching close.
+            self.thinking_log.append(self._think_buf.strip())
+            self._think_buf = ""
+            self._in_think = False
         if self._buf.strip():
             self._send(self._buf.strip())
         self._buf = ""
@@ -1224,7 +1320,10 @@ def run_turn(user_text: str) -> str:
                 )
 
             text_parts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
-            final_text = "\n".join(t for t in text_parts if t).strip() or round_text.strip()
+            raw_text = "\n".join(t for t in text_parts if t).strip() or round_text.strip()
+            final_text, think_blocks = _strip_thinking(raw_text)
+            if think_blocks:
+                _log_thinking(think_blocks)
 
             if stop_reason != "tool_use":
                 break

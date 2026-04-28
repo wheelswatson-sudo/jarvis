@@ -164,6 +164,101 @@ class Memory:
         scored.sort(key=lambda t: (t[0], t[1].get("created_at", "")), reverse=True)
         return [r for _, r in scored[:limit]]
 
+    # ── priming: focused top-k retrieval with topic-aware weighting ──
+    _TIME_SENSITIVE_RE = re.compile(
+        r"\b(yesterday|today|tonight|tomorrow|just now|recent(ly)?|earlier|"
+        r"this (morning|afternoon|evening|week)|last (week|night|month))\b",
+        re.I,
+    )
+    _IDENTITY_RE = re.compile(
+        r"\b(favou?rite|prefer(ence|s|red)?|usually|always|"
+        r"my (name|wife|husband|partner|kid|kids|dog|cat|family|hobby|address|birthday))\b",
+        re.I,
+    )
+    _IDENTITY_OPENERS = (
+        "what's my", "what is my", "whats my",
+        "who's my", "who is my", "whos my",
+        "where's my", "where is my",
+    )
+
+    def _classify_query(self, query: str) -> str:
+        """Returns 'time_sensitive', 'identity', or 'default'. Identity wins
+        ties because identity questions are usually unambiguous."""
+        q = (query or "").lower().strip()
+        if any(q.startswith(p) for p in self._IDENTITY_OPENERS):
+            return "identity"
+        if self._IDENTITY_RE.search(q):
+            return "identity"
+        if self._TIME_SENSITIVE_RE.search(q):
+            return "time_sensitive"
+        return "default"
+
+    def prime(self, query: str, k: int = 3,
+              threshold: float = 1.0) -> list[dict]:
+        """Top-k memories most relevant to `query`, with topic-aware weighting.
+
+        Returns at most `k` records whose score >= `threshold`. Returns [] when
+        no memory clears the bar — callers should inject nothing rather than
+        pad the prompt with weakly-related context.
+
+        Time-sensitive queries ("what did I say yesterday") get a steep recency
+        bias. Identity queries ("what's my favorite X") flatten the recency
+        curve so older facts can win on overlap alone.
+        """
+        records = self.all()
+        if not records or not query or not query.strip():
+            return []
+        q_tokens = _tokenize(query) - _STOP
+        if not q_tokens:
+            return []
+
+        mode = self._classify_query(query)
+        if mode == "time_sensitive":
+            half_life_days = 7.0
+            recency_weight = 1.5
+        elif mode == "identity":
+            half_life_days = 365.0
+            recency_weight = 0.1
+        else:
+            half_life_days = 30.0
+            recency_weight = 0.4
+
+        now = time.time()
+        scored: list[tuple[float, dict]] = []
+        for r in records:
+            text = (r.get("text") or "") + " " + " ".join(r.get("tags") or [])
+            r_tokens = _tokenize(text)
+            overlap = len(q_tokens & r_tokens)
+            if overlap == 0:
+                continue
+            try:
+                ts = datetime.fromisoformat(r["created_at"]).timestamp()
+                age_days = max((now - ts) / 86400.0, 0.0)
+            except Exception:
+                age_days = 365.0
+            recency = math.exp(-age_days / half_life_days)
+            score = overlap + recency_weight * recency
+            scored.append((score, r))
+
+        scored.sort(key=lambda t: (t[0], t[1].get("created_at", "")), reverse=True)
+        return [r for s, r in scored[:k] if s >= threshold]
+
+    def format_priming_block(self, query: str, k: int = 3,
+                             threshold: float = 1.0) -> str:
+        """Build a tight 'most relevant memories' block for the system prompt.
+        Returns "" when nothing clears the threshold — prompt stays clean."""
+        hits = self.prime(query, k=k, threshold=threshold)
+        if not hits:
+            return ""
+        lines = ["Most relevant memories for the user's current question:"]
+        hits.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        for r in hits:
+            stamp = (r.get("created_at") or "")[:10]
+            tags = r.get("tags") or []
+            tag_suffix = f"  [{', '.join(tags)}]" if tags else ""
+            lines.append(f"  - ({stamp}) {r['text']}{tag_suffix}")
+        return "\n".join(lines)
+
     # ── prompt injection ──────────────────────────────────────────────
     def format_for_prompt(self, query: str | None = None,
                           recent: int = 8, relevant: int = 5) -> str:
