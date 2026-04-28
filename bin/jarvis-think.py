@@ -218,6 +218,27 @@ def _load_synth_module():
         return None
 
 
+# ── evolve module: pending self-improvement draft (user-approval gated) ─
+_evolve_mod = None
+
+
+def _load_evolve_module():
+    global _evolve_mod
+    if _evolve_mod is not None:
+        return _evolve_mod
+    src = BIN_DIR / "jarvis-evolve.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_evolve", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _evolve_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -1280,6 +1301,18 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
                 blocks.append({"type": "text", "text": sy_hint})
         except Exception as e:
             sys.stderr.write(f"jarvis-think: synthesis hint skipped ({e})\n")
+
+    # Pending self-improvement draft — when one exists, the hint primes
+    # Claude to surface it once on the next user turn. NEVER auto-applies;
+    # the actual approval flow runs `bin/jarvis-evolve.py --approve`.
+    ev_mod = _load_evolve_module()
+    if ev_mod is not None:
+        try:
+            ev_hint = ev_mod.system_prompt_hint()
+            if ev_hint:
+                blocks.append({"type": "text", "text": ev_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: evolve hint skipped ({e})\n")
 
     if cacheable:
         blocks.append({
