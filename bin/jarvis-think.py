@@ -134,6 +134,27 @@ def _load_feedback_module():
         return None
 
 
+# ── metacog module: per-domain accuracy + calibration ────────────────
+_metacog_mod = None
+
+
+def _load_metacog_module():
+    global _metacog_mod
+    if _metacog_mod is not None:
+        return _metacog_mod
+    src = BIN_DIR / "jarvis-metacog.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_metacog", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _metacog_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -1152,6 +1173,17 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
         except Exception as e:
             sys.stderr.write(f"jarvis-think: feedback hint skipped ({e})\n")
 
+    # Per-domain self-calibration from metacog. Tells Claude where it's
+    # been reliably right (be direct) vs wrong (express uncertainty).
+    mc_mod = _load_metacog_module()
+    if mc_mod is not None:
+        try:
+            mc_hint = mc_mod.system_prompt_hint()
+            if mc_hint:
+                blocks.append({"type": "text", "text": mc_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: metacog hint skipped ({e})\n")
+
     if cacheable:
         blocks.append({
             "type": "text",
@@ -1969,10 +2001,17 @@ def run_turn(user_text: str) -> str:
     # 3 calls with different framings, judge, return the winner. No tools
     # in this path; complex analysis usually doesn't need them. Falls back
     # to the standard tool loop if parallel mode produces nothing usable.
-    if (
-        os.environ.get("JARVIS_PARALLEL_THINK", "1") == "1"
-        and _is_complex_query(user_text)
-    ):
+    # Triggers: gate enabled AND (complex query OR domain confidence < 0.7).
+    # Low-domain confidence → always fan out, even on simple questions, so
+    # the judge can pick the best answer in an area we've been wrong on.
+    parallel_gate = os.environ.get("JARVIS_PARALLEL_THINK", "1") == "1"
+    low_conf_trigger = False
+    if parallel_gate and mc_mod is not None:
+        try:
+            low_conf_trigger = mc_mod.domain_confidence(user_text) < 0.7
+        except Exception:
+            low_conf_trigger = False
+    if parallel_gate and (_is_complex_query(user_text) or low_conf_trigger):
         try:
             parallel_text = _parallel_think(api_key, model, system, convo)
         except Exception as e:
