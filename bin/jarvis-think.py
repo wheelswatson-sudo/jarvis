@@ -1255,6 +1255,17 @@ def _with_history_cache_breakpoint(convo: list[dict]) -> list[dict]:
 
 
 def run_turn(user_text: str) -> str:
+    # Fast path — caller already has the response (e.g. speculator hit). Skip
+    # the API entirely; just record the user/assistant exchange in history so
+    # the rolling memo + cache stay coherent. Caller is responsible for TTS.
+    prebaked = os.environ.get("JARVIS_PREBAKED_RESPONSE", "").strip()
+    if prebaked:
+        history = _load_history()
+        history.setdefault("messages", []).append({"role": "user", "content": user_text})
+        history["messages"].append({"role": "assistant", "content": prebaked})
+        _save_history(history)
+        return prebaked
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "I cannot reach Claude — the ANTHROPIC_API_KEY is not set, sir."
