@@ -176,6 +176,27 @@ def _load_autopsy_module():
         return None
 
 
+# ── skills module: learned workflows ────────────────────────────────
+_skills_mod = None
+
+
+def _load_skills_module():
+    global _skills_mod
+    if _skills_mod is not None:
+        return _skills_mod
+    src = BIN_DIR / "jarvis-skills.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_skills_learned", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _skills_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -1215,6 +1236,17 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
                 blocks.append({"type": "text", "text": ap_hint})
         except Exception as e:
             sys.stderr.write(f"jarvis-think: autopsy hint skipped ({e})\n")
+
+    # Learned skills — workflows Jarvis has codified from prior teach
+    # moments. Lists the available triggers so Claude knows what's there.
+    sk_mod = _load_skills_module()
+    if sk_mod is not None:
+        try:
+            sk_hint = sk_mod.system_prompt_hint()
+            if sk_hint:
+                blocks.append({"type": "text", "text": sk_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: skills hint skipped ({e})\n")
 
     if cacheable:
         blocks.append({
