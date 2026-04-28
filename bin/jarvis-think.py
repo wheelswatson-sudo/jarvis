@@ -1249,6 +1249,9 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
     # Predictive context block — uncached, top of stack so it shapes
     # interpretation. Read from disk every turn (recent topics + pending
     # notifications change quickly). Empty when JARVIS_PREDICTIVE_CONTEXT=0.
+    # NOTE: jarvis-patterns.py is loaded indirectly here, not at the top —
+    # ContextEngine.predict() calls _learned_pattern_hint() which lazy-loads
+    # patterns. So this single load wires in both context AND patterns.
     ctx_mod = _load_context_module()
     if ctx_mod is not None:
         try:
