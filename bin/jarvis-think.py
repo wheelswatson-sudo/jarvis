@@ -1018,6 +1018,26 @@ def _load_config() -> dict:
         return {}
 
 
+_PERSONALITY_DEFAULTS = {"humor": 75, "formality": 80, "proactivity": 70, "honesty": 90}
+
+
+def _personality_calibration_block(cfg: dict) -> str:
+    """Turn the four 0–100 sliders in settings.json into a short calibration
+    line appended to the personality system prompt. Returns "" if every slider
+    matches its default (no need to spend tokens stating the defaults)."""
+    vals = {k: cfg.get(k, _PERSONALITY_DEFAULTS[k]) for k in _PERSONALITY_DEFAULTS}
+    if all(vals[k] == _PERSONALITY_DEFAULTS[k] for k in vals):
+        return ""
+    return (
+        "## Personality calibration (user preferences, 0–100 scale)\n"
+        f"- humor: {vals['humor']} (higher = more wit and dry asides)\n"
+        f"- formality: {vals['formality']} (higher = more 'sir', tighter register)\n"
+        f"- proactivity: {vals['proactivity']} (higher = more anticipating, less asking)\n"
+        f"- honesty: {vals['honesty']} (higher = more direct, less diplomatic)\n"
+        "Modulate tone toward these values without naming them aloud."
+    )
+
+
 # ── World state — what a sharp EA knows walking into the room ────────
 # Injected fresh every turn as an UNCACHED system block, so the model never
 # has to call get_time/get_date/etc. for ground-truth "now" facts. Order in
@@ -1214,10 +1234,11 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
     current query strongly, nothing is injected — avoiding context noise."""
     base = (data.get("system") or "").strip()
     summary = (data.get("summary") or "").strip()
+    calibration = _personality_calibration_block(_load_config())
+    parts = [p for p in (base, calibration) if p]
     if summary:
-        cacheable = f"{base}\n\n## Conversation summary so far\n{summary}".strip()
-    else:
-        cacheable = base
+        parts.append(f"## Conversation summary so far\n{summary}")
+    cacheable = "\n\n".join(parts).strip()
 
     mem = Memory()
     primer = mem.format_priming_block(query=user_text, k=3)
