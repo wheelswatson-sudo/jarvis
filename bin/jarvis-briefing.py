@@ -2,9 +2,9 @@
 """Morning briefing — proactive day summary, voice-ready.
 
 An elite EA doesn't wait to be asked. This module assembles Watson's day
-from calendar, email, memory, pending notifications, and weather, optionally
-calls the orchestrator to prep per-meeting context, and synthesizes a tight
-spoken briefing via Sonnet.
+from calendar, email, Telegram group chats, memory, pending notifications,
+and weather, optionally calls the orchestrator to prep per-meeting context,
+and synthesizes a tight spoken briefing via Sonnet.
 
 Generation can run on a cron / LaunchAgent before Watson's first interaction.
 The briefing file at ~/.jarvis/briefings/YYYY-MM-DD.md is the source of truth;
@@ -77,6 +77,7 @@ _calendar_mod = None
 _email_mod = None
 _memory_mod = None
 _orch_mod = None
+_telegram_mod = None
 
 
 def _calendar():
@@ -105,6 +106,13 @@ def _orchestrator():
     if _orch_mod is None:
         _orch_mod = _load_sibling("jarvis-orchestrate")
     return _orch_mod
+
+
+def _telegram():
+    global _telegram_mod
+    if _telegram_mod is None:
+        _telegram_mod = _load_sibling("jarvis-telegram")
+    return _telegram_mod
 
 
 # ── Anthropic call (single-shot, blocking) ──────────────────────────
@@ -199,6 +207,22 @@ def _pull_memory_recent(limit: int = 5) -> list[dict]:
         return mem.recent(limit)
     except Exception:
         return []
+
+
+def _pull_telegram(hours: int = 12) -> dict:
+    """Pull the per-group digest. Only includes groups with activity in
+    the window — empty groups are dropped before this returns."""
+    mod = _telegram()
+    if mod is None:
+        return {"groups": []}
+    try:
+        rec = mod.telegram_digest(hours=hours, priority="all")
+    except Exception as e:
+        return {"error": f"telegram: {e}"}
+    if isinstance(rec, dict) and rec.get("error"):
+        # Soft-fail — telegram is optional. Briefing must never block on it.
+        return {"groups": [], "soft_error": rec["error"]}
+    return rec or {"groups": []}
 
 
 def _pull_weather() -> dict:
@@ -310,6 +334,21 @@ def _build_synth_prompt(payload: dict) -> str:
             f"- {m.get('from', '')}: {m.get('subject', '')}" for m in unread[:8]
         ))
 
+    tg = payload.get("telegram") or {}
+    tg_groups = [g for g in (tg.get("groups") or []) if (g.get("message_count") or 0) > 0]
+    if tg_groups:
+        lines = []
+        for g in tg_groups[:6]:
+            urgency = "🔴 " if g.get("urgent") else ""
+            actions = g.get("action_items") or []
+            action_blob = (" Actions: " + " | ".join(actions[:3])) if actions else ""
+            lines.append(
+                f"- {urgency}{g.get('name')} ({g.get('message_count')} msgs, "
+                f"priority {g.get('priority', 'normal')}): "
+                f"{(g.get('summary') or '').strip()}{action_blob}"
+            )
+        parts.append("GROUP CHATS (Telegram):\n" + "\n".join(lines))
+
     pending = payload.get("pending_notifications") or []
     if pending:
         parts.append(f"PENDING NOTIFICATIONS ({len(pending)}):\n" + "\n".join(
@@ -381,6 +420,15 @@ def _fallback_synth(payload: dict) -> str:
         )
     if pending_count:
         lines.append(f"There are {pending_count} pending notifications queued.")
+    tg_groups = [g for g in ((payload.get("telegram") or {}).get("groups") or [])
+                 if (g.get("message_count") or 0) > 0]
+    if tg_groups:
+        urgent_n = sum(1 for g in tg_groups if g.get("urgent"))
+        urgent_phrase = f", {urgent_n} flagged urgent" if urgent_n else ""
+        lines.append(
+            f"In Telegram: {len(tg_groups)} group{'s' if len(tg_groups) != 1 else ''} "
+            f"with activity{urgent_phrase}."
+        )
     weather = payload.get("weather") or {}
     if weather.get("now_temp_f"):
         lines.append(
@@ -477,6 +525,7 @@ def generate_today(force: bool = False) -> dict:
     _log(f"generating briefing for {payload['date']}")
     payload["calendar"] = _pull_calendar()
     payload["email"] = _pull_email()
+    payload["telegram"] = _pull_telegram()
     payload["pending_notifications"] = _pull_pending_notifications()
     payload["memory_recent"] = _pull_memory_recent()
     payload["weather"] = _pull_weather()

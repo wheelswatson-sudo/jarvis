@@ -963,19 +963,49 @@ def urgent_pending() -> int:
     if not groups:
         return 0
     since = time.time() - 3600
-    tokens_re = re.compile(
-        r"\b(urgent|asap|now|emergency|today|deadline|"
-        r"please respond|@watson|hey watson|need (you|your))\b",
-        re.I,
-    )
     flagged = 0
     for g in groups:
         for rec in _read_cache(g["id"], since):
             text = rec.get("text") or ""
-            if tokens_re.search(text):
+            if _URGENT_RE.search(text):
                 flagged += 1
                 break  # one flag per group is enough
     return flagged
+
+
+_URGENT_RE = re.compile(
+    r"\b(urgent|asap|now|emergency|today|deadline|"
+    r"please respond|@watson|hey watson|need (you|your))\b",
+    re.I,
+)
+
+
+def recent_urgent(minutes: int = 5) -> list[dict]:
+    """Return cache messages from the last `minutes` whose text trips the
+    urgency heuristic. wake-listener uses this on conversation-exit to
+    flush a one-line announcement into the notification queue. Cheap —
+    pure local cache scan, no API call."""
+    cfg = _load_config()
+    groups = cfg.get("monitored_groups") or []
+    if not groups:
+        return []
+    since = time.time() - max(0, minutes) * 60
+    out: list[dict] = []
+    for g in groups:
+        for rec in _read_cache(g["id"], since):
+            text = rec.get("text") or ""
+            if not _URGENT_RE.search(text):
+                continue
+            out.append({
+                "group": g.get("title") or rec.get("chat_title"),
+                "priority": g.get("priority", "normal"),
+                "sender": rec.get("from_name"),
+                "text": text,
+                "timestamp": rec.get("date"),
+                "message_id": rec.get("message_id"),
+            })
+    out.sort(key=lambda r: r.get("timestamp") or 0)
+    return out
 
 
 def context_hint() -> str:
