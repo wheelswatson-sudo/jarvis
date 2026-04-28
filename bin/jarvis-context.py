@@ -123,6 +123,28 @@ def _persistent_convo_active() -> bool:
         return False
 
 
+_AMBIENT_HINTS = {
+    "noisy_environment": "Environment: noisy. Keep responses brief and clear.",
+    "car": "Environment: car / hands-free. Very concise; one fact per turn.",
+    "meeting": "Environment: meeting in progress. Listen mode — only respond if directly addressed by name.",
+}
+
+
+def _ambient_hint() -> str:
+    """Read the scene state written by bin/jarvis-ambient.py and return a
+    one-line behavioral hint. Default (quiet_office) returns empty string —
+    no need to clutter the context block when behavior is unchanged."""
+    if os.environ.get("JARVIS_AMBIENT", "1") != "1":
+        return ""
+    scene_file = ASSISTANT_DIR / "state" / "ambient_scene"
+    try:
+        first = scene_file.read_text(encoding="utf-8").splitlines()[0]
+    except (FileNotFoundError, OSError, IndexError):
+        return ""
+    label = first.split("\t", 1)[0].strip()
+    return _AMBIENT_HINTS.get(label, "")
+
+
 class ContextEngine:
     """Builds the predictive priming block for the system prompt."""
 
@@ -152,6 +174,10 @@ class ContextEngine:
 
         if _persistent_convo_active():
             lines.append("Persistent convo mode is active — conversational tone.")
+
+        ambient = _ambient_hint()
+        if ambient:
+            lines.append(ambient)
 
         body = "\n".join(lines).strip()
         if not body:

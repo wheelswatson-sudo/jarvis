@@ -154,6 +154,28 @@ def _load_voiceprint_module():
         return None
 
 
+_ambient_mod = None
+
+
+def _load_ambient_module():
+    """Lazy-load bin/jarvis-ambient.py for the scene classifier."""
+    global _ambient_mod
+    if _ambient_mod is not None:
+        return _ambient_mod
+    src = BIN_DIR / "jarvis-ambient.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_ambient", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _ambient_mod = mod
+        return mod
+    except Exception as e:
+        log(f"ambient module load failed: {e}")
+        return None
+
+
 def _voice_matches_owner(audio_path: str) -> bool:
     """Verify the captured audio against the enrolled voiceprint.
 
@@ -270,9 +292,15 @@ def measure_silence_gate(duration_seconds=NOISE_CALIBRATION_SECONDS):
     cough during calibration doesn't inflate the gate, and clamps the
     result so neither digital-silence nor a loud room produces a useless
     threshold.
+
+    Side effect: when JARVIS_AMBIENT=1, classifies the captured audio into
+    a scene label (quiet_office / noisy_environment / car / meeting) and
+    writes it to ~/.jarvis/state/ambient_scene for downstream consumers
+    (jarvis-context.py, bin/jarvis volume adjust).
     """
     chunks_needed = max(4, int(duration_seconds * SAMPLE_RATE / CHUNK_SIZE))
     amps = []
+    raw_chunks = []
     try:
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -282,7 +310,9 @@ def measure_silence_gate(duration_seconds=NOISE_CALIBRATION_SECONDS):
         ) as stream:
             for _ in range(chunks_needed):
                 chunk, _ = stream.read(CHUNK_SIZE)
-                amps.append(float(np.abs(chunk.flatten()).mean()))
+                flat = chunk.flatten()
+                amps.append(float(np.abs(flat).mean()))
+                raw_chunks.append(flat.copy())
     except Exception as e:
         log(f"Noise calibration failed ({e}); using fallback gate {NOISE_GATE_FALLBACK}")
         return NOISE_GATE_FALLBACK
@@ -293,6 +323,20 @@ def measure_silence_gate(duration_seconds=NOISE_CALIBRATION_SECONDS):
     noise_floor = float(np.percentile(amps, NOISE_PERCENTILE))
     gate = int(max(NOISE_GATE_FLOOR, min(NOISE_GATE_CEILING, noise_floor * NOISE_GATE_MULTIPLIER)))
     log(f"Noise floor p{NOISE_PERCENTILE}={noise_floor:.0f} → silence gate={gate}")
+
+    # Reuse the calibration audio for ambient scene classification — free
+    # since we already captured it. Failures are non-fatal: we just don't
+    # write the state file and downstream consumers fall back to defaults.
+    if os.environ.get("JARVIS_AMBIENT", "1") == "1":
+        try:
+            ambient_mod = _load_ambient_module()
+            if ambient_mod is not None:
+                label, metrics = ambient_mod.classify(raw_chunks)
+                ambient_mod.write_scene(label, metrics)
+                log(f"Ambient scene: {label} (rms={metrics.get('rms')} centroid={metrics.get('centroid_hz')} zcr={metrics.get('zcr')})")
+        except Exception as e:
+            log(f"ambient classify skipped: {e}")
+
     return gate
 
 
