@@ -113,6 +113,27 @@ def _load_context_module():
         return None
 
 
+# ── feedback module: lazy-loaded, optional. Provides system_prompt_hint(). ──
+_feedback_mod = None
+
+
+def _load_feedback_module():
+    global _feedback_mod
+    if _feedback_mod is not None:
+        return _feedback_mod
+    src = BIN_DIR / "jarvis-feedback.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_feedback", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _feedback_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -789,6 +810,19 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
     # below stays byte-stable.
     if PARALLEL_TOOLS_ENABLED:
         blocks.append({"type": "text", "text": PARALLEL_TOOLS_HINT})
+
+    # Feedback-driven behavioral calibration — pulls from the rolling
+    # profile.json. Returns "" when there isn't enough session data yet,
+    # so the block silently no-ops on fresh installs. Uncached because
+    # the profile updates after every convo session.
+    fb_mod = _load_feedback_module()
+    if fb_mod is not None:
+        try:
+            fb_hint = fb_mod.system_prompt_hint()
+            if fb_hint:
+                blocks.append({"type": "text", "text": fb_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: feedback hint skipped ({e})\n")
 
     if cacheable:
         blocks.append({
