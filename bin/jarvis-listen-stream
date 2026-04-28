@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""JARVIS — Streaming STT via Deepgram Nova-3.
+
+Standalone for now: connects to Deepgram's realtime WebSocket, streams audio
+from the default microphone, prints transcripts to stdout. Wiring into the
+voice loop comes later — this is the foundation.
+
+Output protocol (line-oriented, flushed):
+    PARTIAL: <interim text>     interim hypothesis, may be revised
+    FINAL:   <final text>       endpointed final transcript
+    SPEECH_END                  Deepgram VAD detected end of utterance
+
+Gating:
+    JARVIS_STT=deepgram         required to enable. Default voice loop still
+                                uses whisper-cli via jarvis-listen.
+
+Secrets:
+    DEEPGRAM_API_KEY            via jarvis-secrets (Keychain → .env), or
+                                fallback to the process environment.
+
+Dependencies:
+    websockets   pip install websockets
+    sounddevice  pip install sounddevice  (already used by wake-listener)
+
+Usage:
+    JARVIS_STT=deepgram bin/jarvis-listen-stream
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import queue
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlencode
+
+ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
+BIN_DIR = ASSISTANT_DIR / "bin"
+
+# Audio: 16kHz int16 mono — what Deepgram Nova-3 expects for linear16.
+SAMPLE_RATE = 16000
+CHANNELS = 1
+BLOCK_SIZE = 1600  # 100ms at 16kHz; small enough for low latency, big enough to amortize WS overhead
+
+DEEPGRAM_HOST = "wss://api.deepgram.com/v1/listen"
+DEEPGRAM_PARAMS = {
+    "model": "nova-3",
+    "language": "en",
+    "smart_format": "true",
+    "interim_results": "true",
+    "endpointing": "300",   # 300ms silence → final transcript
+    "vad_events": "true",
+    "encoding": "linear16",
+    "sample_rate": str(SAMPLE_RATE),
+    "channels": str(CHANNELS),
+}
+
+
+def get_api_key() -> str:
+    """Resolve DEEPGRAM_API_KEY: jarvis-secrets first, then process env."""
+    secrets = BIN_DIR / "jarvis-secrets"
+    if secrets.exists():
+        try:
+            result = subprocess.run(
+                [str(secrets), "--get", "DEEPGRAM_API_KEY"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            key = (result.stdout or "").strip()
+            if key:
+                return key
+        except Exception:
+            pass
+    return os.environ.get("DEEPGRAM_API_KEY", "")
+
+
+def emit(line: str) -> None:
+    """Single-line, flushed write to stdout. Callers parse line-by-line."""
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+async def stream() -> int:
+    if os.environ.get("JARVIS_STT") != "deepgram":
+        sys.stderr.write(
+            "jarvis-listen-stream: set JARVIS_STT=deepgram to enable streaming STT\n"
+        )
+        return 2
+
+    api_key = get_api_key()
+    if not api_key:
+        sys.stderr.write(
+            "jarvis-listen-stream: DEEPGRAM_API_KEY not set "
+            "(jarvis-secrets --set DEEPGRAM_API_KEY, or export it)\n"
+        )
+        return 2
+
+    try:
+        import websockets
+    except ImportError:
+        sys.stderr.write(
+            "jarvis-listen-stream: missing 'websockets' (pip install websockets)\n"
+        )
+        return 2
+
+    try:
+        import sounddevice as sd
+    except ImportError:
+        sys.stderr.write(
+            "jarvis-listen-stream: missing 'sounddevice' (pip install sounddevice)\n"
+        )
+        return 2
+
+    url = f"{DEEPGRAM_HOST}?{urlencode(DEEPGRAM_PARAMS)}"
+    headers = [("Authorization", f"Token {api_key}")]
+
+    audio_q: queue.Queue = queue.Queue()
+    loop = asyncio.get_running_loop()
+
+    def mic_callback(indata, frames, time_info, status):
+        if status:
+            sys.stderr.write(f"[mic] {status}\n")
+        # `indata` is a CFFI buffer for RawInputStream; bytes() gives us the
+        # raw PCM frames Deepgram wants over the wire.
+        audio_q.put(bytes(indata))
+
+    speech_active = False
+
+    async with websockets.connect(url, additional_headers=headers) as ws:
+        with sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype="int16",
+            blocksize=BLOCK_SIZE,
+            callback=mic_callback,
+        ):
+            async def sender():
+                while True:
+                    chunk = await loop.run_in_executor(None, audio_q.get)
+                    if chunk is None:
+                        await ws.send(json.dumps({"type": "CloseStream"}))
+                        return
+                    await ws.send(chunk)
+
+            async def receiver():
+                nonlocal speech_active
+                async for raw in ws:
+                    if isinstance(raw, bytes):
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg_type = msg.get("type")
+
+                    if msg_type == "Results":
+                        alts = (
+                            msg.get("channel", {}).get("alternatives") or []
+                        )
+                        if not alts:
+                            continue
+                        text = (alts[0].get("transcript") or "").strip()
+                        if not text:
+                            continue
+                        if msg.get("is_final"):
+                            emit(f"FINAL: {text}")
+                        else:
+                            emit(f"PARTIAL: {text}")
+
+                    elif msg_type == "SpeechStarted":
+                        speech_active = True
+
+                    elif msg_type == "UtteranceEnd":
+                        if speech_active:
+                            emit("SPEECH_END")
+                            speech_active = False
+
+            send_task = asyncio.create_task(sender())
+            recv_task = asyncio.create_task(receiver())
+            try:
+                done, _pending = await asyncio.wait(
+                    [send_task, recv_task],
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                for t in done:
+                    exc = t.exception()
+                    if exc is not None:
+                        raise exc
+            finally:
+                send_task.cancel()
+                recv_task.cancel()
+
+    return 0
+
+
+def main() -> int:
+    try:
+        return asyncio.run(stream())
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
