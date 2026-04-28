@@ -162,6 +162,27 @@ def _ambient_hint() -> str:
     return _AMBIENT_HINTS.get(label, "")
 
 
+def _telegram_hint() -> str:
+    """One-liner when monitored Telegram groups have urgent traffic in the
+    last hour. Lazy-loads jarvis-telegram so installs without the bot pay
+    nothing. Heuristic-only — no Anthropic call from this hot path."""
+    if os.environ.get("JARVIS_TELEGRAM", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-telegram.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-telegram.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_telegram", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint() or ""
+    except Exception:
+        return ""
+
+
 def _briefing_hint() -> str:
     """Pull the briefing-pending one-liner from jarvis-briefing if today's
     briefing is sitting unread. Lazy-loaded — same pattern as patterns.py."""
@@ -225,6 +246,10 @@ class ContextEngine:
         briefing = _briefing_hint()
         if briefing:
             lines.append(briefing)
+
+        telegram = _telegram_hint()
+        if telegram:
+            lines.append(telegram)
 
         body = "\n".join(lines).strip()
         if not body:

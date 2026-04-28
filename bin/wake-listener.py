@@ -778,6 +778,106 @@ def on_wake_detected() -> str | None:
 
 
 _briefing_mod = None
+_telegram_mod = None
+_telegram_thread = None
+_telegram_announced_ids: set = set()
+
+
+def _load_telegram_module():
+    """Lazy import of jarvis-telegram.py — same pattern as briefing."""
+    global _telegram_mod
+    if _telegram_mod is not None:
+        return _telegram_mod
+    src = BIN_DIR / "jarvis-telegram.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_telegram", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _telegram_mod = mod
+        return mod
+    except Exception as e:
+        log(f"telegram module load failed: {e}")
+        return None
+
+
+def _start_telegram_polling() -> None:
+    """Spawn one daemon thread that long-polls Telegram updates and writes
+    them to the local cache. Idempotent — second call is a no-op. The
+    thread dies with the listener (daemon=True) so we don't need explicit
+    teardown.
+
+    Gate: only starts when the user has actually configured a bot
+    (JARVIS_TELEGRAM=1 effective + token present). Otherwise the call is
+    a silent no-op so installs without Telegram pay no startup cost."""
+    global _telegram_thread
+    if _telegram_thread is not None and _telegram_thread.is_alive():
+        return
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        return
+    if os.environ.get("JARVIS_TELEGRAM", "1") != "1":
+        return
+    mod = _load_telegram_module()
+    if mod is None:
+        return
+    try:
+        t = threading.Thread(target=mod.poll_loop, name="telegram-poller", daemon=True)
+        t.start()
+        _telegram_thread = t
+        log("Telegram polling thread started")
+    except Exception as e:
+        log(f"telegram thread spawn failed: {e}")
+
+
+def _flush_urgent_telegram() -> None:
+    """Push urgent Telegram messages from the last few minutes onto the
+    notification queue. Called when a conversation session ends so Watson
+    hears about anything that came in while he was talking. Tracks already-
+    announced message_ids in-process to avoid double-fires across back-to-
+    back conversations."""
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        return
+    if os.environ.get("JARVIS_TELEGRAM", "1") != "1":
+        return
+    mod = _load_telegram_module()
+    if mod is None:
+        return
+    try:
+        urgent = mod.recent_urgent(minutes=10)
+    except Exception as e:
+        log(f"telegram urgent scan failed: {e}")
+        return
+    if not urgent:
+        return
+    fresh = [u for u in urgent if u.get("message_id") not in _telegram_announced_ids]
+    if not fresh:
+        return
+    try:
+        NOTIF_DIR.mkdir(parents=True, exist_ok=True)
+        existing: list = []
+        if PENDING_NOTIFICATIONS.exists():
+            try:
+                with PENDING_NOTIFICATIONS.open() as f:
+                    existing = json.load(f) or []
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+        for u in fresh:
+            sender = u.get("sender") or "(unknown)"
+            group = u.get("group") or ""
+            text = (u.get("text") or "").strip()
+            preview = text[:140] + ("..." if len(text) > 140 else "")
+            msg = f"Urgent in {group}: {sender} — {preview}"
+            existing.append({"message": msg, "ts": int(time.time()),
+                             "source": "telegram", "message_id": u.get("message_id")})
+            _telegram_announced_ids.add(u.get("message_id"))
+        with PENDING_NOTIFICATIONS.open("w") as f:
+            json.dump(existing, f, indent=2)
+        log(f"Queued {len(fresh)} urgent Telegram message(s) for delivery")
+    except Exception as e:
+        log(f"telegram urgent flush failed: {e}")
 
 
 def _load_briefing_module():
@@ -1230,6 +1330,9 @@ def run_conversation_mode(persistent: bool = False) -> None:
             # Loop back to idle wait. Timer resets per turn.
     finally:
         _set_convo_flag(False)
+        # Flush any urgent Telegram messages that arrived during the
+        # conversation. Watson hears them on the next idle moment.
+        _flush_urgent_telegram()
         # Spawn the self-improvement daemon detached. jarvis-improve
         # orchestrates the six systems (feedback → metacog → autopsy →
         # patterns → skills, plus weekly synthesis + evolution) so the
@@ -1308,6 +1411,10 @@ def main():
     # Logged once at startup so the boot mode is visible.
     if _is_persistent_convo_active():
         log("Persistent convo flag set on startup")
+
+    # Start the Telegram poller in the background — daemon thread, dies with
+    # the listener. Silent no-op when no TELEGRAM_BOT_TOKEN is configured.
+    _start_telegram_polling()
 
     # Pre-warm the response audio cache in the background. Common phrases
     # ("Got it.", "Good morning, sir.", etc.) get fetched from ElevenLabs

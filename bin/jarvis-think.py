@@ -531,6 +531,7 @@ _calendar_mod = None
 _orch_mod = None
 _briefing_mod = None
 _research_mod = None
+_telegram_mod = None
 
 
 def _load_email_module():
@@ -620,6 +621,24 @@ def _load_research_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: research module load failed ({e})\n")
+        return None
+
+
+def _load_telegram_module():
+    global _telegram_mod
+    if _telegram_mod is not None:
+        return _telegram_mod
+    src = BIN_DIR / "jarvis-telegram.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_telegram", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _telegram_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: telegram module load failed ({e})\n")
         return None
 
 
@@ -781,6 +800,56 @@ def _tool_research_topic(args: dict, _mem: Memory) -> dict:
     return mod.research_topic(
         topic=args.get("topic") or "",
         depth=args.get("depth") or "quick",
+    )
+
+
+def _tool_check_telegram(args: dict, _mem: Memory) -> dict:
+    mod = _load_telegram_module()
+    if mod is None:
+        return {"error": "jarvis-telegram module not installed"}
+    return mod.check_telegram(
+        group_name=args.get("group_name"),
+        hours=int(args.get("hours") or 4),
+    )
+
+
+def _tool_telegram_digest(args: dict, _mem: Memory) -> dict:
+    mod = _load_telegram_module()
+    if mod is None:
+        return {"error": "jarvis-telegram module not installed"}
+    return mod.telegram_digest(
+        hours=int(args.get("hours") or 12),
+        priority=args.get("priority") or "all",
+    )
+
+
+def _tool_telegram_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_telegram_module()
+    if mod is None:
+        return {"error": "jarvis-telegram module not installed"}
+    query = args.get("query") or ""
+    if not query:
+        return {"error": "query is required"}
+    return mod.telegram_search(
+        query=query,
+        group_name=args.get("group_name"),
+        hours=int(args.get("hours") or 48),
+    )
+
+
+def _tool_send_telegram(args: dict, _mem: Memory) -> dict:
+    mod = _load_telegram_module()
+    if mod is None:
+        return {"error": "jarvis-telegram module not installed"}
+    group = args.get("group_name")
+    message = args.get("message")
+    if not group or not message:
+        return {"error": "group_name and message required"}
+    return mod.send_telegram(
+        group_name=group,
+        message=message,
+        reply_to=args.get("reply_to"),
+        confirm=bool(args.get("confirm")),
     )
 
 
@@ -1213,6 +1282,132 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     },
                 },
                 "required": ["topic"],
+            },
+        },
+    ),
+    "check_telegram": (
+        _tool_check_telegram,
+        {
+            "name": "check_telegram",
+            "description": (
+                "Pull recent messages from Watson's monitored Telegram group "
+                "chats. Reads from the local cache — instant, no network. "
+                "Pass `group_name` to filter to one group (fuzzy match on "
+                "title); leave it empty to pull from every monitored group. "
+                "Returns raw messages — for a summarized read, use "
+                "telegram_digest instead. Use this when Watson asks 'what "
+                "did so-and-so say in the X group' or wants the actual text."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "group_name": {
+                        "type": "string",
+                        "description": "Optional group title to filter by (fuzzy).",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "How far back to look (default 4).",
+                    },
+                },
+            },
+        },
+    ),
+    "telegram_digest": (
+        _tool_telegram_digest,
+        {
+            "name": "telegram_digest",
+            "description": (
+                "AI-summarized digest of Watson's monitored Telegram groups: "
+                "one block per active group with summary, action items "
+                "directed at Watson, urgency flag, and key topics. Prefer "
+                "this over multiple check_telegram calls when Watson asks "
+                "'what's happening in the team chats', 'catch me up on "
+                "Telegram', or 'any updates from the team'. Filter by "
+                "priority ('high' / 'normal' / 'low' / 'all') to focus on "
+                "the tier that matters."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "description": "Window in hours (default 12).",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["all", "high", "normal", "low"],
+                        "description": "Filter to groups at this priority (default 'all').",
+                    },
+                },
+            },
+        },
+    ),
+    "telegram_search": (
+        _tool_telegram_search,
+        {
+            "name": "telegram_search",
+            "description": (
+                "Substring search across recent Telegram messages in Watson's "
+                "monitored groups. Returns each hit with one message of "
+                "context on either side. Use when Watson asks 'did anyone "
+                "mention X in the team chat' or 'search the founders group "
+                "for the term sheet'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Substring to search for (case-insensitive).",
+                    },
+                    "group_name": {
+                        "type": "string",
+                        "description": "Optional group title to scope the search.",
+                    },
+                    "hours": {
+                        "type": "integer",
+                        "description": "Window in hours (default 48).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    ),
+    "send_telegram": (
+        _tool_send_telegram,
+        {
+            "name": "send_telegram",
+            "description": (
+                "Send a message to one of Watson's monitored Telegram groups. "
+                "REQUIRES confirm=true — without it the call returns a "
+                "preview for Watson to approve. Workflow: call with "
+                "confirm=false (or omit it), read the preview to Watson, "
+                "ask 'Should I send it, sir?', then re-call with "
+                "confirm=true after a clear yes. Pass reply_to=<message_id> "
+                "to thread under a specific message."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "group_name": {
+                        "type": "string",
+                        "description": "Group title (fuzzy match).",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The text to send.",
+                    },
+                    "reply_to": {
+                        "type": "integer",
+                        "description": "Optional message_id to reply to.",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to actually send.",
+                    },
+                },
+                "required": ["group_name", "message"],
             },
         },
     ),
