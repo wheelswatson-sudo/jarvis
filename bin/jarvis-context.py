@@ -130,6 +130,23 @@ _AMBIENT_HINTS = {
 }
 
 
+def _learned_pattern_hint(now) -> str:
+    """Lazy-load jarvis-patterns and ask for the current slot's hint.
+    Returns '' if patterns module / data is missing — caller falls back
+    to the static time-of-day rule."""
+    src = ASSISTANT_DIR / "bin" / "jarvis-patterns.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_patterns", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint(now=now) or ""
+    except Exception:
+        return ""
+
+
 def _ambient_hint() -> str:
     """Read the scene state written by bin/jarvis-ambient.py and return a
     one-line behavioral hint. Default (quiet_office) returns empty string —
@@ -162,7 +179,12 @@ class ContextEngine:
         lines: list[str] = []
         lines.append(f"It's {timestamp}.")
         lines.append(_day_shape(self.now))
-        lines.append(tod_hint)
+
+        # Prefer a learned pattern hint when patterns.json has a match for
+        # the current weekday + hour band. Static time-of-day rule is the
+        # fallback for cold-start (no patterns yet).
+        learned = _learned_pattern_hint(self.now)
+        lines.append(learned if learned else tod_hint)
 
         topics = _recent_topics()
         if topics:
