@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+"""
+jarvis-finding — CLI for the persistent epistemic spine.
+
+Subcommands:
+  capture     Record a new finding (idempotent on duplicate claim).
+  revise      Revise a finding's status, confidence, or sources.
+  supersede   Mark one finding as superseding another.
+  query       Search findings by text (FTS5) or filters.
+  tail        Show recent events from events.jsonl.
+  due         List findings past their revisit_after_days.
+  index       Regenerate ~/.jarvis/findings/index.md.
+  reindex     Rebuild findings_fts FTS5 table from disk.
+  stats       Print counts.
+  doctor      Run invariant checks.
+  migrate     Backfill from a known source (lessons|scout|decisions).
+  hook        Render the UserPromptSubmit findings block (used by hook.sh).
+  brief       Render the SessionStart 'due' block.
+
+See `jarvis-finding <subcommand> --help` for options.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# Allow `import jarvis_findings` from the same dir as this script.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import jarvis_findings as jf  # noqa: E402
+
+
+def _split_csv(s: str | None) -> list[str]:
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _session() -> str:
+    return os.environ.get("JARVIS_EPISODE_SESSION") or os.environ.get("CLAUDE_SESSION_ID") or ""
+
+
+def _head_check(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Best-effort HEAD request. Returns (ok, info). Tries HEAD then falls
+    back to a 1-byte GET; some servers reject HEAD with 405."""
+    import urllib.request
+    import urllib.error
+    for method in ("HEAD", "GET"):
+        try:
+            req = urllib.request.Request(url, method=method)
+            req.add_header("User-Agent", "jarvis-finding/1.0 (URL liveness check)")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                code = resp.getcode()
+                if 200 <= code < 400:
+                    return True, f"HTTP {code}"
+                return False, f"HTTP {code}"
+        except urllib.error.HTTPError as e:
+            if method == "HEAD" and e.code == 405:
+                continue  # try GET
+            return False, f"HTTP {e.code}"
+        except urllib.error.URLError as e:
+            return False, f"URLError: {e.reason}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    return False, "unreachable"
+
+
+# ---------------------------------------------------------------------------
+# capture
+# ---------------------------------------------------------------------------
+
+def cmd_capture(args: argparse.Namespace) -> int:
+    sources: list[dict] = []
+    if args.source_url:
+        for url in args.source_url:
+            sources.append({"kind": "web", "url": url, "fetched_ts": jf.now_iso()})
+    if args.source:
+        for raw in args.source:
+            sources.append(jf._coerce_source(raw))
+
+    # Optional URL liveness check when claiming web-fetched verification.
+    # Best-effort: warns on failure but does not block (network is unreliable;
+    # the discipline is that the user *says* they fetched it — verifying that
+    # the URL is alive at THIS instant is a sanity check, not a proof).
+    if args.verified_by == "web-fetched" and not args.skip_url_check:
+        web_urls = [s["url"] for s in sources if s.get("kind") == "web" and s.get("url")]
+        for u in web_urls:
+            ok, info = _head_check(u)
+            if not ok:
+                print(f"  [warn] --source-url {u} HEAD check: {info}", file=sys.stderr)
+                if args.strict_urls:
+                    print(f"  [refused] --strict-urls is set; URL did not return 2xx/3xx", file=sys.stderr)
+                    return 2
+
+    try:
+        fid, status = jf.capture(
+            claim=args.claim,
+            type_=args.type,
+            confidence=args.confidence,
+            tags=_split_csv(args.tags),
+            sources=sources,
+            trigger=args.trigger,
+            session=args.session or _session(),
+            initial_reasoning=args.reasoning,
+            revisit_after_days=args.revisit_after_days,
+            verified_by=args.verified_by,
+            force_new=args.force_new,
+        )
+    except ValueError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"id": fid, "status": status}))
+    else:
+        marker = {"new": "NEW", "duplicate": "DUP", "near-duplicate": "NEAR"}.get(status, status.upper())
+        print(f"{fid}  [{marker}]  {args.type}/{args.confidence}: {args.claim}")
+        if status == "duplicate":
+            print(f"  (exact match — rediscovery event logged. "
+                  f"Use `jarvis-finding revise {fid}` or pass `--force-new` to override.)")
+        elif status == "near-duplicate":
+            print(f"  (near-match of existing finding {fid} — refused to write a new file. "
+                  f"Either `jarvis-finding revise {fid} --add-source ...` to extend it, "
+                  f"or re-run with `--force-new` to capture as a separate finding.)")
+    jf.render_index()
+    return 0 if status != "near-duplicate" else 1
+
+
+# ---------------------------------------------------------------------------
+# revise
+# ---------------------------------------------------------------------------
+
+def cmd_revise(args: argparse.Namespace) -> int:
+    sources: list = []
+    if args.add_source:
+        sources.extend(args.add_source)
+    if args.add_source_url:
+        for u in args.add_source_url:
+            sources.append({"kind": "web", "url": u, "fetched_ts": jf.now_iso()})
+    add = sources or None
+    try:
+        changed = jf.revise(
+            args.id,
+            status=args.status,
+            confidence=args.confidence,
+            add_source=add,
+            reason=args.reason,
+            session=args.session or _session(),
+            mark_reviewed=args.mark_reviewed,
+            verified_by=args.verified_by,
+        )
+    except ValueError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    print(f"{args.id}  {'CHANGED' if changed else 'NO-OP'}")
+    if changed:
+        jf.render_index()
+    return 0 if changed else 1
+
+
+# ---------------------------------------------------------------------------
+# supersede
+# ---------------------------------------------------------------------------
+
+def cmd_supersede(args: argparse.Namespace) -> int:
+    jf.supersede(
+        args.new_id,
+        args.over,
+        reason=args.reason,
+        session=args.session or _session(),
+    )
+    print(f"{args.new_id} now supersedes {args.over}")
+    jf.render_index()
+    return 0
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    try:
+        jf.purge(args.id, reason=args.reason, session=args.session or _session())
+    except RuntimeError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    except KeyError:
+        print(f"not found: {args.id}", file=sys.stderr)
+        return 1
+    print(f"{args.id}  PURGED  ({args.reason})")
+    print(f"  audit copy: ~/.jarvis/findings/.purged/{args.id}.md")
+    jf.render_index()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
+
+def cmd_query(args: argparse.Namespace) -> int:
+    text = args.text
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    results = jf.query(
+        text=text or None,
+        top=args.top,
+        type_=args.type,
+        status=args.status,
+        confidence=args.confidence,
+        tag=args.tag,
+        include_demoted=args.include_demoted,
+    )
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+    if args.format == "hook":
+        out = jf.hook_finding_block(text or "", top=args.top)
+        print(out)
+        return 0
+    if not results:
+        print("(no matches)", file=sys.stderr)
+        return 0
+    for r in results:
+        print(f"{r['id']}  [{r['type']:<10} {r['status']:<13} {r['confidence']:<6}] "
+              f"{(r['claim'] or '')[:120]}")
+        snip = (r.get("snippet") or "").replace("\n", " ").strip()
+        if snip and snip != r["claim"]:
+            print(f"   > {snip[:160]}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# tail
+# ---------------------------------------------------------------------------
+
+def cmd_tail(args: argparse.Namespace) -> int:
+    events = jf.tail(n=args.n, since=args.since, event=args.event)
+    if args.json:
+        print(json.dumps(events, indent=2))
+        return 0
+    for e in events:
+        ts = e.get("ts", "?")
+        ev = e.get("event", "?")
+        fid = e.get("finding_id", "?")
+        extra = ""
+        if "from" in e and "to" in e:
+            extra = f"  {e.get('field','?')}: {e['from']} → {e['to']}"
+        elif "supersedes" in e:
+            extra = f"  supersedes {e['supersedes']}"
+        elif "by" in e:
+            extra = f"  by {e['by']}"
+        reason = f"  ({e['reason']})" if e.get("reason") else ""
+        print(f"{ts}  {fid}  {ev}{extra}{reason}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# due / index / reindex / stats / doctor
+# ---------------------------------------------------------------------------
+
+def cmd_due(args: argparse.Namespace) -> int:
+    rows = jf.list_due(top=args.top)
+    if args.format == "brief":
+        for r in rows:
+            print(jf.short_brief_line(r))
+        return 0
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
+    if not rows:
+        print("(no findings due for revisit)")
+        return 0
+    for r in rows:
+        print(f"{r['id']}  age={r['_age_days']}d  status={r['status']}  "
+              f"type={r['type']}  conf={r['confidence']}")
+        print(f"   {r['claim']}")
+    return 0
+
+
+def cmd_index(_args: argparse.Namespace) -> int:
+    p = jf.render_index()
+    print(f"index regenerated -> {p}")
+    return 0
+
+
+def cmd_reindex(_args: argparse.Namespace) -> int:
+    n = jf.reindex_all()
+    print(f"reindexed {n} findings into {jf.DB}")
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    s = jf.stats()
+    if args.json:
+        print(json.dumps(s))
+        return 0
+    print(f"active={s['active']}  superseded={s['superseded']}  "
+          f"outdated={s['outdated']}  cold={s['cold']}  due={s['due']}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    rep = jf.status_report()
+    if args.json:
+        print(json.dumps(rep, indent=2, default=str))
+        return 0 if rep["ok"] else 1
+    print("=== Jarvis Findings — health check ===\n")
+    for c in rep["checks"]:
+        line = f"  {c['marker']}  {c['label']}"
+        if c.get("detail"):
+            line += f"  ({c['detail']})"
+        print(line)
+    s = rep["stats"]
+    print(f"\nCounts: active={s['active']}  superseded={s['superseded']}  "
+          f"outdated={s['outdated']}  cold={s['cold']}  due={s['due']}")
+    if rep["recent_events"]:
+        print("\nRecent events:")
+        for e in rep["recent_events"]:
+            ts = e.get("ts", "?")
+            ev = e.get("event", "?")
+            fid = e.get("finding_id", "?")
+            extra = ""
+            if "from" in e and "to" in e:
+                extra = f"  {e.get('field','?')}: {e['from']} → {e['to']}"
+            elif "supersedes" in e:
+                extra = f"  supersedes {e['supersedes']}"
+            print(f"  {ts}  {fid}  {ev}{extra}")
+    print(f"\nOverall: {'HEALTHY' if rep['ok'] else 'ISSUES'}")
+    return 0 if rep["ok"] else 1
+
+
+def cmd_age(args: argparse.Namespace) -> int:
+    res = jf.age_findings(grace_days=args.grace_days, dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps(res, indent=2, default=str))
+    else:
+        prefix = "[dry-run] " if args.dry_run else ""
+        print(f"{prefix}aged={res['n_aged']}  skipped={res['n_skipped']}")
+        for a in res["aged"]:
+            print(f"  {a['id']}  ({a['days_since_review']}d since review, "
+                  f"revisit={a['revisit_after_days']}d)  {a['claim'][:80]}")
+        for e in res["errors"]:
+            print(f"  ERROR: {e}", file=sys.stderr)
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    res = jf.doctor()
+    if args.json:
+        print(json.dumps(res, indent=2))
+        return 0 if res["ok"] else 1
+    print(f"n_findings={res['n_findings']}  ok={res['ok']}")
+    if res["issues"]:
+        print("issues:")
+        for i in res["issues"]:
+            print(f"  - {i}")
+    return 0 if res["ok"] else 1
+
+
+# ---------------------------------------------------------------------------
+# migrate / hook / brief
+# ---------------------------------------------------------------------------
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    if args.source == "lessons":
+        res = jf.migrate_lessons(args.path)
+    elif args.source == "decisions":
+        res = jf.migrate_decisions(args.path)
+    elif args.source == "auto-memory":
+        res = jf.migrate_auto_memory(args.path)
+    elif args.source == "all":
+        all_res = {
+            "lessons": jf.migrate_lessons(),
+            "decisions": jf.migrate_decisions(),
+            "auto_memory": jf.migrate_auto_memory(),
+        }
+        res = {"ok": all(r.get("ok") for r in all_res.values()), "by_source": all_res}
+    else:
+        print(f"unknown source: {args.source}", file=sys.stderr)
+        return 2
+    print(json.dumps(res, indent=2))
+    jf.render_index()
+    return 0 if res.get("ok") else 1
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    text = args.text
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        return 0
+    out = jf.hook_finding_block(text, top=args.top, min_jaccard=args.min_jaccard)
+    if out:
+        print(out)
+    return 0
+
+
+def cmd_brief(args: argparse.Namespace) -> int:
+    rows = jf.list_due(top=args.top)
+    if not rows:
+        return 0
+    print("## 🧠 Findings due for revisit")
+    for r in rows:
+        print(jf.short_brief_line(r))
+    print("_Use `jarvis-finding query <topic>` before re-deriving._")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Argparse plumbing
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="jarvis-finding", description=__doc__)
+    sp = p.add_subparsers(dest="cmd", required=True)
+
+    # capture
+    cap = sp.add_parser("capture", help="record a new finding")
+    cap.add_argument("--type", required=True, choices=sorted(jf.VALID_TYPES))
+    cap.add_argument("--confidence", default="medium", choices=sorted(jf.VALID_CONFIDENCES))
+    cap.add_argument("--claim", required=True)
+    cap.add_argument("--tags", help="comma-separated")
+    cap.add_argument("--source-url", action="append", default=[], help="URL (repeatable)")
+    cap.add_argument("--source", action="append", default=[],
+                     help='kind,url[,note]  e.g. code,/path/to/file.py,context')
+    cap.add_argument("--trigger", help="what prompted this capture")
+    cap.add_argument("--reasoning", help="initial reasoning text (free-form)")
+    cap.add_argument("--revisit-after-days", type=int)
+    cap.add_argument("--session")
+    cap.add_argument("--verified-by", choices=sorted(jf.VERIFIED_BY_VALUES),
+                     help="HOW the claim was verified — REQUIRED when --confidence high. "
+                          "training-knowledge is rejected for high; downgrade to medium.")
+    cap.add_argument("--skip-url-check", action="store_true",
+                     help="skip the HEAD-check on --source-url (default: warn-only check runs "
+                          "when --verified-by web-fetched)")
+    cap.add_argument("--strict-urls", action="store_true",
+                     help="treat URL HEAD-check failure as fatal (refuse capture)")
+    cap.add_argument("--force-new", action="store_true",
+                     help="force a new file even if a near-duplicate exists")
+    cap.add_argument("--json", action="store_true")
+    cap.set_defaults(func=cmd_capture)
+
+    # revise
+    rev = sp.add_parser("revise", help="revise a finding")
+    rev.add_argument("id")
+    rev.add_argument("--status", choices=sorted(jf.VALID_STATUSES))
+    rev.add_argument("--confidence", choices=sorted(jf.VALID_CONFIDENCES))
+    rev.add_argument("--verified-by", choices=sorted(jf.VERIFIED_BY_VALUES),
+                     help="set/update verification method — REQUIRED when promoting to "
+                          "--confidence high")
+    rev.add_argument("--add-source", action="append", default=[],
+                     help='kind,url[,note]')
+    rev.add_argument("--add-source-url", action="append", default=[])
+    rev.add_argument("--reason")
+    rev.add_argument("--mark-reviewed", action="store_true",
+                     help="bump last_review_ts (resets the revisit clock)")
+    rev.add_argument("--session")
+    rev.set_defaults(func=cmd_revise)
+
+    # supersede
+    sup = sp.add_parser("supersede", help="link supersession (new replaces old)")
+    sup.add_argument("new_id", help="the newer finding id (the one taking over)")
+    sup.add_argument("--over", required=True, help="the older finding id (to be demoted)")
+    sup.add_argument("--reason")
+    sup.add_argument("--session")
+    sup.set_defaults(func=cmd_supersede)
+
+    # purge — clean revoke with audit trail
+    pg = sp.add_parser(
+        "purge",
+        help="revoke a finding (moves to .purged/, drops from FTS, logs event)",
+    )
+    pg.add_argument("id")
+    pg.add_argument("--reason", required=True,
+                    help="WHY this is being purged — recorded in audit trail")
+    pg.add_argument("--session")
+    pg.set_defaults(func=cmd_purge)
+
+    # query
+    q = sp.add_parser("query", help="search findings")
+    q.add_argument("text", nargs="?", default="")
+    q.add_argument("--top", type=int, default=5)
+    q.add_argument("--type", choices=sorted(jf.VALID_TYPES))
+    q.add_argument("--status", choices=sorted(jf.VALID_STATUSES))
+    q.add_argument("--confidence", choices=sorted(jf.VALID_CONFIDENCES))
+    q.add_argument("--tag")
+    q.add_argument("--include-demoted", action="store_true")
+    q.add_argument("--format", choices=["plain", "hook"], default="plain")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=cmd_query)
+
+    # tail
+    t = sp.add_parser("tail", help="show recent events")
+    t.add_argument("n", nargs="?", type=int, default=20)
+    t.add_argument("--since", help="time window like 24h or 7d")
+    t.add_argument("--event", help="filter by event name")
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(func=cmd_tail)
+
+    # due
+    d = sp.add_parser("due", help="findings past revisit_after_days")
+    d.add_argument("--top", type=int, default=None)
+    d.add_argument("--format", choices=["plain", "brief"], default="plain")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(func=cmd_due)
+
+    # index / reindex / stats / doctor
+    sp.add_parser("index", help="regenerate index.md").set_defaults(func=cmd_index)
+    sp.add_parser("reindex", help="rebuild FTS5 from disk").set_defaults(func=cmd_reindex)
+    s = sp.add_parser("stats", help="counts")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_stats)
+    st = sp.add_parser("status", help="self-check: install + hooks + invariants + counts")
+    st.add_argument("--json", action="store_true")
+    st.set_defaults(func=cmd_status)
+    doc = sp.add_parser("doctor", help="run invariant checks")
+    doc.add_argument("--json", action="store_true")
+    doc.set_defaults(func=cmd_doctor)
+
+    ag = sp.add_parser("age", help="auto-mark findings outdated when past revisit window + grace")
+    ag.add_argument("--grace-days", type=int, default=60,
+                    help="extra days beyond revisit_after_days before marking outdated (default: 60)")
+    ag.add_argument("--dry-run", action="store_true",
+                    help="report what would be aged, do not write")
+    ag.add_argument("--json", action="store_true")
+    ag.set_defaults(func=cmd_age)
+
+    # migrate
+    m = sp.add_parser("migrate", help="backfill from a known source")
+    m.add_argument("source", choices=["lessons", "decisions", "auto-memory", "all"])
+    m.add_argument("--path", help="override default path")
+    m.set_defaults(func=cmd_migrate)
+
+    # hook (UserPromptSubmit) / brief (SessionStart)
+    h = sp.add_parser("hook", help="render UserPromptSubmit additionalContext block")
+    h.add_argument("text", nargs="?", default="")
+    h.add_argument("--top", type=int, default=3)
+    h.add_argument("--min-jaccard", type=float, default=0.0,
+                   help="precision filter: each hit must overlap the query by this "
+                        "fraction of token-set Jaccard against its claim. Default 0 "
+                        "(BM25-only). Use ~0.10 for stricter precheck.")
+    h.set_defaults(func=cmd_hook)
+
+    b = sp.add_parser("brief", help="render SessionStart 'due' block")
+    b.add_argument("--top", type=int, default=3)
+    b.set_defaults(func=cmd_brief)
+
+    return p
+
+
+def main() -> int:
+    p = build_parser()
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
