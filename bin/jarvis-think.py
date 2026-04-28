@@ -49,6 +49,22 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_ROUNDS = 5
 MAX_TOKENS = 1024
 
+# Parallel tool execution (Innovation 5). Within a single round, Claude can
+# emit multiple tool_use blocks; they're independent by construction since
+# none has seen another's result yet. Threading them shaves the slow ones
+# (network-bound: search_contacts, recall on a large store) off the critical
+# path. Sequential when JARVIS_PARALLEL_TOOLS=0, when there's only one tool
+# in the round (no win from pool overhead), or when the pool itself fails.
+PARALLEL_TOOLS_ENABLED = os.environ.get("JARVIS_PARALLEL_TOOLS", "1") == "1"
+PARALLEL_TOOLS_TIMEOUT_S = float(os.environ.get("JARVIS_PARALLEL_TOOLS_TIMEOUT_S", "20"))
+PARALLEL_TOOLS_HINT = (
+    "When the user gives a compound request with multiple independent "
+    "actions (e.g. 'set a timer AND remind me about X', 'check the time "
+    "and pull up Karina's contact'), decompose it into separate tool "
+    "calls in a single response and let them all execute. Don't ask for "
+    "confirmation on each individual action — only on irreversible ones."
+)
+
 # Watson's auto-memory dirs (file-per-fact pattern, indexed by MEMORY.md).
 # Both are loaded into the cacheable system block as a separate breakpoint —
 # changes there invalidate only the auto-memory cache, not the personality.
@@ -767,6 +783,13 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
         except Exception as e:
             sys.stderr.write(f"jarvis-think: context engine skipped ({e})\n")
 
+    # Compound-request guidance lives behind the same gate as parallel
+    # tool execution — only useful if the runtime will actually fan tools
+    # out. Stays as its own short block so the personality cache breakpoint
+    # below stays byte-stable.
+    if PARALLEL_TOOLS_ENABLED:
+        blocks.append({"type": "text", "text": PARALLEL_TOOLS_HINT})
+
     if cacheable:
         blocks.append({
             "type": "text",
@@ -1457,6 +1480,78 @@ def _parallel_think(api_key: str, model: str,
     return ""
 
 
+def _execute_one_tool(b: dict, mem) -> dict:
+    """Execute a single tool_use block and return the matching tool_result
+    dict. Pulled into its own function so both the sequential and parallel
+    paths share identical error semantics."""
+    name = b.get("name")
+    args = b.get("input") or {}
+    handler_pair = TOOLS.get(name)
+    if not handler_pair:
+        result = {"error": f"unknown tool: {name}"}
+    else:
+        handler, _schema = handler_pair
+        try:
+            result = handler(args, mem)
+        except Exception as e:
+            result = {"error": f"tool {name} failed: {e}"}
+    return {
+        "type": "tool_result",
+        "tool_use_id": b.get("id"),
+        "content": json.dumps(result, ensure_ascii=False),
+    }
+
+
+def _run_tool_blocks(tool_blocks: list[dict], mem) -> list[dict]:
+    """Run all tool_use blocks from one API round and return their
+    tool_result dicts in matching order. Parallelizes via ThreadPoolExecutor
+    when there are >1 tools and the gate is enabled — they're guaranteed
+    independent within a single round."""
+    if not tool_blocks:
+        return []
+    if len(tool_blocks) == 1 or not PARALLEL_TOOLS_ENABLED:
+        return [_execute_one_tool(b, mem) for b in tool_blocks]
+
+    try:
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=min(8, len(tool_blocks))) as pool:
+            futures = {pool.submit(_execute_one_tool, b, mem): i
+                       for i, b in enumerate(tool_blocks)}
+            ordered: list[dict | None] = [None] * len(tool_blocks)
+            for fut in cf.as_completed(futures, timeout=PARALLEL_TOOLS_TIMEOUT_S):
+                idx = futures[fut]
+                try:
+                    ordered[idx] = fut.result(timeout=0.1)
+                except Exception as e:
+                    b = tool_blocks[idx]
+                    ordered[idx] = {
+                        "type": "tool_result",
+                        "tool_use_id": b.get("id"),
+                        "content": json.dumps(
+                            {"error": f"tool {b.get('name')} failed in pool: {e}"},
+                            ensure_ascii=False,
+                        ),
+                    }
+        # If anything timed out and is still None, drop in an explicit error
+        # so Claude has a tool_result for every tool_use_id (API requires
+        # the pairing to round-trip).
+        for i, r in enumerate(ordered):
+            if r is None:
+                b = tool_blocks[i]
+                ordered[i] = {
+                    "type": "tool_result",
+                    "tool_use_id": b.get("id"),
+                    "content": json.dumps(
+                        {"error": f"tool {b.get('name')} timed out"},
+                        ensure_ascii=False,
+                    ),
+                }
+        return [r for r in ordered if r is not None]
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: parallel tools fell back to sequential ({e})\n")
+        return [_execute_one_tool(b, mem) for b in tool_blocks]
+
+
 def run_turn(user_text: str) -> str:
     # Fast path — caller already has the response (e.g. speculator hit). Skip
     # the API entirely; just record the user/assistant exchange in history so
@@ -1586,26 +1681,14 @@ def run_turn(user_text: str) -> str:
                 feeder.flush()
 
             convo.append({"role": "assistant", "content": blocks})
-            tool_results: list[dict] = []
-            for b in blocks:
-                if b.get("type") != "tool_use":
-                    continue
-                name = b.get("name")
-                args = b.get("input") or {}
-                handler_pair = TOOLS.get(name)
-                if not handler_pair:
-                    result = {"error": f"unknown tool: {name}"}
-                else:
-                    handler, _schema = handler_pair
-                    try:
-                        result = handler(args, mem)
-                    except Exception as e:
-                        result = {"error": f"tool {name} failed: {e}"}
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": b.get("id"),
-                    "content": json.dumps(result, ensure_ascii=False),
-                })
+
+            # Tool execution. Within a single round all tool_use blocks are
+            # INDEPENDENT by construction — Claude emitted them before seeing
+            # any result, so by definition none can depend on another's
+            # output. Cross-round dependencies are already serialized by the
+            # outer loop. So parallelism here is "fan out the round's tools."
+            tool_blocks = [b for b in blocks if b.get("type") == "tool_use"]
+            tool_results: list[dict] = _run_tool_blocks(tool_blocks, mem)
             convo.append({"role": "user", "content": tool_results})
     finally:
         if feeder:
