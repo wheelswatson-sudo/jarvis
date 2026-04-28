@@ -309,6 +309,57 @@ def transcribe(audio_path):
         log(f"Transcribe failed: {e}")
         return None
 
+# ─── Streaming STT (Deepgram) ─────────────────────────────────────────
+# Opt-in via JARVIS_STT=deepgram. The streaming binary handles its own
+# audio capture, WebSocket, VAD, and timeouts — we just wait for a single
+# line of FINAL transcript on stdout. Anything else (no key, network
+# failure, no speech) → return None and let the caller fall back to whisper.
+STREAM_STT_TIMEOUT = 20  # seconds; covers ONCE_OVERALL_TIMEOUT + slack
+
+def transcribe_streaming():
+    """Run jarvis-listen-stream --once. Returns transcript string or None."""
+    if os.environ.get("JARVIS_STT") != "deepgram":
+        return None
+
+    stream_bin = BIN_DIR / "jarvis-listen-stream"
+    if not stream_bin.exists():
+        log("Deepgram requested but jarvis-listen-stream not found")
+        return None
+
+    env = os.environ.copy()
+    env["JARVIS_STT"] = "deepgram"
+
+    try:
+        result = subprocess.run(
+            [str(stream_bin), "--once"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=STREAM_STT_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log("Deepgram subprocess timed out — falling back to whisper")
+        return None
+    except Exception as e:
+        log(f"Deepgram subprocess failed ({e}) — falling back to whisper")
+        return None
+
+    if result.returncode != 0:
+        # stderr already explains why; the streamer logs the specific reason
+        err = (result.stderr or "").strip().splitlines()
+        last = err[-1] if err else f"rc={result.returncode}"
+        log(f"Deepgram failed ({last}) — falling back to whisper")
+        return None
+
+    transcript = (result.stdout or "").strip()
+    if not transcript:
+        log("Deepgram returned empty transcript — falling back to whisper")
+        return None
+
+    return transcript
+
+
 # ─── Send to Claude and speak response ────────────────────────────────
 # Generous ceiling for the full think + TTS pipeline. The previous 30s killed
 # any response whose streamed audio took longer than that, leaking the orphan
@@ -367,18 +418,29 @@ def on_wake_detected():
     play_chime()
     # Could also: speak("Sir?") — but chime is faster and less annoying
 
-    # Record command
-    audio_path = record_command()
-    if not audio_path:
-        log("No command recorded")
-        return
+    user_text = None
 
-    # Transcribe
-    user_text = transcribe(audio_path)
-    try:
-        os.unlink(audio_path)
-    except Exception:
-        pass
+    # Streaming STT path — opt-in via JARVIS_STT=deepgram. Captures audio
+    # internally and returns the transcript directly; if it fails for any
+    # reason (no key, network error, no speech detected) we fall through
+    # to the whisper path below so the voice loop never breaks.
+    if os.environ.get("JARVIS_STT") == "deepgram":
+        user_text = transcribe_streaming()
+        if user_text:
+            log(f"Deepgram transcript: {user_text}")
+
+    # Whisper fallback (also the default when JARVIS_STT is unset)
+    if not user_text:
+        audio_path = record_command()
+        if not audio_path:
+            log("No command recorded")
+            return
+
+        user_text = transcribe(audio_path)
+        try:
+            os.unlink(audio_path)
+        except Exception:
+            pass
 
     if not user_text:
         log("No transcription")
