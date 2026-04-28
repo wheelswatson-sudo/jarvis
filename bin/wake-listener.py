@@ -27,9 +27,18 @@ import importlib.util
 import collections
 from pathlib import Path
 
-import numpy as np
-import sounddevice as sd
-from openwakeword.model import Model
+_AUDIO_DEPS_OK = True
+_AUDIO_DEPS_ERR = ""
+try:
+    import numpy as np
+    import sounddevice as sd
+    from openwakeword.model import Model
+except Exception as _e:
+    _AUDIO_DEPS_OK = False
+    _AUDIO_DEPS_ERR = str(_e)
+    np = None  # type: ignore
+    sd = None  # type: ignore
+    Model = None  # type: ignore
 
 # ─── Configuration ────────────────────────────────────────────────────
 ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", Path.home() / ".jarvis"))
@@ -1193,6 +1202,14 @@ def run_conversation_mode(persistent: bool = False) -> None:
 # ─── Main loop ────────────────────────────────────────────────────────
 def main():
     log(f"JARVIS wake listener starting (assistant: {ASSISTANT_NAME})")
+    if not _AUDIO_DEPS_OK:
+        log(
+            "FATAL: audio dependencies unavailable — wake word path cannot run.\n"
+            f"  reason: {_AUDIO_DEPS_ERR}\n"
+            "  fix:    pip install numpy sounddevice openwakeword --break-system-packages\n"
+            "          (install into the same interpreter the LaunchAgent uses)"
+        )
+        sys.exit(2)
     log(
         "Config: silence_gate=%.2fs ring_buffer=%s convo_mode=%s convo_timeout=%.0fs speculate=%s stt=%s"
         % (VOICE_SILENCE_S, RING_BUFFER_ENABLED, CONVO_MODE_ENABLED,
