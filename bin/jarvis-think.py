@@ -508,6 +508,69 @@ def _tool_reply_email(args: dict, _mem: Memory) -> dict:
                             confirm=bool(args.get("confirm")))
 
 
+def _tool_check_calendar(args: dict, _mem: Memory) -> dict:
+    mod = _load_calendar_module()
+    if mod is None:
+        return {"error": "jarvis-calendar module not installed"}
+    return mod.check_calendar(
+        date=args.get("date"),
+        days=int(args.get("days") or 1),
+        calendar_id=args.get("calendar_id") or "primary",
+    )
+
+
+def _tool_create_event(args: dict, _mem: Memory) -> dict:
+    mod = _load_calendar_module()
+    if mod is None:
+        return {"error": "jarvis-calendar module not installed"}
+    summary = args.get("summary")
+    start = args.get("start")
+    if not summary or not start:
+        return {"error": "summary and start required"}
+    return mod.create_event(
+        summary=summary,
+        start=start,
+        end=args.get("end"),
+        attendees=args.get("attendees") or [],
+        location=args.get("location"),
+        description=args.get("description"),
+        calendar_id=args.get("calendar_id") or "primary",
+    )
+
+
+def _tool_update_event(args: dict, _mem: Memory) -> dict:
+    mod = _load_calendar_module()
+    if mod is None:
+        return {"error": "jarvis-calendar module not installed"}
+    event_id = args.get("event_id")
+    if not event_id:
+        return {"error": "event_id required"}
+    return mod.update_event(
+        event_id=event_id,
+        summary=args.get("summary"),
+        start=args.get("start"),
+        end=args.get("end"),
+        attendees=args.get("attendees"),
+        location=args.get("location"),
+        description=args.get("description"),
+        calendar_id=args.get("calendar_id") or "primary",
+    )
+
+
+def _tool_delete_event(args: dict, _mem: Memory) -> dict:
+    mod = _load_calendar_module()
+    if mod is None:
+        return {"error": "jarvis-calendar module not installed"}
+    event_id = args.get("event_id")
+    if not event_id:
+        return {"error": "event_id required"}
+    return mod.delete_event(
+        event_id=event_id,
+        confirm=bool(args.get("confirm")),
+        calendar_id=args.get("calendar_id") or "primary",
+    )
+
+
 # Tool registry — name → (handler, schema)
 TOOLS: dict[str, tuple[Any, dict]] = {
     "remember": (
@@ -745,6 +808,96 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "confirm": {"type": "boolean"},
                 },
                 "required": ["thread_id", "body"],
+            },
+        },
+    ),
+    "check_calendar": (
+        _tool_check_calendar,
+        {
+            "name": "check_calendar",
+            "description": (
+                "List Google Calendar events for a date range. Default: today. "
+                "Use `date` for the starting day (ISO 'YYYY-MM-DD' or 'tomorrow') "
+                "and `days` for how many days to include. Read-only."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "Starting day (default: today)."},
+                    "days": {"type": "integer", "description": "How many days to include (default: 1)."},
+                    "calendar_id": {"type": "string", "description": "Calendar to read (default: 'primary')."},
+                },
+            },
+        },
+    ),
+    "create_event": (
+        _tool_create_event,
+        {
+            "name": "create_event",
+            "description": (
+                "Create a calendar event. Time inputs accept ISO 8601, 'HH:MM' "
+                "(today/tomorrow if past), 'tomorrow at HH:MM', 'in N minutes', "
+                "or bare 'YYYY-MM-DD' for all-day. If `end` is omitted, defaults "
+                "to start + 30 minutes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Event title."},
+                    "start": {"type": "string", "description": "When it starts."},
+                    "end": {"type": "string", "description": "When it ends (optional)."},
+                    "attendees": {"type": "array", "items": {"type": "string"},
+                                   "description": "Attendee emails."},
+                    "location": {"type": "string"},
+                    "description": {"type": "string"},
+                    "calendar_id": {"type": "string"},
+                },
+                "required": ["summary", "start"],
+            },
+        },
+    ),
+    "update_event": (
+        _tool_update_event,
+        {
+            "name": "update_event",
+            "description": (
+                "Patch an existing event by id. Only the named fields are "
+                "modified — others are preserved. Use check_calendar first to "
+                "find the right event_id."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "attendees": {"type": "array", "items": {"type": "string"}},
+                    "location": {"type": "string"},
+                    "description": {"type": "string"},
+                    "calendar_id": {"type": "string"},
+                },
+                "required": ["event_id"],
+            },
+        },
+    ),
+    "delete_event": (
+        _tool_delete_event,
+        {
+            "name": "delete_event",
+            "description": (
+                "Cancel a calendar event. REQUIRES confirm=true — without it "
+                "the call is refused. Workflow: confirm the event with the "
+                "user out loud, then call again with confirm=true."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                    "calendar_id": {"type": "string"},
+                },
+                "required": ["event_id"],
             },
         },
     ),
