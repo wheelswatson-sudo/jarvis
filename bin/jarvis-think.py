@@ -155,6 +155,27 @@ def _load_metacog_module():
         return None
 
 
+# ── autopsy module: lessons learned from past failures ───────────────
+_autopsy_mod = None
+
+
+def _load_autopsy_module():
+    global _autopsy_mod
+    if _autopsy_mod is not None:
+        return _autopsy_mod
+    src = BIN_DIR / "jarvis-autopsy.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_autopsy", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _autopsy_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -1183,6 +1204,17 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
                 blocks.append({"type": "text", "text": mc_hint})
         except Exception as e:
             sys.stderr.write(f"jarvis-think: metacog hint skipped ({e})\n")
+
+    # Lessons learned from autopsied failures. Surfaces recurrent failure
+    # types as one-liner reminders. Empty until 2+ occurrences of any type.
+    ap_mod = _load_autopsy_module()
+    if ap_mod is not None:
+        try:
+            ap_hint = ap_mod.system_prompt_hint()
+            if ap_hint:
+                blocks.append({"type": "text", "text": ap_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: autopsy hint skipped ({e})\n")
 
     if cacheable:
         blocks.append({
