@@ -197,6 +197,27 @@ def _load_skills_module():
         return None
 
 
+# ── synthesize module: distilled user profile (Sonnet-built, weekly) ─
+_synth_mod = None
+
+
+def _load_synth_module():
+    global _synth_mod
+    if _synth_mod is not None:
+        return _synth_mod
+    src = BIN_DIR / "jarvis-synthesize.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_synthesize", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _synth_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -1247,6 +1268,18 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
                 blocks.append({"type": "text", "text": sk_hint})
         except Exception as e:
             sys.stderr.write(f"jarvis-think: skills hint skipped ({e})\n")
+
+    # Synthesized user profile — weekly Sonnet pass over memories +
+    # conversation summary distilled into decisions/comms/values/etc.
+    # Goes near the top of priming because it shapes every reply.
+    sy_mod = _load_synth_module()
+    if sy_mod is not None:
+        try:
+            sy_hint = sy_mod.system_prompt_hint()
+            if sy_hint:
+                blocks.append({"type": "text", "text": sy_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: synthesis hint skipped ({e})\n")
 
     if cacheable:
         blocks.append({
