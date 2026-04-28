@@ -162,6 +162,27 @@ def _ambient_hint() -> str:
     return _AMBIENT_HINTS.get(label, "")
 
 
+def _briefing_hint() -> str:
+    """Pull the briefing-pending one-liner from jarvis-briefing if today's
+    briefing is sitting unread. Lazy-loaded — same pattern as patterns.py."""
+    if os.environ.get("JARVIS_BRIEFING", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-briefing.py"
+    if not src.exists():
+        # Repo path during development
+        src = Path(__file__).parent / "jarvis-briefing.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_briefing", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.pending_briefing_hint() or ""
+    except Exception:
+        return ""
+
+
 class ContextEngine:
     """Builds the predictive priming block for the system prompt."""
 
@@ -200,6 +221,10 @@ class ContextEngine:
         ambient = _ambient_hint()
         if ambient:
             lines.append(ambient)
+
+        briefing = _briefing_hint()
+        if briefing:
+            lines.append(briefing)
 
         body = "\n".join(lines).strip()
         if not body:
