@@ -76,6 +76,27 @@ memory_mod = _load_memory_module()
 Memory = memory_mod.Memory
 
 
+# ── context module: lazy-loaded, optional. Disabled if file missing. ──
+_context_mod = None
+
+
+def _load_context_module():
+    global _context_mod
+    if _context_mod is not None:
+        return _context_mod
+    src = BIN_DIR / "jarvis-context.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_context", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _context_mod = mod
+        return mod
+    except Exception:
+        return None
+
+
 # ── tool implementations ──────────────────────────────────────────────
 def _voice_speak(text: str, force: bool = False) -> None:
     """Speak via the jarvis CLI (best-effort, won't raise)."""
@@ -733,6 +754,19 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
     auto_mem = _load_auto_memory_index()
 
     blocks: list[dict] = []
+
+    # Predictive context block — uncached, top of stack so it shapes
+    # interpretation. Read from disk every turn (recent topics + pending
+    # notifications change quickly). Empty when JARVIS_PREDICTIVE_CONTEXT=0.
+    ctx_mod = _load_context_module()
+    if ctx_mod is not None:
+        try:
+            ctx_block = ctx_mod.ContextEngine().predict()
+            if ctx_block:
+                blocks.append({"type": "text", "text": ctx_block})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: context engine skipped ({e})\n")
+
     if cacheable:
         blocks.append({
             "type": "text",
