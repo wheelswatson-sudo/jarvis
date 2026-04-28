@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# JARVIS — Proactive voice notification
+#
+# Speaks a message without being spoken to. Used by timers, reminders, and
+# (eventually) calendar/email alerts. Two layers of UX-aware behavior:
+#
+#   1. Conversation-mode awareness. If wake-listener has touched the
+#      ~/.jarvis/state/convo_active flag, the user is mid-conversation.
+#      Queue the message to ~/.jarvis/notifications/pending.json so the
+#      listener delivers it at the next idle moment instead of stomping
+#      on the live exchange. Use --force to bypass and speak now anyway.
+#
+#   2. Audio ducking. If Spotify or Apple Music is playing audibly, drop
+#      its volume to 30% for the duration of the announcement, then
+#      restore. We control those apps directly via osascript rather than
+#      changing system volume — that would also dampen our own speaker
+#      output.
+#
+# Usage:
+#   jarvis-notify "Your meeting starts in 10 minutes"
+#   jarvis-notify --force "Critical alert"        # never queue
+#   jarvis-notify --queue "Lower priority"        # always queue
+#
+# Gating:
+#   JARVIS_PROACTIVE=1   default — notifications enabled
+#   JARVIS_PROACTIVE=0   silent (e.g. quiet hours, focus mode)
+#
+# State files (read):
+#   ~/.jarvis/state/convo_active     touched while a convo session is open
+# State files (written):
+#   ~/.jarvis/notifications/pending.json   JSON array of queued messages
+
+set -euo pipefail
+
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
+STATE_DIR="$ASSISTANT_DIR/state"
+CONVO_FLAG="$STATE_DIR/convo_active"
+NOTIF_DIR="$ASSISTANT_DIR/notifications"
+PENDING="$NOTIF_DIR/pending.json"
+
+ATTENTION_SOUND="/System/Library/Sounds/Glass.aiff"
+
+usage() {
+    cat >&2 <<'USAGE'
+Usage: jarvis-notify [--force | --queue] <message>
+
+  <message>   Text to speak. Required.
+  --force     Speak immediately even if user is in conversation mode.
+  --queue     Always queue, even if user is idle.
+  --help      Show this message.
+USAGE
+    exit 2
+}
+
+# ─── Gating ──────────────────────────────────────────────────────────
+[[ "${JARVIS_PROACTIVE:-1}" == "1" ]] || exit 0
+
+force=false
+queue=false
+case "${1:-}" in
+    --force) force=true; shift ;;
+    --queue) queue=true; shift ;;
+    -h|--help) usage ;;
+    -*) echo "jarvis-notify: unknown flag $1" >&2; usage ;;
+esac
+
+[[ -n "${1:-}" ]] || usage
+message="$1"
+
+mkdir -p "$STATE_DIR" "$NOTIF_DIR"
+
+# ─── Queue helper ────────────────────────────────────────────────────
+# Atomic-ish: read existing array, append, write to a temp file in the
+# same dir, mv into place. The wake-listener pop+write uses the same
+# pattern. Single-user single-machine — no fcntl needed.
+queue_message() {
+    local msg="$1"
+    ASSISTANT_DIR="$ASSISTANT_DIR" PENDING="$PENDING" MSG="$msg" python3 - <<'PYEOF'
+import json, os, tempfile, time
+pending = os.environ["PENDING"]
+msg = os.environ["MSG"]
+queue = []
+if os.path.exists(pending):
+    try:
+        with open(pending) as f:
+            queue = json.load(f)
+        if not isinstance(queue, list):
+            queue = []
+    except (json.JSONDecodeError, OSError):
+        queue = []
+queue.append({"message": msg, "ts": time.time()})
+fd, tmp = tempfile.mkstemp(prefix="pending.", suffix=".json",
+                            dir=os.path.dirname(pending))
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(queue, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, pending)
+except Exception:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
+PYEOF
+}
+
+# ─── Decide: queue or deliver? ───────────────────────────────────────
+should_queue=false
+if [[ "$queue" == "true" ]]; then
+    should_queue=true
+elif [[ "$force" != "true" ]] && [[ -f "$CONVO_FLAG" ]]; then
+    # User is mid-conversation. Queue unless --force.
+    should_queue=true
+fi
+
+if [[ "$should_queue" == "true" ]]; then
+    queue_message "$message"
+    exit 0
+fi
+
+# ─── Audio ducking — Spotify and Apple Music ─────────────────────────
+# We snapshot per-app volumes, drop to 30% of original, speak, restore.
+# Errors are swallowed: if the app isn't running or AppleScript is denied,
+# we just speak without ducking. We never touch system volume because that
+# would mute our own announcement.
+ducked_apps=()  # parallel arrays: name and original volume
+ducked_vols=()
+
+duck_app() {
+    local app="$1"
+    # `running` check first — querying volume on a not-running app launches it.
+    local running
+    running=$(osascript -e "tell application \"System Events\" to (name of processes) contains \"$app\"" 2>/dev/null || echo "false")
+    [[ "$running" == "true" ]] || return 0
+
+    local vol
+    vol=$(osascript -e "tell application \"$app\" to sound volume" 2>/dev/null || echo "")
+    [[ -n "$vol" ]] || return 0
+    # Skip if already silent — nothing to duck.
+    [[ "$vol" -gt 0 ]] 2>/dev/null || return 0
+
+    local target=$(( vol * 30 / 100 ))
+    osascript -e "tell application \"$app\" to set sound volume to $target" 2>/dev/null || return 0
+    ducked_apps+=("$app")
+    ducked_vols+=("$vol")
+}
+
+restore_apps() {
+    local i
+    for i in "${!ducked_apps[@]}"; do
+        osascript -e "tell application \"${ducked_apps[$i]}\" to set sound volume to ${ducked_vols[$i]}" 2>/dev/null || true
+    done
+}
+trap restore_apps EXIT
+
+duck_app Spotify
+duck_app Music
+
+# ─── Attention chime + speak ─────────────────────────────────────────
+afplay "$ATTENTION_SOUND" 2>/dev/null || true
+
+# --speak forces voice on regardless of `jarvis off` state — proactive
+# alerts shouldn't be silenced by the user toggling voice off (they can
+# disable proactive alerts via JARVIS_PROACTIVE=0 instead).
+"$JARVIS_BIN" --speak "$message" 2>/dev/null || true
+
+# trap restores volume on exit

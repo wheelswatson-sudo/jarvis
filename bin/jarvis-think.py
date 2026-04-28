@@ -252,6 +252,24 @@ def _parse_duration_to_seconds(text: str) -> int | None:
     return None
 
 
+def _schedule_proactive_alert(seconds: int, message: str) -> None:
+    """Spawn a detached `sleep N && jarvis-notify MSG` so the alert reaches
+    the user via the notification pipeline (volume ducking, queueing when
+    in conversation). Falls back to `jarvis --speak` if jarvis-notify is
+    missing — keeps timers working on installs without proactive support."""
+    notify_bin = BIN_DIR / "jarvis-notify"
+    jbin = BIN_DIR / "jarvis"
+    if notify_bin.exists():
+        cmd = f'sleep {seconds} && {shlex.quote(str(notify_bin))} {shlex.quote(message)}'
+    else:
+        cmd = f'sleep {seconds} && {shlex.quote(str(jbin))} --speak {shlex.quote(message)}'
+    subprocess.Popen(
+        ["bash", "-c", cmd],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def _tool_set_timer(args: dict, _mem: Memory) -> dict:
     duration = args.get("duration") or args.get("seconds")
     if isinstance(duration, (int, float)):
@@ -267,14 +285,8 @@ def _tool_set_timer(args: dict, _mem: Memory) -> dict:
         return {"error": "jarvis CLI not found"}
 
     msg = f"{label}, sir. Your timer has expired."
-    # Detached process — survives the converse process exiting.
-    cmd = f'sleep {seconds} && {shlex.quote(str(jbin))} --speak {shlex.quote(msg)}'
     try:
-        subprocess.Popen(
-            ["bash", "-c", cmd],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        _schedule_proactive_alert(seconds, msg)
     except Exception as e:
         return {"error": f"failed to start timer: {e}"}
 
@@ -334,13 +346,8 @@ def _tool_set_reminder(args: dict, _mem: Memory) -> dict:
         return {"error": "jarvis CLI not found"}
 
     spoken = f"Reminder, sir. {message}"
-    cmd = f'sleep {seconds} && {shlex.quote(str(jbin))} --speak {shlex.quote(spoken)}'
     try:
-        subprocess.Popen(
-            ["bash", "-c", cmd],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        _schedule_proactive_alert(seconds, spoken)
     except Exception as e:
         return {"error": f"failed to schedule reminder: {e}"}
 
