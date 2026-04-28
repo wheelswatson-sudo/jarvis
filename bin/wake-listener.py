@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import signal
 import threading
+import collections
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,15 @@ SAMPLE_RATE = 16000
 CHUNK_SIZE = 1280  # 80ms chunks at 16kHz (OpenWakeWord requirement)
 WAKE_THRESHOLD = 0.5  # Confidence threshold (0-1)
 COOLDOWN_SECONDS = 3  # Prevent re-triggering immediately
+
+# Pre-wake ring buffer: keeps the last ~1.44s of audio that streamed past the
+# wake-word callback so record_command can recover the first syllable of the
+# command, which would otherwise be clipped while the wake stream is being
+# torn down and the recording stream opened.
+RING_BUFFER_CHUNKS = 18  # 18 * 80ms = 1.44s
+RING_BUFFER_ENABLED = os.environ.get("JARVIS_RING_BUFFER", "1") == "1"
+_ring_buffer: collections.deque = collections.deque(maxlen=RING_BUFFER_CHUNKS)
+_ring_lock = threading.Lock()
 
 # Adaptive silence gate. The end-of-speech detector compares per-chunk mean
 # amplitude against a threshold derived from ambient noise. A hand-tuned
@@ -191,6 +201,17 @@ def record_command(max_seconds=15, silence_seconds=1.5):
         dtype=np.int16,
         blocksize=CHUNK_SIZE,
     ) as stream:
+        # Recover audio that streamed past the wake-word callback before this
+        # InputStream opened — typically the wake word itself plus the first
+        # syllable of the command.
+        if RING_BUFFER_ENABLED:
+            with _ring_lock:
+                prebuf = list(_ring_buffer)
+                _ring_buffer.clear()
+            if prebuf:
+                log(f"Prepending {len(prebuf)} ring-buffer chunks ({len(prebuf) * 80}ms lookback)")
+                audio_chunks.extend(prebuf)
+                started_speaking = True
         while chunk_count < max_chunks:
             chunk, _ = stream.read(CHUNK_SIZE)
             chunk = chunk.flatten()
@@ -406,6 +427,13 @@ def main():
 
         audio = indata[:, 0] if indata.ndim > 1 else indata
         audio_int16 = (audio * 32767).astype(np.int16) if audio.dtype != np.int16 else audio
+
+        # Snapshot every chunk into the ring buffer BEFORE wake processing so
+        # record_command can recover audio captured just before/during the
+        # wake-word trigger. Copy because PortAudio reuses the indata buffer.
+        if RING_BUFFER_ENABLED:
+            with _ring_lock:
+                _ring_buffer.append(audio_int16.copy())
 
         predictions = model.predict(audio_int16)
         for wakeword, score in predictions.items():
