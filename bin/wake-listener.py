@@ -124,6 +124,65 @@ def _speculation_default() -> str:
     return "1" if os.environ.get("JARVIS_STT") == "deepgram" else "0"
 SPECULATE_ENABLED = os.environ.get("JARVIS_SPECULATE", _speculation_default()) == "1"
 
+# Voice fingerprinting — only respond to Watson's voice. Default: enabled
+# whenever a voiceprint exists. The verify() helper handles missing
+# resemblyzer / missing enrollment gracefully (returns None → fail open).
+VOICEPRINT_FILE = ASSISTANT_DIR / "voiceprint.npy"
+
+
+def _voice_id_default() -> str:
+    return "1" if VOICEPRINT_FILE.exists() else "0"
+VOICE_ID_ENABLED = os.environ.get("JARVIS_VOICE_ID", _voice_id_default()) == "1"
+_voiceprint_mod = None
+
+
+def _load_voiceprint_module():
+    global _voiceprint_mod
+    if _voiceprint_mod is not None:
+        return _voiceprint_mod
+    src = BIN_DIR / "jarvis-voiceprint.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_voiceprint", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _voiceprint_mod = mod
+        return mod
+    except Exception as e:
+        log(f"voiceprint module load failed: {e}")
+        return None
+
+
+def _voice_matches_owner(audio_path: str) -> bool:
+    """Verify the captured audio against the enrolled voiceprint.
+
+    Returns True (allow turn) when:
+      - Voice ID gate is disabled
+      - No enrollment exists (fail open)
+      - resemblyzer is missing (fail open)
+      - Score >= threshold
+
+    Returns False only when an enrolled voiceprint is on disk AND the score
+    falls below the threshold — that's the only signal we can act on.
+    """
+    if not VOICE_ID_ENABLED:
+        return True
+    mod = _load_voiceprint_module()
+    if mod is None:
+        return True
+    try:
+        score = mod.verify(audio_path)
+    except Exception as e:
+        log(f"voiceprint verify error: {e}")
+        return True
+    if score is None:
+        return True  # no enrollment or library missing — back-compat
+    threshold = mod.VOICE_THRESHOLD
+    matched = score >= threshold
+    log(f"voiceprint score={score:.3f} threshold={threshold:.2f} match={matched}")
+    return matched
+
 
 # Adaptive silence gate. The end-of-speech detector compares per-chunk mean
 # amplitude against a threshold derived from ambient noise. A hand-tuned
@@ -622,6 +681,17 @@ def on_wake_detected() -> str | None:
         audio_path = record_command()
         if not audio_path:
             log("No command recorded")
+            return None
+
+        # Voice fingerprint check — only the whisper path exposes the raw
+        # WAV. Deepgram streams audio internally and we'd need to fork the
+        # streamer to fingerprint it. Fail open when no enrollment exists.
+        if not _voice_matches_owner(audio_path):
+            log("Voice mismatch — ignoring this turn")
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
             return None
 
         user_text = transcribe(audio_path)
