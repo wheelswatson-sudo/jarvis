@@ -17,6 +17,7 @@ LISTEN_BIN="$ASSISTANT_DIR/bin/jarvis-listen"
 CONFIG_FILE="$ASSISTANT_DIR/config/settings.json"
 HISTORY_FILE="$ASSISTANT_DIR/cache/conversation.json"
 FILLER_BIN="$ASSISTANT_DIR/bin/jarvis-filler"
+STREAM_BIN="$ASSISTANT_DIR/bin/jarvis-listen-stream"
 
 # Colors
 RED='\033[0;31m'
@@ -68,6 +69,25 @@ speak_with_bargein() {
 # twice. --text mode passes stream=0 (legacy: think returns full text, then
 # the shell speaks it once at the end).
 THINK_BIN="$ASSISTANT_DIR/bin/jarvis-think.py"
+
+# ─── Listen (whisper default, optional Deepgram streaming) ────────────
+# Selects the STT backend per JARVIS_STT. Deepgram runs jarvis-listen-stream
+# --once which prints just the transcript on success or exits non-zero on
+# any failure — empty stdout falls through to whisper. Whisper stays the
+# universal fallback so the voice loop never breaks.
+listen_for_transcript() {
+    if [[ "${JARVIS_STT:-whisper}" == "deepgram" ]] && [[ -x "$STREAM_BIN" ]]; then
+        local transcript
+        transcript=$(JARVIS_STT=deepgram "$STREAM_BIN" --once 2>/dev/null || true)
+        transcript="${transcript//$'\n'/}"
+        if [[ -n "$transcript" ]]; then
+            echo "$transcript"
+            return 0
+        fi
+        echo -e "    ${DIM}Deepgram unavailable, falling back to whisper.${NC}" >&2
+    fi
+    "$LISTEN_BIN" 2>/dev/null | tail -1
+}
 
 # ─── Filler bridge ────────────────────────────────────────────────────
 # Spawn jarvis-filler in the background while think() runs, so the user hears
@@ -183,7 +203,7 @@ EOF
 
         while true; do
             local transcript
-            transcript=$("$LISTEN_BIN" 2>/dev/null | tail -1)
+            transcript=$(listen_for_transcript)
 
             if [[ -z "$transcript" ]]; then
                 continue
@@ -209,7 +229,7 @@ EOF
     else
         # One-shot mode (mic in, voice out — also streams).
         local transcript
-        transcript=$("$LISTEN_BIN" 2>/dev/null | tail -1)
+        transcript=$(listen_for_transcript)
 
         if [[ -z "$transcript" ]]; then
             echo -e "    ${YELLOW}No speech detected, sir.${NC}"
