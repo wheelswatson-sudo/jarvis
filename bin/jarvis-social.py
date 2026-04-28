@@ -1219,9 +1219,10 @@ def social_reply(platform: str, item_id: str, message: str,
     if isinstance(res, dict) and res.get("sent"):
         _log(f"replied on {platform} to {target}: {message[:80]}")
         # Best-effort: bump the contact record so the relationship pulse
-        # learns about this exchange.
+        # learns about this exchange. Pass the sub-platform so the right
+        # social_handle field gets backfilled.
         try:
-            _maybe_note_contact(channel="social",
+            _maybe_note_contact(channel=f"social:{platform}",
                                 handle=item.get("from_handle") or target,
                                 summary=f"Replied on {platform}: {message[:120]}")
         except Exception:

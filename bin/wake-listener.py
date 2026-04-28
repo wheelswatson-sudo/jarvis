@@ -782,6 +782,9 @@ _telegram_mod = None
 _telegram_thread = None
 _telegram_announced_ids: set = set()
 _notifications_mod = None
+_social_mod = None
+_social_thread = None
+_social_announced_ids: set = set()
 
 
 def _load_notifications_module():
@@ -848,6 +851,123 @@ def _start_telegram_polling() -> None:
         log("Telegram polling thread started")
     except Exception as e:
         log(f"telegram thread spawn failed: {e}")
+
+
+def _load_social_module():
+    """Lazy import of jarvis-social.py — same pattern as telegram."""
+    global _social_mod
+    if _social_mod is not None:
+        return _social_mod
+    src = BIN_DIR / "jarvis-social.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_social", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _social_mod = mod
+        return mod
+    except Exception as e:
+        log(f"social module load failed: {e}")
+        return None
+
+
+def _start_social_polling() -> None:
+    """Daemon thread that walks each enabled social platform on its own
+    rate-limit-aware schedule. Same idempotent / silent-no-op contract
+    as Telegram polling.
+
+    Master gate: JARVIS_SOCIAL=1 (defaults on iff at least one platform
+    token is set). Each platform has its own JARVIS_TWITTER / etc gate."""
+    global _social_thread
+    if _social_thread is not None and _social_thread.is_alive():
+        return
+    has_token = any(
+        os.environ.get(v)
+        for v in ("TWITTER_BEARER_TOKEN", "LINKEDIN_COOKIE",
+                  "INSTAGRAM_ACCESS_TOKEN")
+    )
+    feeds_file = ASSISTANT_DIR / "social" / "feeds.json"
+    if not (has_token or feeds_file.exists()):
+        return
+    if os.environ.get("JARVIS_SOCIAL", "1") == "0":
+        return
+    mod = _load_social_module()
+    if mod is None:
+        return
+    try:
+        t = threading.Thread(target=mod.poll_loop, name="social-poller", daemon=True)
+        t.start()
+        _social_thread = t
+        log("Social polling thread started")
+    except Exception as e:
+        log(f"social thread spawn failed: {e}")
+
+
+def _flush_urgent_social() -> None:
+    """Push urgent social items (DMs, @mentions, urgency-keyword hits)
+    onto the notification queue when a conversation ends. Mirror of
+    `_flush_urgent_telegram` — same dedup pattern, same dual-write to
+    legacy pending.json + smart bus."""
+    if os.environ.get("JARVIS_SOCIAL", "1") == "0":
+        return
+    mod = _load_social_module()
+    if mod is None:
+        return
+    try:
+        urgent = mod.recent_urgent(minutes=10)
+    except Exception as e:
+        log(f"social urgent scan failed: {e}")
+        return
+    if not urgent:
+        return
+    fresh = [u for u in urgent if u.get("id") not in _social_announced_ids]
+    if not fresh:
+        return
+    try:
+        NOTIF_DIR.mkdir(parents=True, exist_ok=True)
+        existing: list = []
+        if PENDING_NOTIFICATIONS.exists():
+            try:
+                with PENDING_NOTIFICATIONS.open() as f:
+                    existing = json.load(f) or []
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+        notif_mod = _load_notifications_module()
+        for u in fresh:
+            sender = u.get("from_handle") or u.get("from_name") or "(unknown)"
+            platform = u.get("platform") or "social"
+            text = (u.get("text") or "").strip()
+            preview = text[:140] + ("..." if len(text) > 140 else "")
+            kind = u.get("kind") or "item"
+            msg = f"Urgent on {platform} ({kind}): {sender} — {preview}"
+            existing.append({
+                "message": msg,
+                "ts": int(time.time()),
+                "source": "social",
+                "platform": platform,
+                "item_id": u.get("id"),
+            })
+            _social_announced_ids.add(u.get("id"))
+            if notif_mod is not None:
+                try:
+                    notif_mod.enqueue(
+                        source="social",
+                        sender=sender,
+                        content=msg,
+                        urgency_keywords=None,
+                        time_sensitivity=2,
+                        route="auto",
+                    )
+                except Exception as e:
+                    log(f"social notifications enqueue failed: {e}")
+        with PENDING_NOTIFICATIONS.open("w") as f:
+            json.dump(existing, f, indent=2)
+        log(f"Queued {len(fresh)} urgent social item(s) for delivery")
+    except Exception as e:
+        log(f"social urgent flush failed: {e}")
 
 
 def _flush_urgent_telegram() -> None:
@@ -1368,6 +1488,9 @@ def run_conversation_mode(persistent: bool = False) -> None:
         # Flush any urgent Telegram messages that arrived during the
         # conversation. Watson hears them on the next idle moment.
         _flush_urgent_telegram()
+        # Same flush for social — DMs / @mentions / urgent-keyword hits
+        # from the last few minutes get queued for the next idle moment.
+        _flush_urgent_social()
         # Spawn the self-improvement daemon detached. jarvis-improve
         # orchestrates the six systems (feedback → metacog → autopsy →
         # patterns → skills, plus weekly synthesis + evolution) so the
@@ -1450,6 +1573,10 @@ def main():
     # Start the Telegram poller in the background — daemon thread, dies with
     # the listener. Silent no-op when no TELEGRAM_BOT_TOKEN is configured.
     _start_telegram_polling()
+
+    # Same for social — daemon thread, silent no-op when no platform
+    # token is set and feeds.json is missing.
+    _start_social_polling()
 
     # Pre-warm the response audio cache in the background. Common phrases
     # ("Got it.", "Good morning, sir.", etc.) get fetched from ElevenLabs

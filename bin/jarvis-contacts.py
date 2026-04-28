@@ -119,11 +119,16 @@ def _empty_record(name: str) -> dict:
         "email": None,
         "telegram_handle": None,
         "telegram_id": None,
+        # Social handles — keyed by platform so future tools (digest,
+        # outreach analysis) can join across channels without scraping
+        # text. Format: {"twitter": "@handle", "linkedin": "url-or-id",
+        # "instagram": "@handle"}.
+        "social_handles": {},
         "relationship": None,           # short label: "founder/friend", "client", "investor"
-        "communication_preference": None,  # "email" | "telegram" | "either"
+        "communication_preference": None,  # "email" | "telegram" | "social" | "either"
         "first_seen": None,
         "last_interaction": None,        # ISO datetime
-        "last_channel": None,            # "email" | "telegram" | "manual"
+        "last_channel": None,            # "email" | "telegram" | "social" | "manual"
         "interaction_count": 0,
         "topics_discussed": [],
         "open_threads": [],
@@ -186,7 +191,7 @@ def _resolve(name: str, people: dict | None = None) -> tuple[str, dict] | None:
         # Multiple — return the shortest key (most specific match).
         contains.sort(key=lambda kv: len(kv[0]))
         return contains[0]
-    # Match against email local part / telegram handle
+    # Match against email local part / telegram handle / social handles
     raw_q = (name or "").lower().lstrip("@")
     for k, v in people.items():
         em = (v.get("email") or "").lower()
@@ -194,6 +199,13 @@ def _resolve(name: str, people: dict | None = None) -> tuple[str, dict] | None:
         if raw_q and (raw_q == em or raw_q == tg or
                       (em and raw_q in em) or (tg and raw_q in tg)):
             return k, v
+        # Social handles live as {"twitter": "@h", ...}
+        for h in (v.get("social_handles") or {}).values():
+            if not h:
+                continue
+            hn = h.lower().lstrip("@")
+            if raw_q and (raw_q == hn or (hn and raw_q in hn)):
+                return k, v
     return None
 
 
@@ -641,28 +653,50 @@ def update_contacts() -> dict:
 def note_interaction(channel: str, handle: str, summary: str = "",
                      ts: int | None = None) -> dict:
     """Record that Watson just interacted with someone on `channel`.
-    `handle` can be an email address or telegram @handle. We resolve it
-    to an existing contact, or create a stub. Cheap — no API call."""
+    `handle` can be an email address, telegram @handle, or a social
+    handle (Twitter @user, LinkedIn name, Instagram @user). We resolve
+    it to an existing contact, or create a stub. Cheap — no API call.
+
+    `channel` accepts "email", "telegram", "social" (any platform),
+    "social:twitter", "social:linkedin", "social:instagram", or "manual".
+    Sub-platform variants record onto the right `social_handles` key so
+    future cross-platform lookups join cleanly."""
     gate = _gate_check()
     if gate:
         return gate
-    if channel not in ("email", "telegram", "manual"):
+    valid_root = ("email", "telegram", "social", "manual")
+    root = channel.split(":", 1)[0] if channel else ""
+    sub = channel.split(":", 1)[1] if (channel and ":" in channel) else None
+    if root not in valid_root:
         return {"error": f"invalid channel: {channel!r}"}
     handle = (handle or "").strip()
     if not handle:
         return {"error": "handle is required"}
     people = _load_people()
 
-    # Resolve by exact email / telegram first (these are stable identifiers).
+    # Resolve by exact email / telegram / social first (stable identifiers).
     raw = handle.lower().lstrip("@")
     hit_key: str | None = None
     for k, v in people.items():
-        if channel == "email" and (v.get("email") or "").lower() == raw:
+        if root == "email" and (v.get("email") or "").lower() == raw:
             hit_key = k
             break
-        if channel == "telegram" and (v.get("telegram_handle") or "").lower().lstrip("@") == raw:
+        if root == "telegram" and (v.get("telegram_handle") or "").lower().lstrip("@") == raw:
             hit_key = k
             break
+        if root == "social":
+            handles = v.get("social_handles") or {}
+            if sub and (handles.get(sub) or "").lower().lstrip("@") == raw:
+                hit_key = k
+                break
+            # No sub-platform — match across any platform handle.
+            if not sub:
+                for hv in handles.values():
+                    if (hv or "").lower().lstrip("@") == raw:
+                        hit_key = k
+                        break
+                if hit_key:
+                    break
     if hit_key is None:
         # Fall back to the fuzzy resolver — accepts a display name passed in.
         fz = _resolve(handle, people)
@@ -673,12 +707,25 @@ def note_interaction(channel: str, handle: str, summary: str = "",
         display = handle
         rec = _empty_record(display)
         rec["first_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        if channel == "email":
+        if root == "email":
             rec["email"] = handle
-        elif channel == "telegram":
+        elif root == "telegram":
             rec["telegram_handle"] = "@" + handle.lstrip("@")
+        elif root == "social":
+            platform = sub or "unknown"
+            rec.setdefault("social_handles", {})[platform] = (
+                "@" + handle.lstrip("@") if platform != "linkedin" else handle
+            )
         hit_key = rec["canonical_key"]
         people[hit_key] = rec
+    elif root == "social" and sub:
+        # Existing record — backfill the social handle if it isn't on file.
+        rec = people[hit_key]
+        rec.setdefault("social_handles", {})
+        if not rec["social_handles"].get(sub):
+            rec["social_handles"][sub] = (
+                "@" + handle.lstrip("@") if sub != "linkedin" else handle
+            )
 
     rec = people[hit_key]
     iso = (datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
