@@ -1548,6 +1548,19 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
         except Exception as e:
             sys.stderr.write(f"jarvis-think: evolve hint skipped ({e})\n")
 
+    # Orchestrator confidence — fires only when recent multi-step plan
+    # ok_rate has dipped below threshold over enough runs. Tells Claude
+    # to lean on direct atomic tools instead of execute_plan until things
+    # recover. Empty in the healthy case.
+    orch_mod = _load_orchestrator_module()
+    if orch_mod is not None:
+        try:
+            orch_hint = orch_mod.system_prompt_hint()
+            if orch_hint:
+                blocks.append({"type": "text", "text": orch_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: orchestrator hint skipped ({e})\n")
+
     if cacheable:
         blocks.append({
             "type": "text",

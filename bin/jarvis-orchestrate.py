@@ -684,7 +684,12 @@ def execute_plan(goal: str) -> dict:
     }
 
 
-# ── Stats hook for jarvis-improve metacognition ─────────────────────
+# ── Stats / metacognition hook for jarvis-improve ───────────────────
+STATS_FILE = ORCH_DIR / "stats.json"
+MIN_RUNS_FOR_HINT = int(os.environ.get("JARVIS_ORCH_MIN_RUNS_FOR_HINT", "5"))
+LOW_OK_RATE_THRESHOLD = float(os.environ.get("JARVIS_ORCH_LOW_OK_THRESHOLD", "0.7"))
+
+
 def stats(window: int = 50) -> dict:
     """Read the last `window` run records and return a lightweight metric
     block. Consumed by jarvis-improve so orchestrator success rate makes
@@ -696,6 +701,7 @@ def stats(window: int = 50) -> dict:
     ok_count = 0
     total_tasks = 0
     total_duration = 0.0
+    common_failures: dict[str, int] = {}
     for p in files:
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
@@ -704,17 +710,74 @@ def stats(window: int = 50) -> dict:
         runs += 1
         if rec.get("ok"):
             ok_count += 1
+        else:
+            for err in (rec.get("run") or {}).get("errors") or []:
+                # Bucket on the leading error fragment so "t3: web_search timeout"
+                # and "t1: web_search timeout" cluster.
+                key = re.sub(r"^t\d+:\s*", "", str(err)).strip()[:80]
+                if key:
+                    common_failures[key] = common_failures.get(key, 0) + 1
         run = rec.get("run") or {}
         total_tasks += int(run.get("tasks_total") or 0)
         timings = run.get("timings") or {}
         if isinstance(timings, dict):
             total_duration += sum(float(v) for v in timings.values() if isinstance(v, (int, float)))
+    top_failures = sorted(common_failures.items(), key=lambda kv: -kv[1])[:3]
     return {
         "runs": runs,
         "ok_rate": round(ok_count / runs, 3) if runs else 0.0,
         "avg_tasks": round(total_tasks / runs, 2) if runs else 0.0,
         "avg_duration_s": round(total_duration / runs, 2) if runs else 0.0,
+        "top_failures": [{"error": e, "count": n} for e, n in top_failures],
     }
+
+
+def update() -> dict:
+    """Compute current stats and persist them to disk. Called by
+    jarvis-improve. Returns the same dict that gets written so the daemon
+    can log a one-liner. Safe to call frequently — pure file I/O."""
+    s = stats()
+    s["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    try:
+        ORCH_DIR.mkdir(parents=True, exist_ok=True)
+        STATS_FILE.write_text(
+            json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+    except Exception as e:
+        sys.stderr.write(f"jarvis-orchestrate: stats write failed ({e})\n")
+    return s
+
+
+def system_prompt_hint() -> str:
+    """Behavioral hint for jarvis-think's system prompt when the
+    orchestrator has been failing recently. Empty when fewer than
+    MIN_RUNS_FOR_HINT runs are available, or when ok_rate is healthy.
+    Mirrors jarvis-metacog's hook."""
+    if not STATS_FILE.exists():
+        return ""
+    try:
+        s = json.loads(STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    runs = int(s.get("runs") or 0)
+    if runs < MIN_RUNS_FOR_HINT:
+        return ""
+    ok_rate = float(s.get("ok_rate") or 0.0)
+    if ok_rate >= LOW_OK_RATE_THRESHOLD:
+        return ""
+    bits = [
+        f"## Orchestrator confidence",
+        f"Recent multi-step plans have a {int(ok_rate * 100)}% success rate "
+        f"over the last {runs} runs. Prefer direct atomic tools when the goal "
+        "is crisp; reach for `execute_plan` only when decomposition is genuinely "
+        "needed. If a plan fails, fall back to chaining tools yourself rather "
+        "than retrying the same goal.",
+    ]
+    failures = s.get("top_failures") or []
+    if failures:
+        bits.append("Common failure modes recently: " +
+                    "; ".join(f"\"{f['error']}\" ×{f['count']}" for f in failures[:3]) + ".")
+    return "\n".join(bits)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
@@ -725,6 +788,15 @@ def _cli() -> int:
         return 0
     if args[0] == "--stats":
         print(json.dumps(stats(), indent=2))
+        return 0
+    if args[0] == "--update":
+        # Daemon entry — recompute + persist stats. Quiet on success.
+        s = update()
+        print(json.dumps(s, indent=2))
+        return 0
+    if args[0] == "--hint":
+        # Debug print of the system prompt hint
+        print(system_prompt_hint() or "(no hint — ok_rate is healthy or runs < threshold)")
         return 0
     if args[0] == "--plan":
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
