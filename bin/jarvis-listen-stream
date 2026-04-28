@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """JARVIS — Streaming STT via Deepgram Nova-3.
 
-Standalone for now: connects to Deepgram's realtime WebSocket, streams audio
-from the default microphone, prints transcripts to stdout. Wiring into the
-voice loop comes later — this is the foundation.
+Connects to Deepgram's realtime WebSocket, streams mic audio (16kHz int16 mono
+via sounddevice), and emits transcripts.
 
-Output protocol (line-oriented, flushed):
-    PARTIAL: <interim text>     interim hypothesis, may be revised
-    FINAL:   <final text>       endpointed final transcript
-    SPEECH_END                  Deepgram VAD detected end of utterance
+Two output modes:
+
+    Default (continuous, line-protocol — for dev/debug):
+        PARTIAL: <interim text>
+        FINAL:   <final text>
+        SPEECH_END
+
+    --once (one-shot, single-line — for the voice loop):
+        Prints just the final transcript text on stdout, then exits 0.
+        On any failure (no key, WS error, no transcript) exits non-zero
+        with no stdout output, so callers can fall back to whisper.
 
 Gating:
     JARVIS_STT=deepgram         required to enable. Default voice loop still
@@ -23,7 +29,13 @@ Dependencies:
     sounddevice  pip install sounddevice  (already used by wake-listener)
 
 Usage:
-    JARVIS_STT=deepgram bin/jarvis-listen-stream
+    JARVIS_STT=deepgram bin/jarvis-listen-stream            # continuous
+    JARVIS_STT=deepgram bin/jarvis-listen-stream --once     # voice-loop mode
+
+TODO: pipe ring-buffer audio captured before the wake word into Deepgram via
+a `--prepend-audio FILE` flag, so the streamer can transcribe the syllables
+that landed during wake detection. v1 accepts that Deepgram starts fresh
+from after the wake.
 """
 from __future__ import annotations
 
@@ -33,6 +45,7 @@ import os
 import queue
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -56,6 +69,15 @@ DEEPGRAM_PARAMS = {
     "sample_rate": str(SAMPLE_RATE),
     "channels": str(CHANNELS),
 }
+
+# --once timeouts (seconds). Tuned for voice-assistant cadence:
+#   CONNECT: WebSocket + first message must arrive within 3s of opening.
+#   SPEECH_END: after Deepgram's VAD declares end-of-utterance, give the
+#               final result up to 1s to land before giving up.
+#   OVERALL:  hard ceiling so a confused stream can't hang the voice loop.
+ONCE_CONNECT_TIMEOUT = 3.0
+ONCE_POST_SPEECH_END_TIMEOUT = 1.0
+ONCE_OVERALL_TIMEOUT = 15.0
 
 
 def get_api_key() -> str:
@@ -81,7 +103,94 @@ def emit(line: str) -> None:
     sys.stdout.flush()
 
 
-async def stream() -> int:
+async def _receive_continuous(ws) -> None:
+    speech_active = False
+    async for raw in ws:
+        if isinstance(raw, bytes):
+            continue
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        msg_type = msg.get("type")
+
+        if msg_type == "Results":
+            alts = msg.get("channel", {}).get("alternatives") or []
+            if not alts:
+                continue
+            text = (alts[0].get("transcript") or "").strip()
+            if not text:
+                continue
+            if msg.get("is_final"):
+                emit(f"FINAL: {text}")
+            else:
+                emit(f"PARTIAL: {text}")
+
+        elif msg_type == "SpeechStarted":
+            speech_active = True
+
+        elif msg_type == "UtteranceEnd":
+            if speech_active:
+                emit("SPEECH_END")
+                speech_active = False
+
+
+async def _receive_once(ws) -> str | None:
+    """Pull messages until first FINAL, with bounded timeouts.
+
+    Returns the transcript on success, None on timeout / connection close.
+    """
+    try:
+        import websockets as _ws  # for ConnectionClosed type
+    except ImportError:
+        _ws = None  # the caller already imported; kept defensive
+
+    start = time.monotonic()
+    speech_ended_at: float | None = None
+
+    while True:
+        now = time.monotonic()
+        deadlines = [start + ONCE_OVERALL_TIMEOUT, start + ONCE_CONNECT_TIMEOUT]
+        if speech_ended_at is not None:
+            deadlines.append(speech_ended_at + ONCE_POST_SPEECH_END_TIMEOUT)
+        wait_for = min(deadlines) - now
+        if wait_for <= 0:
+            return None
+
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=wait_for)
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            # Includes websockets.ConnectionClosed and friends; treat as failure.
+            return None
+
+        if isinstance(raw, bytes):
+            continue
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        msg_type = msg.get("type")
+
+        if msg_type == "Results":
+            alts = msg.get("channel", {}).get("alternatives") or []
+            if not alts:
+                continue
+            text = (alts[0].get("transcript") or "").strip()
+            if not text:
+                continue
+            if msg.get("is_final"):
+                return text
+            # PARTIAL: ignore in once mode
+        elif msg_type == "UtteranceEnd":
+            if speech_ended_at is None:
+                speech_ended_at = time.monotonic()
+
+
+async def stream(once: bool) -> int:
     if os.environ.get("JARVIS_STT") != "deepgram":
         sys.stderr.write(
             "jarvis-listen-stream: set JARVIS_STT=deepgram to enable streaming STT\n"
@@ -125,79 +234,90 @@ async def stream() -> int:
         # raw PCM frames Deepgram wants over the wire.
         audio_q.put(bytes(indata))
 
-    speech_active = False
+    # Bound the connect itself in --once mode so a Deepgram outage doesn't
+    # leave the voice loop hanging while websockets retries DNS.
+    try:
+        if once:
+            ws = await asyncio.wait_for(
+                websockets.connect(url, additional_headers=headers),
+                timeout=ONCE_CONNECT_TIMEOUT,
+            )
+        else:
+            ws = await websockets.connect(url, additional_headers=headers)
+    except Exception as e:
+        sys.stderr.write(f"jarvis-listen-stream: connect failed: {e}\n")
+        return 2
 
-    async with websockets.connect(url, additional_headers=headers) as ws:
-        with sd.RawInputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=BLOCK_SIZE,
-            callback=mic_callback,
-        ):
-            async def sender():
-                while True:
-                    chunk = await loop.run_in_executor(None, audio_q.get)
-                    if chunk is None:
-                        await ws.send(json.dumps({"type": "CloseStream"}))
-                        return
-                    await ws.send(chunk)
+    try:
+        async with ws:
+            with sd.RawInputStream(
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=BLOCK_SIZE,
+                callback=mic_callback,
+            ):
+                async def sender():
+                    while True:
+                        chunk = await loop.run_in_executor(None, audio_q.get)
+                        if chunk is None:
+                            await ws.send(json.dumps({"type": "CloseStream"}))
+                            return
+                        await ws.send(chunk)
 
-            async def receiver():
-                nonlocal speech_active
-                async for raw in ws:
-                    if isinstance(raw, bytes):
-                        continue
+                send_task = asyncio.create_task(sender())
+
+                if once:
+                    transcript = await _receive_once(ws)
+                    send_task.cancel()
                     try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
+                        await send_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    if transcript is None:
+                        return 2
+                    sys.stdout.write(transcript + "\n")
+                    sys.stdout.flush()
+                    return 0
 
-                    msg_type = msg.get("type")
-
-                    if msg_type == "Results":
-                        alts = (
-                            msg.get("channel", {}).get("alternatives") or []
-                        )
-                        if not alts:
-                            continue
-                        text = (alts[0].get("transcript") or "").strip()
-                        if not text:
-                            continue
-                        if msg.get("is_final"):
-                            emit(f"FINAL: {text}")
-                        else:
-                            emit(f"PARTIAL: {text}")
-
-                    elif msg_type == "SpeechStarted":
-                        speech_active = True
-
-                    elif msg_type == "UtteranceEnd":
-                        if speech_active:
-                            emit("SPEECH_END")
-                            speech_active = False
-
-            send_task = asyncio.create_task(sender())
-            recv_task = asyncio.create_task(receiver())
-            try:
-                done, _pending = await asyncio.wait(
-                    [send_task, recv_task],
-                    return_when=asyncio.FIRST_EXCEPTION,
-                )
-                for t in done:
-                    exc = t.exception()
-                    if exc is not None:
-                        raise exc
-            finally:
-                send_task.cancel()
-                recv_task.cancel()
+                recv_task = asyncio.create_task(_receive_continuous(ws))
+                try:
+                    done, _pending = await asyncio.wait(
+                        [send_task, recv_task],
+                        return_when=asyncio.FIRST_EXCEPTION,
+                    )
+                    for t in done:
+                        exc = t.exception()
+                        if exc is not None:
+                            raise exc
+                finally:
+                    send_task.cancel()
+                    recv_task.cancel()
+    except Exception as e:
+        sys.stderr.write(f"jarvis-listen-stream: stream error: {e}\n")
+        return 2
 
     return 0
 
 
+def parse_args(argv: list[str]) -> bool:
+    once = False
+    for a in argv[1:]:
+        if a == "--once":
+            once = True
+        elif a in ("-h", "--help"):
+            sys.stdout.write(__doc__ or "")
+            sys.exit(0)
+        else:
+            sys.stderr.write(f"jarvis-listen-stream: unknown arg {a!r}\n")
+            sys.exit(2)
+    return once
+
+
 def main() -> int:
+    once = parse_args(sys.argv)
     try:
-        return asyncio.run(stream())
+        return asyncio.run(stream(once))
     except KeyboardInterrupt:
         return 130
 
