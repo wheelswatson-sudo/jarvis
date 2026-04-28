@@ -16,6 +16,7 @@ JARVIS_BIN="$ASSISTANT_DIR/bin/jarvis"
 LISTEN_BIN="$ASSISTANT_DIR/bin/jarvis-listen"
 CONFIG_FILE="$ASSISTANT_DIR/config/settings.json"
 HISTORY_FILE="$ASSISTANT_DIR/cache/conversation.json"
+FILLER_BIN="$ASSISTANT_DIR/bin/jarvis-filler"
 
 # Colors
 RED='\033[0;31m'
@@ -62,10 +63,34 @@ speak_with_bargein() {
 # --text, or the wake-listener.
 THINK_BIN="$ASSISTANT_DIR/bin/jarvis-think.py"
 
+# ─── Filler bridge ────────────────────────────────────────────────────
+# Spawn jarvis-filler in the background while think() runs, so the user hears
+# a brief "Hmm..." instead of dead air. The filler script self-delays 200ms;
+# if think() returns before that, kill_filler aborts before any audio plays.
+# The filler never enters conversation history — it's purely a UX signal.
+start_filler() {
+    [[ "${JARVIS_FILLER_BRIDGE:-1}" == "1" ]] || { echo ""; return 0; }
+    [[ -x "$FILLER_BIN" ]] || { echo ""; return 0; }
+    "$FILLER_BIN" </dev/null >/dev/null 2>&1 &
+    echo "$!"
+}
+
+kill_filler() {
+    local pid="${1:-}"
+    [[ -n "$pid" ]] || return 0
+    # Kill the say child first so audio cuts immediately, then the wrapper.
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 think() {
     local user_text="$1"
 
     echo -ne "    ${DIM}JARVIS is thinking...${NC}"
+
+    local filler_pid
+    filler_pid=$(start_filler)
 
     local response
     response=$(
@@ -75,6 +100,8 @@ think() {
         ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
         python3 "$THINK_BIN" "$user_text" 2>/dev/null
     )
+
+    kill_filler "$filler_pid"
 
     echo -e "\r                              "  # Clear "thinking..."
 

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# JARVIS — Filler bridge
+# Plays a brief acknowledgment phrase ("Hmm...", "One sec...") while the brain
+# is thinking, so the user hears something instead of dead air. Designed to be
+# spawned in the background and killed the moment a real response is ready.
+#
+# Uses macOS `say` for sub-100ms first-audio (no API round-trip). The filler
+# never enters conversation history — it's purely a UX signal.
+#
+# Gating:
+#   JARVIS_FILLER_BRIDGE=1   default — filler enabled
+#   JARVIS_FILLER_BRIDGE=0   disabled (silent)
+#
+# Timing:
+#   First 200ms is a sleep, so if the caller kills us before then the user
+#   hears nothing — sub-200ms thinking is natural and shouldn't be filled.
+
+set -euo pipefail
+
+[[ "${JARVIS_FILLER_BRIDGE:-1}" == "1" ]] || exit 0
+
+PHRASES=(
+    "Hmm..."
+    "Let me think..."
+    "So..."
+    "One sec..."
+    "Right..."
+    "Ah..."
+)
+
+INDEX=$(( RANDOM % ${#PHRASES[@]} ))
+PHRASE="${PHRASES[$INDEX]}"
+
+# Sub-200ms silence is natural — only fill if thinking takes longer.
+sleep 0.2
+
+# `exec` so the parent's kill hits the `say` process directly (no orphan).
+exec say "$PHRASE" 2>/dev/null
