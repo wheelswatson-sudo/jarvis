@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# jarvis-improve — master self-improvement daemon.
+#
+# Orchestrates the six self-improvement systems in dependency order. Spawned
+# detached from wake-listener.py when conversation mode exits (replacing the
+# bare jarvis-feedback spawn). Lightweight runs are <2s; heavier passes
+# (synthesis, evolution) take 10–30s but only fire on schedule.
+#
+# Order matters: signals/lessons land before pattern extraction; metacog
+# updates feed into the next system prompt; synthesis + evolve are weekly.
+#
+# All output → ~/.jarvis/logs/improvement.log (append). Per-system errors
+# don't stop the chain.
+#
+# Usage:
+#   jarvis-improve                  run the full pipeline
+#   jarvis-improve --light          fast tier only (no Sonnet calls)
+#   jarvis-improve --heavy          force the weekly tier (synth + evolve)
+#   jarvis-improve --status         summary of last runs
+#
+# Master gate: JARVIS_SELF_IMPROVE=1 (default). Setting 0 disables ALL six
+# systems' auto-runs at once.
+
+set -euo pipefail
+
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+# Resolve sibling scripts relative to this file so jarvis-improve works
+# the same when run from the repo (~/jarvis/bin/) and from the deployed
+# location (~/.jarvis/bin/). If a script is missing locally we fall back
+# to the deployed bin so partial deployments still self-improve.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+DEPLOYED_BIN="$ASSISTANT_DIR/bin"
+LOG_DIR="$ASSISTANT_DIR/logs"
+LOG="$LOG_DIR/improvement.log"
+mkdir -p "$LOG_DIR"
+
+# Pick the first existing copy: $SCRIPT_DIR (this file's neighbors) wins,
+# else fall back to the deployed bin.
+locate_script() {
+    local name="$1"
+    if [[ -x "$SCRIPT_DIR/$name" ]]; then
+        printf '%s\n' "$SCRIPT_DIR/$name"
+    elif [[ -x "$DEPLOYED_BIN/$name" ]]; then
+        printf '%s\n' "$DEPLOYED_BIN/$name"
+    fi
+}
+
+[[ "${JARVIS_SELF_IMPROVE:-1}" == "1" ]] || exit 0
+
+PYTHON="${JARVIS_PYTHON:-python3}"
+if [[ -x "$ASSISTANT_DIR/venv/bin/python3" ]]; then
+    PYTHON="$ASSISTANT_DIR/venv/bin/python3"
+fi
+
+now() { date '+%Y-%m-%d %H:%M:%S'; }
+
+log() { printf '[%s] %s\n' "$(now)" "$*" >> "$LOG"; }
+
+run_step() {
+    local label="$1"; shift
+    local start=$SECONDS
+    log "▶ $label"
+    if "$@" >> "$LOG" 2>&1; then
+        log "✓ $label  ($((SECONDS - start))s)"
+        return 0
+    else
+        local rc=$?
+        log "✗ $label  rc=$rc  ($((SECONDS - start))s)"
+        return 0  # never fail the chain
+    fi
+}
+
+mode="${1:-default}"
+case "$mode" in
+    --status)
+        echo "=== improvement.log (tail) ==="
+        tail -30 "$LOG" 2>/dev/null || echo "(no log yet)"
+        echo ""
+        echo "=== module status ==="
+        for sys in feedback metacog autopsy patterns skills synthesize evolve; do
+            stamp=""
+            case "$sys" in
+                feedback)   stamp=$(stat -f %Sm "$ASSISTANT_DIR/feedback/profile.json" 2>/dev/null || echo "(none)") ;;
+                metacog)    stamp=$(stat -f %Sm "$ASSISTANT_DIR/metacognition/accuracy.json" 2>/dev/null || echo "(none)") ;;
+                autopsy)    stamp=$(stat -f %Sm "$ASSISTANT_DIR/autopsies/fixes.json" 2>/dev/null || echo "(none)") ;;
+                patterns)   stamp=$(stat -f %Sm "$ASSISTANT_DIR/patterns/patterns.json" 2>/dev/null || echo "(none)") ;;
+                skills)     stamp="$(ls "$ASSISTANT_DIR/skills/"*.json 2>/dev/null | grep -v -E '(index|last_processed)' | wc -l | tr -d ' ') skill(s)" ;;
+                synthesize) stamp=$(stat -f %Sm "$ASSISTANT_DIR/synthesis/watson_profile.json" 2>/dev/null || echo "(none)") ;;
+                evolve)     stamp=$(test -f "$ASSISTANT_DIR/config/personality.draft.md" && echo "PENDING" || echo "(none)") ;;
+            esac
+            printf "  %-12s %s\n" "$sys" "$stamp"
+        done
+        exit 0
+        ;;
+    --light) heavy=0 ;;
+    --heavy) heavy=1 ;;
+    *)       heavy=auto ;;
+esac
+
+log "── jarvis-improve start (mode=$mode python=$PYTHON) ──"
+
+# Tier 1: light tasks. Run every invocation. Pure stdlib, no API calls,
+# all <1s individually.
+for label in feedback metacog autopsy patterns; do
+    path=$(locate_script "jarvis-$label.py")
+    [[ -n "$path" ]] && run_step "$label" "$PYTHON" "$path"
+done
+skills_path=$(locate_script "jarvis-skills.py")
+[[ -n "$skills_path" ]] && run_step "skills" "$PYTHON" "$skills_path" learn
+
+# Tier 2: heavier tasks. Each script's should_run() decides whether to fire
+# (interval / session-count thresholds). --heavy bypasses with --force.
+# --light skips this whole block.
+if [[ "$heavy" == "0" ]]; then
+    log "tier-2 skipped (--light)"
+elif [[ "$heavy" == "1" ]]; then
+    synth_path=$(locate_script "jarvis-synthesize.py")
+    evolve_path=$(locate_script "jarvis-evolve.py")
+    [[ -n "$synth_path"  ]] && run_step "synthesize" "$PYTHON" "$synth_path"  --force
+    [[ -n "$evolve_path" ]] && run_step "evolve"     "$PYTHON" "$evolve_path" --force
+else
+    synth_path=$(locate_script "jarvis-synthesize.py")
+    evolve_path=$(locate_script "jarvis-evolve.py")
+    [[ -n "$synth_path"  ]] && run_step "synthesize" "$PYTHON" "$synth_path"
+    [[ -n "$evolve_path" ]] && run_step "evolve"     "$PYTHON" "$evolve_path"
+fi
+
+log "── jarvis-improve done ──"

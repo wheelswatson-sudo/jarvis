@@ -1173,21 +1173,35 @@ def run_conversation_mode(persistent: bool = False) -> None:
             # Loop back to idle wait. Timer resets per turn.
     finally:
         _set_convo_flag(False)
-        # Spawn feedback analysis detached — analyzes the conversation
-        # window we just produced and updates ~/.jarvis/feedback/profile.json
-        # for the next turn's system prompt. Doesn't block the listener
-        # returning to wake.
+        # Spawn the self-improvement daemon detached. jarvis-improve
+        # orchestrates the six systems (feedback → metacog → autopsy →
+        # patterns → skills, plus weekly synthesis + evolution) so the
+        # listener returns to wake immediately. Replaces the bare
+        # feedback spawn that used to live here.
         if os.environ.get("JARVIS_SELF_IMPROVE", "1") == "1":
-            fb_bin = BIN_DIR / "jarvis-feedback.py"
-            if fb_bin.exists():
+            improve_bin = BIN_DIR / "jarvis-improve"
+            if improve_bin.exists():
                 try:
                     subprocess.Popen(
-                        [sys.executable, str(fb_bin)],
+                        [str(improve_bin)],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         start_new_session=True,
                     )
                 except Exception as e:
-                    log(f"feedback spawn failed: {e}")
+                    log(f"jarvis-improve spawn failed: {e}")
+            else:
+                # Back-compat fallback — direct feedback if the daemon
+                # isn't installed.
+                fb_bin = BIN_DIR / "jarvis-feedback.py"
+                if fb_bin.exists():
+                    try:
+                        subprocess.Popen(
+                            [sys.executable, str(fb_bin)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                    except Exception as e:
+                        log(f"feedback spawn failed: {e}")
 
 
 # ─── Main loop ────────────────────────────────────────────────────────
