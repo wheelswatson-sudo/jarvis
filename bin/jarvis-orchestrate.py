@@ -1,0 +1,744 @@
+#!/usr/bin/env python3
+"""Orchestrator — multi-step planning + execution for high-level goals.
+
+When Watson says "close the deal with Corbin" or "prepare for my 2pm meeting",
+the orchestrator decomposes the goal into a dependency graph of concrete tool
+calls, executes them (parallelizing siblings), and returns a structured result
+the voice layer summarizes naturally.
+
+    from jarvis_orchestrate import execute_plan
+    summary = execute_plan("prepare for my 2pm meeting")
+
+The plan is produced by Claude Sonnet (one call). Execution then walks the
+graph in dependency order: leaves first, fan-out to ThreadPoolExecutor for
+sibling tasks. Each step's result is fed into downstream tasks via simple
+{{step.id.field}} placeholders. After execution, one final Sonnet call
+synthesizes a briefing-style summary.
+
+Tools the planner can compose (kept tight on purpose — the orchestrator's
+job is choreography, not surface-area):
+
+    check_calendar     read upcoming events
+    check_email        read recent inbox / threads
+    recall             search Watson's memory
+    search_contacts    look up a person via jarvis-recall
+    web_search         single web query (jarvis-research)
+    research_topic     multi-query deep research (jarvis-research)
+    synthesize         Haiku call that combines prior step outputs into prose
+
+The orchestrator does NOT do anything irreversible (no send_email, no
+create_event, no delete_event). Those still go through the normal
+jarvis-think tool-use loop with confirm-required semantics. The orchestrator
+prepares context; Watson decides.
+
+Gate: JARVIS_ORCHESTRATOR=1 (default 1).
+
+Standalone CLI:
+    bin/jarvis-orchestrate.py "prepare for my 2pm meeting"
+"""
+from __future__ import annotations
+
+import concurrent.futures as cf
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+
+ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
+BIN_DIR = ASSISTANT_DIR / "bin"
+LOG_DIR = ASSISTANT_DIR / "logs"
+ORCH_LOG = LOG_DIR / "orchestrator.log"
+ORCH_DIR = ASSISTANT_DIR / "orchestrator"
+RUNS_DIR = ORCH_DIR / "runs"
+
+PLANNER_MODEL = os.environ.get("JARVIS_ORCH_PLANNER_MODEL", "claude-sonnet-4-6")
+SYNTH_MODEL = os.environ.get("JARVIS_ORCH_SYNTH_MODEL", "claude-sonnet-4-6")
+MAX_TASKS = int(os.environ.get("JARVIS_ORCH_MAX_TASKS", "8"))
+TASK_TIMEOUT_S = float(os.environ.get("JARVIS_ORCH_TASK_TIMEOUT_S", "30"))
+PLAN_TIMEOUT_S = float(os.environ.get("JARVIS_ORCH_PLAN_TIMEOUT_S", "20"))
+PARALLEL_WORKERS = int(os.environ.get("JARVIS_ORCH_WORKERS", "4"))
+
+
+# ── Sibling module lazy loaders (mirrors jarvis-think's pattern) ──────
+def _load_sibling(name: str):
+    src = BIN_DIR / f"{name}.py"
+    if not src.exists():
+        src = Path(__file__).parent / f"{name}.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(name.replace("-", "_"), src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-orchestrate: load {name} failed ({e})\n")
+        return None
+
+
+_email_mod = None
+_calendar_mod = None
+_memory_mod = None
+_research_mod = None
+
+
+def _email():
+    global _email_mod
+    if _email_mod is None:
+        _email_mod = _load_sibling("jarvis-email")
+    return _email_mod
+
+
+def _calendar():
+    global _calendar_mod
+    if _calendar_mod is None:
+        _calendar_mod = _load_sibling("jarvis-calendar")
+    return _calendar_mod
+
+
+def _memory():
+    global _memory_mod
+    if _memory_mod is None:
+        _memory_mod = _load_sibling("jarvis_memory")
+    return _memory_mod
+
+
+def _research():
+    global _research_mod
+    if _research_mod is None:
+        _research_mod = _load_sibling("jarvis-research")
+    return _research_mod
+
+
+# ── Anthropic call (slim, blocking — one shot per planner/synth) ─────
+def _anthropic_call(api_key: str, model: str, system: str,
+                    user_text: str, max_tokens: int = 1500,
+                    timeout: float = 30.0) -> str:
+    """Single non-streaming Messages call. Returns the text content joined."""
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user_text}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read())
+            blocks = data.get("content") or []
+            return "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(1 + attempt * 1.5)
+                continue
+            try:
+                err = json.loads(e.read()).get("error", {}).get("message", str(e))
+            except Exception:
+                err = str(e)
+            raise RuntimeError(f"API error {e.code}: {err}") from e
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1 + attempt * 1.5)
+                continue
+            raise RuntimeError(f"network error: {e}") from e
+    raise RuntimeError(f"unexpected: {last_err}")
+
+
+# ── Tool registry — read-only / safe-by-construction tools only ──────
+def _tool_check_calendar(args: dict) -> dict:
+    mod = _calendar()
+    if mod is None:
+        return {"error": "jarvis-calendar not installed"}
+    return mod.check_calendar(
+        date=args.get("date"),
+        days=int(args.get("days") or 1),
+        calendar_id=args.get("calendar_id") or "primary",
+    )
+
+
+def _tool_check_email(args: dict) -> dict:
+    mod = _email()
+    if mod is None:
+        return {"error": "jarvis-email not installed"}
+    return mod.check_email(
+        max_results=int(args.get("max_results") or 5),
+        query=args.get("query") or "is:unread",
+    )
+
+
+def _tool_recall(args: dict) -> dict:
+    mod = _memory()
+    if mod is None:
+        return {"error": "jarvis_memory not available"}
+    mem = mod.Memory()
+    query = args.get("query") or ""
+    limit = int(args.get("limit") or 5)
+    hits = mem.recall(query, limit=limit) if query else mem.recent(limit)
+    return {
+        "memories": [
+            {"id": r["id"], "created_at": r["created_at"][:10], "text": r["text"]}
+            for r in hits
+        ],
+        "count": len(hits),
+    }
+
+
+def _tool_search_contacts(args: dict) -> dict:
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    recall_bin = BIN_DIR / "jarvis-recall"
+    if not recall_bin.exists():
+        return {"error": "jarvis-recall not installed", "query": query}
+    try:
+        result = subprocess.run(
+            [str(recall_bin), "who", query],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return {"error": (result.stderr or "lookup failed").strip()[:500]}
+        return json.loads(result.stdout or "{}")
+    except subprocess.TimeoutExpired:
+        return {"error": "contact lookup timed out"}
+    except json.JSONDecodeError:
+        return {"error": "could not parse jarvis-recall output"}
+
+
+def _tool_web_search(args: dict) -> dict:
+    mod = _research()
+    if mod is None:
+        return {"error": "jarvis-research not installed"}
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    return mod.web_search(query)
+
+
+def _tool_research_topic(args: dict) -> dict:
+    mod = _research()
+    if mod is None:
+        return {"error": "jarvis-research not installed"}
+    topic = (args.get("topic") or "").strip()
+    if not topic:
+        return {"error": "topic is required"}
+    depth = args.get("depth") or "quick"
+    return mod.research_topic(topic, depth=depth)
+
+
+def _tool_synthesize(args: dict) -> dict:
+    """Cheap Haiku call that combines prior outputs into a short prose
+    block. The planner uses this as the final 'roll up the briefing'
+    step. Inputs are the resolved {{step.X}} placeholders the executor
+    has already substituted into args['inputs']."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"error": "ANTHROPIC_API_KEY not set"}
+    instruction = (args.get("instruction") or "Synthesize the inputs.").strip()
+    inputs = args.get("inputs") or ""
+    if isinstance(inputs, (dict, list)):
+        inputs_text = json.dumps(inputs, ensure_ascii=False, indent=2)
+    else:
+        inputs_text = str(inputs)
+    prompt = (
+        f"{instruction}\n\nInputs:\n{inputs_text}\n\n"
+        "Return a tight prose block, suitable to be read aloud. "
+        "No bullet lists unless the structure genuinely helps. "
+        "British-butler register, lead with what matters."
+    )
+    try:
+        text = _anthropic_call(
+            api_key, "claude-haiku-4-5-20251001",
+            system="", user_text=prompt, max_tokens=600, timeout=20,
+        )
+    except Exception as e:
+        return {"error": f"synthesize failed: {e}"}
+    return {"text": text}
+
+
+TOOLS: dict[str, Callable[[dict], dict]] = {
+    "check_calendar": _tool_check_calendar,
+    "check_email": _tool_check_email,
+    "recall": _tool_recall,
+    "search_contacts": _tool_search_contacts,
+    "web_search": _tool_web_search,
+    "research_topic": _tool_research_topic,
+    "synthesize": _tool_synthesize,
+}
+
+
+# ── Planner ──────────────────────────────────────────────────────────
+PLANNER_SYSTEM = """You are JARVIS's task planner. Watson gives you a
+high-level goal; you produce a concrete dependency graph of tool calls
+that, when executed, will give Watson everything he needs.
+
+You return ONLY a single JSON object — no prose, no code fences:
+
+{
+  "rationale": "one short sentence on why this plan",
+  "tasks": [
+    {
+      "id": "t1",
+      "tool": "<tool_name>",
+      "args": { ... },
+      "depends_on": []
+    },
+    ...
+  ]
+}
+
+Rules:
+- Each task has a unique `id` (t1, t2, ...).
+- `depends_on` is a list of task ids whose outputs this task needs.
+- To pipe a previous task's output into args, use placeholders:
+    "{{t1.events}}"          → the events array from t1's result
+    "{{t1.events[0].summary}}"→ a specific path
+    "{{t1}}"                 → the entire result dict
+  The executor substitutes these AFTER the dependency runs.
+- Tasks with no shared dependencies run in parallel automatically.
+- The LAST task should almost always be a `synthesize` step that rolls
+  the prior outputs into one prose briefing.
+- Do NOT plan irreversible actions (no send_email, create_event,
+  delete_event). The orchestrator only PREPARES context; Watson confirms
+  any irreversible action himself afterwards.
+- Keep plans tight: 2–6 tasks is typical. Hard cap: 8 tasks.
+
+Tools available:
+
+- check_calendar(date?, days?) — list events. date defaults to today.
+- check_email(query?, max_results?) — Gmail search. Default "is:unread".
+- recall(query, limit?) — search Watson's memory store.
+- search_contacts(query) — look up a person (Apple Contacts + Messages).
+- web_search(query) — single search query, summarized.
+- research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
+- synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.
+
+Examples:
+
+Goal: "prepare for my 2pm meeting"
+{
+  "rationale": "Pull meeting context, attendee history, and recent threads, then brief.",
+  "tasks": [
+    {"id":"t1","tool":"check_calendar","args":{"date":"today","days":1},"depends_on":[]},
+    {"id":"t2","tool":"recall","args":{"query":"{{t1.events[0].summary}} attendees"},"depends_on":["t1"]},
+    {"id":"t3","tool":"check_email","args":{"query":"newer_than:7d {{t1.events[0].summary}}","max_results":5},"depends_on":["t1"]},
+    {"id":"t4","tool":"synthesize","args":{
+        "instruction":"Brief Watson on his next meeting. Lead with who is there, then last interactions, then open items, then 2-3 talking points.",
+        "inputs":{"meeting":"{{t1}}","memory":"{{t2}}","recent_email":"{{t3}}"}},
+      "depends_on":["t1","t2","t3"]}
+  ]
+}
+
+Goal: "research Acme Corp before my call"
+{
+  "rationale": "Deep web research on the company plus any prior context.",
+  "tasks": [
+    {"id":"t1","tool":"research_topic","args":{"topic":"Acme Corp company background, recent news, leadership","depth":"thorough"},"depends_on":[]},
+    {"id":"t2","tool":"recall","args":{"query":"Acme Corp"},"depends_on":[]},
+    {"id":"t3","tool":"synthesize","args":{
+        "instruction":"Brief Watson on Acme Corp before his call. Cover: what they do, recent news, who's relevant.",
+        "inputs":{"web":"{{t1}}","memory":"{{t2}}"}},
+      "depends_on":["t1","t2"]}
+  ]
+}
+"""
+
+
+def _extract_first_json(text: str) -> dict | None:
+    """Pull the first balanced { ... } block out of a model response.
+    Handles models that sneak code fences or commentary in despite instructions."""
+    if not text:
+        return None
+    # Strip code fences if present
+    fence = re.search(r"```(?:json)?\s*\n(.+?)\n```", text, re.DOTALL)
+    if fence:
+        candidate = fence.group(1)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    # Find the first balanced JSON object
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def plan(goal: str, api_key: str) -> dict:
+    """Ask Sonnet for a task graph. Returns {rationale, tasks} or
+    {error}. Validates structure before returning so a malformed plan
+    never makes it to execution."""
+    if not goal.strip():
+        return {"error": "empty goal"}
+    try:
+        raw = _anthropic_call(
+            api_key, PLANNER_MODEL, PLANNER_SYSTEM, goal,
+            max_tokens=1500, timeout=PLAN_TIMEOUT_S,
+        )
+    except Exception as e:
+        return {"error": f"planner call failed: {e}"}
+
+    parsed = _extract_first_json(raw)
+    if not parsed:
+        return {"error": "planner did not return JSON", "raw": raw[:500]}
+
+    tasks = parsed.get("tasks") or []
+    if not isinstance(tasks, list) or not tasks:
+        return {"error": "plan has no tasks", "raw": raw[:500]}
+    if len(tasks) > MAX_TASKS:
+        return {"error": f"plan exceeds max tasks ({len(tasks)} > {MAX_TASKS})"}
+
+    seen_ids: set[str] = set()
+    for t in tasks:
+        if not isinstance(t, dict):
+            return {"error": "task is not an object"}
+        tid = t.get("id")
+        tool = t.get("tool")
+        if not tid or not tool:
+            return {"error": "task missing id or tool"}
+        if tid in seen_ids:
+            return {"error": f"duplicate task id: {tid}"}
+        seen_ids.add(tid)
+        if tool not in TOOLS:
+            return {"error": f"unknown tool: {tool}"}
+        deps = t.get("depends_on") or []
+        if not isinstance(deps, list):
+            return {"error": f"task {tid}: depends_on must be a list"}
+        for d in deps:
+            if d not in seen_ids and d != tid:
+                # Forward references are illegal — we declare in topological-ish
+                # order; a dep must already have been seen.
+                return {"error": f"task {tid}: forward dependency {d}"}
+        t.setdefault("args", {})
+        t.setdefault("depends_on", [])
+
+    return {
+        "rationale": parsed.get("rationale", ""),
+        "tasks": tasks,
+        "raw": raw,
+    }
+
+
+# ── Placeholder substitution ────────────────────────────────────────
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)((?:\.[a-zA-Z0-9_]+|\[\d+\])*)\s*\}\}")
+
+
+def _resolve_path(value: Any, path: str) -> Any:
+    """Walk a dotted/indexed path on a value. Missing keys → None."""
+    if not path:
+        return value
+    cur = value
+    for part in re.findall(r"\.([a-zA-Z0-9_]+)|\[(\d+)\]", path):
+        attr, idx = part
+        if attr:
+            if isinstance(cur, dict):
+                cur = cur.get(attr)
+            else:
+                return None
+        elif idx:
+            try:
+                cur = cur[int(idx)]
+            except (IndexError, TypeError, KeyError):
+                return None
+        if cur is None:
+            return None
+    return cur
+
+
+def _substitute(args: Any, results: dict[str, Any]) -> Any:
+    """Recursively replace {{tid.path}} references with actual values from
+    completed task results. Whole-value substitution (`"{{t1}}"`) preserves
+    the underlying type; embedded substitution (`"summary: {{t1.foo}}"`)
+    coerces to string."""
+    if isinstance(args, str):
+        # Whole-string single placeholder → preserve type
+        whole = _PLACEHOLDER_RE.fullmatch(args.strip())
+        if whole:
+            tid, path = whole.group(1), whole.group(2)
+            val = results.get(tid)
+            if val is None:
+                return None
+            return _resolve_path(val, path)
+
+        def _replace(m: re.Match) -> str:
+            tid, path = m.group(1), m.group(2)
+            val = results.get(tid)
+            resolved = _resolve_path(val, path) if val is not None else None
+            if resolved is None:
+                return ""
+            if isinstance(resolved, (dict, list)):
+                return json.dumps(resolved, ensure_ascii=False)
+            return str(resolved)
+
+        return _PLACEHOLDER_RE.sub(_replace, args)
+
+    if isinstance(args, list):
+        return [_substitute(a, results) for a in args]
+    if isinstance(args, dict):
+        return {k: _substitute(v, results) for k, v in args.items()}
+    return args
+
+
+# ── Executor ────────────────────────────────────────────────────────
+def _run_one(task: dict, results: dict[str, Any]) -> tuple[str, dict, float]:
+    """Execute a single task. Returns (id, result, duration_s)."""
+    tid = task["id"]
+    tool = task["tool"]
+    raw_args = task.get("args") or {}
+    args = _substitute(raw_args, results)
+    handler = TOOLS.get(tool)
+    start = time.monotonic()
+    if handler is None:
+        return tid, {"error": f"unknown tool: {tool}"}, 0.0
+    try:
+        result = handler(args if isinstance(args, dict) else {"_args": args})
+    except Exception as e:
+        result = {"error": f"{tool} raised: {e}"}
+    return tid, result, time.monotonic() - start
+
+
+def execute(plan_obj: dict) -> dict:
+    """Walk the dependency graph. Tasks with no remaining unmet deps run
+    in parallel via ThreadPoolExecutor. Returns a structured run record."""
+    tasks = plan_obj.get("tasks") or []
+    by_id = {t["id"]: t for t in tasks}
+    pending: set[str] = set(by_id.keys())
+    completed: set[str] = set()
+    results: dict[str, Any] = {}
+    timings: dict[str, float] = {}
+    errors: list[str] = []
+
+    deadline = time.monotonic() + TASK_TIMEOUT_S * max(1, len(tasks))
+
+    while pending:
+        if time.monotonic() > deadline:
+            errors.append("overall execution deadline exceeded")
+            break
+
+        ready = [tid for tid in pending
+                 if all(d in completed for d in by_id[tid].get("depends_on", []))]
+        if not ready:
+            unmet = {tid: by_id[tid].get("depends_on", []) for tid in pending}
+            errors.append(f"deadlock — no ready tasks; pending deps: {unmet}")
+            break
+
+        with cf.ThreadPoolExecutor(max_workers=min(PARALLEL_WORKERS, len(ready))) as pool:
+            futures = {pool.submit(_run_one, by_id[tid], results): tid for tid in ready}
+            for fut in cf.as_completed(futures, timeout=TASK_TIMEOUT_S):
+                tid = futures[fut]
+                try:
+                    rid, result, dur = fut.result(timeout=1.0)
+                except Exception as e:
+                    rid, result, dur = tid, {"error": f"task crashed: {e}"}, 0.0
+                results[rid] = result
+                timings[rid] = round(dur, 3)
+                completed.add(rid)
+                pending.discard(rid)
+                if isinstance(result, dict) and result.get("error"):
+                    errors.append(f"{rid}: {result['error']}")
+
+    final_id = tasks[-1]["id"] if tasks else None
+    final = results.get(final_id) if final_id else None
+    final_text = ""
+    if isinstance(final, dict) and isinstance(final.get("text"), str):
+        final_text = final["text"]
+
+    return {
+        "ok": not errors,
+        "final_text": final_text,
+        "tasks_completed": len(completed),
+        "tasks_total": len(tasks),
+        "timings": timings,
+        "errors": errors,
+        "results": results,
+    }
+
+
+def _log_run(goal: str, plan_obj: dict, run: dict) -> Path | None:
+    try:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+        path = RUNS_DIR / f"{ts}.json"
+        record = {
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "goal": goal,
+            "rationale": plan_obj.get("rationale", ""),
+            "plan": plan_obj.get("tasks") or [],
+            "run": {k: v for k, v in run.items() if k != "results"},
+            "ok": run.get("ok", False),
+            "final_text": run.get("final_text", ""),
+        }
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with ORCH_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": record["ts"],
+                "goal": goal,
+                "ok": run.get("ok", False),
+                "tasks": run.get("tasks_total", 0),
+                "errors": run.get("errors", []),
+                "duration_total_s": round(sum(run.get("timings", {}).values()), 3),
+            }, ensure_ascii=False) + "\n")
+        return path
+    except Exception:
+        return None
+
+
+# ── Public entrypoint ───────────────────────────────────────────────
+def execute_plan(goal: str) -> dict:
+    """End-to-end: plan(goal) → execute → structured summary.
+
+    Returns:
+        {
+          "ok": bool,
+          "summary": <string suitable to be read aloud>,
+          "rationale": <planner's one-liner>,
+          "tasks": [{id, tool, ok, duration_s}],
+          "errors": [...],
+          "run_path": "/path/to/run.json" or None,
+        }
+    """
+    if os.environ.get("JARVIS_ORCHESTRATOR", "1") != "1":
+        return {"ok": False, "summary": "", "errors": ["orchestrator disabled (JARVIS_ORCHESTRATOR=0)"]}
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"ok": False, "summary": "", "errors": ["ANTHROPIC_API_KEY not set"]}
+
+    plan_obj = plan(goal, api_key)
+    if plan_obj.get("error"):
+        return {"ok": False, "summary": "", "errors": [plan_obj["error"]]}
+
+    run = execute(plan_obj)
+    run_path = _log_run(goal, plan_obj, run)
+
+    summary = run.get("final_text") or ""
+    if not summary and run.get("ok"):
+        summary = f"Plan completed: {len(plan_obj.get('tasks', []))} tasks ran cleanly."
+    if not summary and not run.get("ok"):
+        summary = "I ran the plan but hit issues, sir. " + "; ".join(run.get("errors", [])[:2])
+
+    task_summary = []
+    for t in plan_obj.get("tasks") or []:
+        tid = t["id"]
+        result = run.get("results", {}).get(tid) or {}
+        task_summary.append({
+            "id": tid,
+            "tool": t["tool"],
+            "ok": isinstance(result, dict) and not result.get("error"),
+            "duration_s": run.get("timings", {}).get(tid, 0.0),
+        })
+
+    return {
+        "ok": run.get("ok", False),
+        "summary": summary,
+        "rationale": plan_obj.get("rationale", ""),
+        "tasks": task_summary,
+        "errors": run.get("errors", []),
+        "run_path": str(run_path) if run_path else None,
+    }
+
+
+# ── Stats hook for jarvis-improve metacognition ─────────────────────
+def stats(window: int = 50) -> dict:
+    """Read the last `window` run records and return a lightweight metric
+    block. Consumed by jarvis-improve so orchestrator success rate makes
+    it into the metacognition tracking."""
+    if not RUNS_DIR.exists():
+        return {"runs": 0, "ok_rate": 0.0, "avg_tasks": 0.0, "avg_duration_s": 0.0}
+    files = sorted(RUNS_DIR.glob("*.json"))[-window:]
+    runs = 0
+    ok_count = 0
+    total_tasks = 0
+    total_duration = 0.0
+    for p in files:
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        runs += 1
+        if rec.get("ok"):
+            ok_count += 1
+        run = rec.get("run") or {}
+        total_tasks += int(run.get("tasks_total") or 0)
+        timings = run.get("timings") or {}
+        if isinstance(timings, dict):
+            total_duration += sum(float(v) for v in timings.values() if isinstance(v, (int, float)))
+    return {
+        "runs": runs,
+        "ok_rate": round(ok_count / runs, 3) if runs else 0.0,
+        "avg_tasks": round(total_tasks / runs, 2) if runs else 0.0,
+        "avg_duration_s": round(total_duration / runs, 2) if runs else 0.0,
+    }
+
+
+# ── CLI ─────────────────────────────────────────────────────────────
+def _cli() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        sys.stdout.write(__doc__ or "")
+        return 0
+    if args[0] == "--stats":
+        print(json.dumps(stats(), indent=2))
+        return 0
+    if args[0] == "--plan":
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            print("ANTHROPIC_API_KEY not set", file=sys.stderr)
+            return 1
+        goal = " ".join(args[1:])
+        print(json.dumps(plan(goal, api_key), indent=2))
+        return 0
+    goal = " ".join(args)
+    result = execute_plan(goal)
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(_cli())
