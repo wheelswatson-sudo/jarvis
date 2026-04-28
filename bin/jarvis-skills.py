@@ -100,10 +100,13 @@ def _word_overlap(a: str, b: str) -> float:
 
 
 # ── Storage ─────────────────────────────────────────────────────────
+_INTERNAL_FILES = {"index.json", "last_processed.json"}
+
+
 def _list_skill_files() -> list[Path]:
     if not SKILLS_DIR.exists():
         return []
-    return sorted(p for p in SKILLS_DIR.glob("*.json") if p.name != "index.json")
+    return sorted(p for p in SKILLS_DIR.glob("*.json") if p.name not in _INTERNAL_FILES)
 
 
 def list_skills() -> list[dict]:
@@ -241,32 +244,19 @@ def extract_from_conversation(messages: list[dict] | None = None) -> list[dict]:
         if not isinstance(content, str):
             continue
 
-        # Path 1: explicit teach phrase
+        # Only explicit teach phrases create skills automatically. Earlier
+        # iterations also tried "approval after numbered list" but the
+        # heuristic over-triggered (negative user turns leaked into trigger
+        # extraction). Explicit phrasing is the safer signal — Watson can
+        # always say "save this as X" to teach a workflow.
         trigger = None
         for pat in TEACH_PATTERNS:
             mm = pat.search(content)
             if mm:
-                trigger = mm.group("trigger").strip()
-                break
-
-        # Path 2: approval right after an assistant numbered list
-        if not trigger and APPROVAL_PATTERNS.match(content):
-            # Look back for an assistant turn with a numbered list
-            for j in range(i - 1, max(-1, i - 4), -1):
-                prev = messages[j]
-                if prev.get("role") != "assistant":
-                    continue
-                ptext = prev.get("content") if isinstance(prev.get("content"), str) else ""
-                if ptext and len(STEP_LINE_RE.findall(ptext)) >= 2:
-                    # The user approved a list. Pull the trigger from the
-                    # earlier user turn that asked the question — first
-                    # ~6 words is a good slug source.
-                    for k in range(j - 1, -1, -1):
-                        ask = messages[k]
-                        if ask.get("role") == "user" and isinstance(ask.get("content"), str):
-                            words = ask["content"].split()
-                            trigger = " ".join(words[:6]).strip().rstrip("?.!,")
-                            break
+                t = (mm.group("trigger") or "").strip()
+                # Trigger must be at least 2 words to be a useful match key.
+                if len(t.split()) >= 2:
+                    trigger = t
                     break
 
         if not trigger:
@@ -381,7 +371,10 @@ def _cli() -> int:
         if not skills:
             print("(no skills yet)")
         for s in skills:
-            print(f"{s.get('slug'):30s}  trigger={s.get('trigger')!r:50s}  uses={s.get('uses',0)}")
+            slug = (s.get("slug") or "?")
+            trigger = repr(s.get("trigger") or "")
+            uses = s.get("uses", 0)
+            print(f"{slug:30s}  trigger={trigger:50s}  uses={uses}")
         return 0
     if args[0] == "inspect" and len(args) > 1:
         path = SKILLS_DIR / f"{args[1]}.json"
