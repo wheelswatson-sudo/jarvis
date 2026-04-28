@@ -532,6 +532,9 @@ _orch_mod = None
 _briefing_mod = None
 _research_mod = None
 _telegram_mod = None
+_style_mod = None
+_contacts_mod = None
+_notif_mod = None
 
 
 def _load_email_module():
@@ -642,6 +645,46 @@ def _load_telegram_module():
         return None
 
 
+def _load_style_module():
+    global _style_mod
+    if _style_mod is not None:
+        return _style_mod
+    src = BIN_DIR / "jarvis-style.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_style", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _style_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: style module load failed ({e})\n")
+        return None
+
+
+def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None]:
+    """Run text through jarvis-style.apply_style if the module + profile
+    are present. Returns (final_text, style_result) — style_result is None
+    when the module isn't available so callers can tell apart 'didn't run'
+    from 'ran but passed through'. Best-effort: any failure returns the
+    original text untouched."""
+    if os.environ.get("JARVIS_STYLE_AUTOAPPLY", "1") != "1":
+        return text, None
+    mod = _load_style_module()
+    if mod is None:
+        return text, None
+    try:
+        res = mod.apply_style(text, channel=channel)
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: apply_style failed ({e})\n")
+        return text, None
+    if not isinstance(res, dict) or res.get("error"):
+        return text, res if isinstance(res, dict) else None
+    styled = (res.get("styled") or text).strip() or text
+    return styled, res
+
+
 def _tool_check_email(args: dict, _mem: Memory) -> dict:
     mod = _load_email_module()
     if mod is None:
@@ -656,12 +699,17 @@ def _tool_draft_email(args: dict, _mem: Memory) -> dict:
     mod = _load_email_module()
     if mod is None:
         return {"error": "jarvis-email module not installed"}
-    return mod.draft_email(
+    body = args.get("body") or ""
+    styled_body, style_res = _maybe_apply_style(body, channel="email") if body else (body, None)
+    out = mod.draft_email(
         to=args.get("to") or "",
         subject=args.get("subject") or "",
-        body=args.get("body") or "",
+        body=styled_body,
         thread_id=args.get("thread_id"),
     )
+    if isinstance(out, dict) and style_res and not style_res.get("passthrough"):
+        out["style_applied"] = True
+    return out
 
 
 def _tool_send_email(args: dict, _mem: Memory) -> dict:
@@ -837,6 +885,23 @@ def _tool_telegram_search(args: dict, _mem: Memory) -> dict:
     )
 
 
+def _tool_style_apply(args: dict, _mem: Memory) -> dict:
+    mod = _load_style_module()
+    if mod is None:
+        return {"error": "jarvis-style module not installed"}
+    text = args.get("text") or ""
+    if not text:
+        return {"error": "text is required"}
+    return mod.apply_style(text, channel=args.get("channel"))
+
+
+def _tool_style_status(_args: dict, _mem: Memory) -> dict:
+    mod = _load_style_module()
+    if mod is None:
+        return {"error": "jarvis-style module not installed"}
+    return mod.status()
+
+
 def _tool_send_telegram(args: dict, _mem: Memory) -> dict:
     mod = _load_telegram_module()
     if mod is None:
@@ -845,12 +910,23 @@ def _tool_send_telegram(args: dict, _mem: Memory) -> dict:
     message = args.get("message")
     if not group or not message:
         return {"error": "group_name and message required"}
-    return mod.send_telegram(
+    # Style only the preview round (confirm=false). Once the user has
+    # approved the wording, send_telegram with confirm=true posts the
+    # exact text — never silently rewrite an approved message.
+    confirm = bool(args.get("confirm"))
+    styled_message = message
+    style_res: dict | None = None
+    if not confirm:
+        styled_message, style_res = _maybe_apply_style(message, channel="telegram")
+    out = mod.send_telegram(
         group_name=group,
-        message=message,
+        message=styled_message,
         reply_to=args.get("reply_to"),
-        confirm=bool(args.get("confirm")),
+        confirm=confirm,
     )
+    if isinstance(out, dict) and style_res and not style_res.get("passthrough"):
+        out["style_applied"] = True
+    return out
 
 
 # Tool registry — name → (handler, schema)
@@ -1372,6 +1448,49 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                 },
                 "required": ["query"],
             },
+        },
+    ),
+    "style_apply": (
+        _tool_style_apply,
+        {
+            "name": "style_apply",
+            "description": (
+                "Rewrite a piece of text in Watson's personal voice — pulls "
+                "his style profile (built from sent email + Telegram) and "
+                "asks Haiku to match cadence, register, and signature "
+                "phrases. Use ONLY when Watson asks for a one-off rewrite "
+                "('make this sound like me', 'rewrite this in my voice'). "
+                "draft_email and send_telegram already auto-apply style; "
+                "don't double-style."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The draft text to rewrite.",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "enum": ["email", "telegram"],
+                        "description": "Optional channel hint to weight the rewrite.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "style_status": (
+        _tool_style_status,
+        {
+            "name": "style_status",
+            "description": (
+                "Diagnostic snapshot of Watson's style profile — when it "
+                "was built, how many samples, channel breakdown, current "
+                "tone summary. Use only if Watson asks 'do you know my "
+                "writing style yet' or to confirm the profile is fresh."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
         },
     ),
     "send_telegram": (
