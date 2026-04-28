@@ -14,6 +14,7 @@ Designed to run as a LaunchAgent (always-on background service).
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -57,6 +58,62 @@ try:
     VOICE_SILENCE_S = float(os.environ.get("JARVIS_VOICE_SILENCE_S", "0.8"))
 except ValueError:
     VOICE_SILENCE_S = 0.8
+
+# Continuous conversation mode: after the first wake-triggered turn, stay open
+# for follow-up utterances without requiring a fresh "Hey Jarvis." Listens via
+# VAD on a fresh InputStream and uses the same silence gate. Exits on idle
+# timeout or an explicit exit phrase ("goodbye", "thanks Jarvis", etc.).
+CONVO_MODE_ENABLED = os.environ.get("JARVIS_CONVO_MODE", "1") == "1"
+try:
+    CONVO_TIMEOUT_S = float(os.environ.get("JARVIS_CONVO_TIMEOUT", "30"))
+except ValueError:
+    CONVO_TIMEOUT_S = 30.0
+
+# State files —
+#   convo_active   touched while a convo session is running (any kind), so
+#                  jarvis-notify can decide whether to deliver immediately
+#                  or queue for later
+#   convo_mode     persistent toggle ("1" or "0"). When "1", wake-word
+#                  detection is skipped and the listener goes straight into
+#                  conversation mode each loop iteration. The state survives
+#                  process restarts and can be read by other scripts.
+STATE_DIR = ASSISTANT_DIR / "state"
+CONVO_FLAG = STATE_DIR / "convo_active"
+CONVO_PERSIST_FLAG = STATE_DIR / "convo_mode"
+
+# Notification queue — pending.json is a JSON array of {message, ts} entries
+# written by jarvis-notify when convo is active. We pop+deliver from rest
+# moments (between wake cycles, and during convo idle waits).
+NOTIF_DIR = ASSISTANT_DIR / "notifications"
+PENDING_NOTIFICATIONS = NOTIF_DIR / "pending.json"
+NOTIFICATION_POLL_S = 5.0  # how often to drain the queue during idle waits
+
+# Voice-activated mode toggle. Detected after transcription, before sending
+# to Claude — works regardless of STT backend. Anchored at start of utterance
+# so e.g. "I told her goodbye" doesn't deactivate.
+_ACTIVATE_RE = re.compile(
+    r'^\s*('
+    r'i\'?m\s+working'
+    r'|work\s+mode'
+    r'|stay\s+on'
+    r')\b',
+    re.I,
+)
+_DEACTIVATE_RE = re.compile(
+    r'^\s*('
+    r'that\'?s\s+all'
+    r'|take\s+a\s+break'
+    r'|go\s+to\s+sleep'
+    r'|goodbye'
+    r'|good\s+bye'
+    r'|that\s+will\s+be\s+all'
+    r'|bye[\s,.!]+jarvis'
+    r')\b',
+    re.I,
+)
+
+ACTIVATE_REPLY = "I'm here. Just talk whenever you need me."
+DEACTIVATE_REPLY = "I'll be listening for my name."
 
 
 # Adaptive silence gate. The end-of-speech detector compares per-chunk mean
@@ -360,6 +417,121 @@ def transcribe_streaming():
     return transcript
 
 
+# ─── Conversation-mode state file ────────────────────────────────────
+def _set_convo_flag(active: bool) -> None:
+    """Touch / remove the convo_active state file. Best-effort — failures
+    just mean jarvis-notify can't tell whether to queue, in which case it
+    falls back to immediate delivery."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if active:
+            CONVO_FLAG.touch()
+        else:
+            try:
+                CONVO_FLAG.unlink()
+            except FileNotFoundError:
+                pass
+    except Exception as e:
+        log(f"convo flag toggle failed: {e}")
+
+
+def _is_activate_phrase(text: str) -> bool:
+    return bool(_ACTIVATE_RE.match((text or "").strip()))
+
+
+def _is_deactivate_phrase(text: str) -> bool:
+    return bool(_DEACTIVATE_RE.match((text or "").strip()))
+
+
+def _set_persistent_convo(active: bool) -> None:
+    """Write the persistent convo-mode flag to disk. Survives process
+    restart so a subsequent launch enters convo mode immediately."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        CONVO_PERSIST_FLAG.write_text("1" if active else "0", encoding="utf-8")
+    except Exception as e:
+        log(f"persistent convo flag write failed: {e}")
+
+
+def _is_persistent_convo_active() -> bool:
+    try:
+        return CONVO_PERSIST_FLAG.read_text(encoding="utf-8").strip() == "1"
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _handle_special_phrases(user_text: str) -> str | None:
+    """If user_text triggers a mode change, set state + speak ack.
+    Returns 'activate' / 'deactivate' / None.
+
+    Detected post-transcription so it works with any STT backend (whisper,
+    Deepgram, future). Caller decides what to do with the action — typically
+    skip sending to Claude (this IS the response)."""
+    if _is_activate_phrase(user_text):
+        log("Activate phrase detected — persistent convo mode ON")
+        _set_persistent_convo(True)
+        speak(ACTIVATE_REPLY)
+        return "activate"
+    if _is_deactivate_phrase(user_text):
+        log("Deactivate phrase detected — persistent convo mode OFF")
+        _set_persistent_convo(False)
+        speak(DEACTIVATE_REPLY)
+        return "deactivate"
+    return None
+
+
+# ─── Notification queue (drained at idle moments) ─────────────────────
+def _deliver_one_pending_notification() -> bool:
+    """Pop one message from pending.json and deliver via `jarvis-notify --force`.
+    Returns True if something was delivered. Best-effort — on any IO/JSON error
+    we leave the queue alone for the next attempt."""
+    if not PENDING_NOTIFICATIONS.exists():
+        return False
+    try:
+        with PENDING_NOTIFICATIONS.open("r", encoding="utf-8") as f:
+            queue = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(queue, list) or not queue:
+        return False
+
+    notif = queue.pop(0)
+    try:
+        with PENDING_NOTIFICATIONS.open("w", encoding="utf-8") as f:
+            json.dump(queue, f, indent=2)
+    except OSError:
+        return False
+
+    msg = notif.get("message", "") if isinstance(notif, dict) else str(notif)
+    if not msg:
+        return False
+
+    notify_bin = BIN_DIR / "jarvis-notify"
+    if not notify_bin.exists():
+        log("pending notification dropped — jarvis-notify not installed")
+        return False
+
+    log(f"delivering pending notification: {msg[:60]}")
+    try:
+        subprocess.run(
+            [str(notify_bin), "--force", msg],
+            timeout=30,
+            check=False,
+            capture_output=True,
+        )
+    except Exception as e:
+        log(f"jarvis-notify failed: {e}")
+    return True
+
+
+def _drain_pending_notifications(limit: int = 5) -> None:
+    """Deliver up to `limit` queued notifications back-to-back. Bounded so a
+    runaway queue can't pin the loop forever."""
+    for _ in range(limit):
+        if not _deliver_one_pending_notification():
+            return
+
+
 # ─── Send to Claude and speak response ────────────────────────────────
 # Generous ceiling for the full think + TTS pipeline. The previous 30s killed
 # any response whose streamed audio took longer than that, leaking the orphan
@@ -410,8 +582,15 @@ def respond(user_text):
         log(f"respond failed: {e}")
 
 # ─── Wake word handler ────────────────────────────────────────────────
-def on_wake_detected():
-    """Triggered when 'Hey Jarvis' is detected."""
+def on_wake_detected() -> str | None:
+    """Triggered when 'Hey Jarvis' is detected. Returns:
+        'activate'   — user said an activation phrase (caller enters
+                       persistent convo mode)
+        'deactivate' — user said a deactivation phrase (caller stays
+                       in wake-only mode, does not enter session convo)
+        None         — normal turn (caller may enter session convo if
+                       JARVIS_CONVO_MODE=1)
+    """
     log("WAKE WORD DETECTED")
 
     # Acknowledge
@@ -434,7 +613,7 @@ def on_wake_detected():
         audio_path = record_command()
         if not audio_path:
             log("No command recorded")
-            return
+            return None
 
         user_text = transcribe(audio_path)
         try:
@@ -445,19 +624,206 @@ def on_wake_detected():
     if not user_text:
         log("No transcription")
         speak("I did not catch that, sir.")
-        return
+        return None
 
     log(f"User said: {user_text}")
 
+    # Special phrases first — these set persistent state + speak their own
+    # response. Don't forward to Claude.
+    action = _handle_special_phrases(user_text)
+    if action:
+        return action
+
     # Process and respond
     respond(user_text)
+    return None
+
+# ─── Continuous conversation mode ─────────────────────────────────────
+# After a wake-triggered turn, stay open for follow-up utterances without
+# requiring "Hey Jarvis" again. Listens via VAD on a fresh InputStream;
+# uses the same noise-floor silence gate as record_command. While idle (no
+# active speech), pending notifications get drained — so timer alerts that
+# fired during the previous turn surface as soon as the user pauses.
+def record_with_idle_timeout(idle_timeout: float, max_record: int = 15):
+    """Wait up to `idle_timeout` for speech to begin, then record until end-
+    of-utterance silence (using VOICE_SILENCE_S). Returns audio_path or None.
+
+    None means: idle timeout expired without speech, OR a failure opened the
+    stream. Caller treats both as "convo expired, exit gracefully."
+
+    Drains pending notifications periodically while idle, so a queued timer
+    alert reaches the user inside the convo session instead of waiting for
+    convo to end.
+    """
+    silence_amplitude = get_silence_gate()
+    chunks_per_second = SAMPLE_RATE // CHUNK_SIZE
+    idle_chunks_total = max(1, int(idle_timeout * chunks_per_second))
+    silence_threshold_chunks = int(VOICE_SILENCE_S * chunks_per_second)
+    max_chunks = max_record * chunks_per_second
+    notif_poll_chunks = max(1, int(NOTIFICATION_POLL_S * chunks_per_second))
+
+    audio_chunks: list = []
+    silence_chunks = 0
+    started_speaking = False
+
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype=np.int16,
+            blocksize=CHUNK_SIZE,
+        ) as stream:
+            # Phase 1: idle wait — listen for speech onset, drain queue periodically.
+            idle_count = 0
+            poll_count = 0
+            while idle_count < idle_chunks_total:
+                chunk, _ = stream.read(CHUNK_SIZE)
+                chunk = chunk.flatten()
+                amplitude = np.abs(chunk).mean()
+                if amplitude > silence_amplitude:
+                    audio_chunks.append(chunk)
+                    started_speaking = True
+                    break
+                idle_count += 1
+                poll_count += 1
+                if poll_count >= notif_poll_chunks:
+                    poll_count = 0
+                    # Note: delivering a notification here would conflict with
+                    # the open input stream (audio bleed). Defer to caller
+                    # which closes-and-delivers between turns.
+                    if PENDING_NOTIFICATIONS.exists():
+                        try:
+                            with PENDING_NOTIFICATIONS.open() as f:
+                                queue = json.load(f)
+                            if isinstance(queue, list) and queue:
+                                # Signal "deliver pending" by returning a sentinel
+                                # path. Callers detect this and act.
+                                return "PENDING_NOTIFICATION"
+                        except Exception:
+                            pass
+
+            if not started_speaking:
+                return None
+
+            # Phase 2: record until silence.
+            chunk_count = 1
+            while chunk_count < max_chunks:
+                chunk, _ = stream.read(CHUNK_SIZE)
+                chunk = chunk.flatten()
+                audio_chunks.append(chunk)
+                amplitude = np.abs(chunk).mean()
+                if amplitude > silence_amplitude:
+                    silence_chunks = 0
+                else:
+                    silence_chunks += 1
+                    if silence_chunks >= silence_threshold_chunks:
+                        log("End of speech (convo)")
+                        break
+                chunk_count += 1
+    except Exception as e:
+        log(f"convo stream error: {e}")
+        return None
+
+    if not audio_chunks:
+        return None
+
+    audio = np.concatenate(audio_chunks)
+    tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_file.close()
+    import wave
+    with wave.open(tmp_file.name, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio.tobytes())
+    return tmp_file.name
+
+
+def run_conversation_mode(persistent: bool = False) -> None:
+    """Loop: wait for next utterance → transcribe → respond → repeat.
+
+    Two flavours:
+      - session (persistent=False): exits after JARVIS_CONVO_TIMEOUT seconds
+        of silence. Used after a wake-triggered turn when JARVIS_CONVO_MODE=1.
+      - persistent (persistent=True): no idle timeout. Only exits on a
+        deactivation phrase ("that's all" / "go to sleep" / "goodbye" /
+        "take a break"). Activated by saying "I'm working" / "work mode" /
+        "stay on" — survives wake-listener restarts via state file.
+
+    History persists across turns automatically — every turn writes through
+    jarvis-converse → jarvis-think.py → conversation.json.
+
+    If user says an activation phrase mid-session, we promote to persistent.
+    """
+    flavour = "persistent" if persistent else f"session ({CONVO_TIMEOUT_S:.0f}s idle)"
+    log(f"Entering conversation mode: {flavour}")
+    _set_convo_flag(True)
+    try:
+        while True:
+            # Persistent mode disables the idle timer — we wait indefinitely
+            # for the next utterance. A very large timeout is functionally
+            # infinite but still bounded so an OS-level hang eventually
+            # frees the stream. 24h is plenty.
+            timeout = 86400.0 if persistent else CONVO_TIMEOUT_S
+            audio_path = record_with_idle_timeout(timeout)
+
+            # Sentinel: queue has pending notifications. Drain them (the
+            # input stream is now closed inside the helper) and resume.
+            if audio_path == "PENDING_NOTIFICATION":
+                _drain_pending_notifications()
+                continue
+
+            if audio_path is None:
+                if persistent:
+                    # Stream error or impossibly-long idle. Stay in convo —
+                    # drop back to the loop top to reopen the stream.
+                    log("Persistent convo: stream returned None, retrying")
+                    time.sleep(0.5)
+                    continue
+                log("Conversation mode: idle timeout, returning to wake")
+                speak("I shall be here, sir.")
+                return
+
+            # Transcribe via whisper. Deepgram's --once mode opens its own
+            # input stream and would race with the one we just closed; for
+            # convo turns we use the local-capture path exclusively.
+            user_text = transcribe(audio_path)
+            try:
+                os.unlink(audio_path)
+            except Exception:
+                pass
+
+            if not user_text:
+                log("Conversation mode: empty transcript")
+                if persistent:
+                    continue  # keep listening
+                return
+
+            log(f"User said (convo): {user_text}")
+
+            # Mode-toggle phrases handled first. They speak their own ack.
+            action = _handle_special_phrases(user_text)
+            if action == "deactivate":
+                return
+            if action == "activate":
+                # Promote session → persistent. State file already written.
+                if not persistent:
+                    log("Conversation mode: promoted to persistent")
+                persistent = True
+                continue
+
+            respond(user_text)
+            # Loop back to idle wait. Timer resets per turn.
+    finally:
+        _set_convo_flag(False)
+
 
 # ─── Main loop ────────────────────────────────────────────────────────
 def main():
     log(f"JARVIS wake listener starting (assistant: {ASSISTANT_NAME})")
     log(
-        "Config: silence_gate=%.2fs ring_buffer=%s"
-        % (VOICE_SILENCE_S, RING_BUFFER_ENABLED)
+        "Config: silence_gate=%.2fs ring_buffer=%s convo_mode=%s convo_timeout=%.0fs"
+        % (VOICE_SILENCE_S, RING_BUFFER_ENABLED, CONVO_MODE_ENABLED, CONVO_TIMEOUT_S)
     )
 
     log("Loading wake word model...")
@@ -485,6 +851,11 @@ def main():
         get_silence_gate()
     except Exception as e:
         log(f"Startup calibration skipped: {e}")
+
+    # Honor a persistent convo-mode flag carried over from a prior run.
+    # Logged once at startup so the boot mode is visible.
+    if _is_persistent_convo_active():
+        log("Persistent convo flag set on startup")
 
     log("Listening for 'Hey Jarvis'...")
 
@@ -522,6 +893,26 @@ def main():
 
     while True:
         try:
+            # Persistent convo mode bypasses wake detection entirely.
+            # Re-check every iteration so a deactivation phrase or external
+            # write to the state file lands on the next loop turn.
+            if _is_persistent_convo_active():
+                # Drain any queued notifications before opening the convo
+                # stream — keeps timer alerts from getting stuck behind a
+                # session that never goes idle long enough to drain.
+                _drain_pending_notifications()
+                run_conversation_mode(persistent=True)
+                # When run_conversation_mode returns, deactivation has
+                # cleared the flag. Loop top re-checks and falls through
+                # to wake detection.
+                time.sleep(0.5)
+                continue
+
+            # Pending notifications are also delivered between wake cycles
+            # when no convo session is open and nothing's actively listening
+            # — the safest moment to bring up the speaker.
+            _drain_pending_notifications()
+
             with sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
@@ -534,7 +925,17 @@ def main():
                     sd.sleep(100)
             # Stream is now closed (context-manager exit). Safe to record.
             wake_event.clear()
-            on_wake_detected()
+            action = on_wake_detected()
+
+            # Decide whether to enter conversation mode after this turn:
+            #   action == "activate"   → user asked us to stay on; persistent
+            #   action == "deactivate" → user asked us to step back; wake-only
+            #   action is None         → normal turn; honor JARVIS_CONVO_MODE
+            if action == "activate":
+                run_conversation_mode(persistent=True)
+            elif action != "deactivate" and CONVO_MODE_ENABLED:
+                run_conversation_mode(persistent=False)
+
             # brief pause prevents immediate re-trigger from our own playback tail
             time.sleep(0.5)
         except KeyboardInterrupt:
