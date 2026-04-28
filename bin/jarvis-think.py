@@ -528,6 +528,9 @@ def _tool_set_reminder(args: dict, _mem: Memory) -> dict:
 # tool triggers the import; subsequent calls use the cached module.
 _email_mod = None
 _calendar_mod = None
+_orch_mod = None
+_briefing_mod = None
+_research_mod = None
 
 
 def _load_email_module():
@@ -563,6 +566,60 @@ def _load_calendar_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: calendar module load failed ({e})\n")
+        return None
+
+
+def _load_orchestrator_module():
+    global _orch_mod
+    if _orch_mod is not None:
+        return _orch_mod
+    src = BIN_DIR / "jarvis-orchestrate.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_orchestrate", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _orch_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: orchestrator module load failed ({e})\n")
+        return None
+
+
+def _load_briefing_module():
+    global _briefing_mod
+    if _briefing_mod is not None:
+        return _briefing_mod
+    src = BIN_DIR / "jarvis-briefing.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_briefing", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _briefing_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: briefing module load failed ({e})\n")
+        return None
+
+
+def _load_research_module():
+    global _research_mod
+    if _research_mod is not None:
+        return _research_mod
+    src = BIN_DIR / "jarvis-research.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_research", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _research_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: research module load failed ({e})\n")
         return None
 
 
@@ -673,6 +730,57 @@ def _tool_delete_event(args: dict, _mem: Memory) -> dict:
         event_id=event_id,
         confirm=bool(args.get("confirm")),
         calendar_id=args.get("calendar_id") or "primary",
+    )
+
+
+def _tool_execute_plan(args: dict, _mem: Memory) -> dict:
+    mod = _load_orchestrator_module()
+    if mod is None:
+        return {"error": "jarvis-orchestrate module not installed"}
+    goal = (args.get("goal") or "").strip()
+    if not goal:
+        return {"error": "goal is required"}
+    return mod.execute_plan(goal)
+
+
+def _tool_get_briefing(args: dict, _mem: Memory) -> dict:
+    mod = _load_briefing_module()
+    if mod is None:
+        return {"error": "jarvis-briefing module not installed"}
+    # Default behavior: return today's briefing if it exists; otherwise
+    # generate it on demand. This keeps "what's my day look like" snappy
+    # when the cron has already run, and still works on cold-start.
+    rec = mod.get_today()
+    if rec.get("error"):
+        rec = mod.generate_today(force=False)
+    if rec.get("error"):
+        return rec
+    if args.get("mark_delivered"):
+        try:
+            mod.mark_delivered()
+            rec["marked_delivered"] = True
+        except Exception as e:
+            rec["mark_delivered_error"] = str(e)
+    return rec
+
+
+def _tool_web_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_research_module()
+    if mod is None:
+        return {"error": "jarvis-research module not installed"}
+    return mod.web_search(
+        query=args.get("query") or "",
+        max_results=int(args.get("max_results") or 5),
+    )
+
+
+def _tool_research_topic(args: dict, _mem: Memory) -> dict:
+    mod = _load_research_module()
+    if mod is None:
+        return {"error": "jarvis-research module not installed"}
+    return mod.research_topic(
+        topic=args.get("topic") or "",
+        depth=args.get("depth") or "quick",
     )
 
 
@@ -1003,6 +1111,108 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "calendar_id": {"type": "string"},
                 },
                 "required": ["event_id"],
+            },
+        },
+    ),
+    "execute_plan": (
+        _tool_execute_plan,
+        {
+            "name": "execute_plan",
+            "description": (
+                "Decompose a high-level goal into a multi-step plan and execute it. "
+                "Use this for ambiguous or compound goals like 'prepare for my 2pm "
+                "meeting', 'close the deal with Corbin', or 'research that company "
+                "before my call' — anything where you'd otherwise need to chain "
+                "3+ tool calls together. Sonnet plans the dependency graph, the "
+                "orchestrator runs read-only tools (calendar, email, recall, "
+                "search_contacts, web_search, research_topic) in parallel where "
+                "possible, and returns a synthesized summary. The orchestrator "
+                "NEVER takes irreversible action — it only prepares context. For "
+                "simple factual asks ('what's the time', 'check my unread email'), "
+                "call the underlying tool directly instead."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "Watson's high-level goal in natural language.",
+                    },
+                },
+                "required": ["goal"],
+            },
+        },
+    ),
+    "get_briefing": (
+        _tool_get_briefing,
+        {
+            "name": "get_briefing",
+            "description": (
+                "Return today's morning briefing — calendar, important email, "
+                "pending notifications, recent memory, weather. The cron job "
+                "generates it before Watson wakes up; if it hasn't run yet, "
+                "this tool generates it on demand. Use when Watson asks 'what "
+                "does my day look like', 'brief me', 'what's on the docket', or "
+                "any greeting that warrants leading with the day's plan. Pass "
+                "mark_delivered=true after reading the briefing aloud so we "
+                "don't deliver it twice."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "mark_delivered": {
+                        "type": "boolean",
+                        "description": "Set true after speaking the briefing to record delivery.",
+                    },
+                },
+            },
+        },
+    ),
+    "web_search": (
+        _tool_web_search,
+        {
+            "name": "web_search",
+            "description": (
+                "Search the web for a single query and return a Haiku-summarized "
+                "answer with source links. Use for quick lookups that need fresh "
+                "information ('what's the weather in Austin', 'who won the game "
+                "last night', 'price of gold today'). For deeper multi-source "
+                "research, use research_topic instead."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query."},
+                    "max_results": {"type": "integer", "description": "1-10 (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+    ),
+    "research_topic": (
+        _tool_research_topic,
+        {
+            "name": "research_topic",
+            "description": (
+                "Multi-query deep research on a topic. Haiku expands the topic "
+                "into 3-5 sub-queries, fetches the top results from each, then "
+                "Sonnet synthesizes a structured findings block with citations. "
+                "Use when Watson asks to 'research that company', 'find me the "
+                "best X', or otherwise wants depth, not just one search hit. "
+                "depth='quick' is 3 sub-queries × 1 page each; 'thorough' is 5 × "
+                "2. Slower than web_search — only use when depth is warranted."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "The research topic."},
+                    "depth": {
+                        "type": "string",
+                        "enum": ["quick", "thorough"],
+                        "description": "quick (default) or thorough.",
+                    },
+                },
+                "required": ["topic"],
             },
         },
     ),
@@ -1337,6 +1547,19 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
                 blocks.append({"type": "text", "text": ev_hint})
         except Exception as e:
             sys.stderr.write(f"jarvis-think: evolve hint skipped ({e})\n")
+
+    # Orchestrator confidence — fires only when recent multi-step plan
+    # ok_rate has dipped below threshold over enough runs. Tells Claude
+    # to lean on direct atomic tools instead of execute_plan until things
+    # recover. Empty in the healthy case.
+    orch_mod = _load_orchestrator_module()
+    if orch_mod is not None:
+        try:
+            orch_hint = orch_mod.system_prompt_hint()
+            if orch_hint:
+                blocks.append({"type": "text", "text": orch_hint})
+        except Exception as e:
+            sys.stderr.write(f"jarvis-think: orchestrator hint skipped ({e})\n")
 
     if cacheable:
         blocks.append({

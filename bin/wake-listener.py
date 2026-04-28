@@ -766,9 +766,57 @@ def on_wake_detected() -> str | None:
     if action:
         return action
 
+    # Briefing delivery — on the first wake of the day, lead with the
+    # cached morning briefing if one is sitting unread. The model still
+    # gets to handle Watson's question; the briefing fires first as a
+    # proactive announcement. Failures are silent — never block a turn.
+    _maybe_deliver_briefing()
+
     # Process and respond
     respond(user_text)
     return None
+
+
+_briefing_mod = None
+
+
+def _load_briefing_module():
+    """Lazy import of jarvis-briefing.py — same pattern as the speculator
+    and voiceprint modules."""
+    global _briefing_mod
+    if _briefing_mod is not None:
+        return _briefing_mod
+    src = BIN_DIR / "jarvis-briefing.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_briefing", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _briefing_mod = mod
+        return mod
+    except Exception as e:
+        log(f"briefing module load failed: {e}")
+        return None
+
+
+def _maybe_deliver_briefing() -> None:
+    """If today's briefing is generated but not yet delivered, fire it now.
+    Synchronous — we want the briefing to land before the regular reply
+    so Watson hears the day's plan first. mark_delivered() happens inside
+    deliver_now() so we never repeat ourselves."""
+    if os.environ.get("JARVIS_BRIEFING", "1") != "1":
+        return
+    mod = _load_briefing_module()
+    if mod is None:
+        return
+    try:
+        if not mod.should_deliver():
+            return
+        log("Delivering pending morning briefing")
+        mod.deliver_now()
+    except Exception as e:
+        log(f"briefing delivery failed: {e}")
 
 # ─── Speculative generation (Innovation 1+3) ──────────────────────────
 # Lazy-loaded so non-Deepgram installs don't pay the import cost. The module

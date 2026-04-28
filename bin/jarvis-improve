@@ -77,16 +77,22 @@ case "$mode" in
         tail -30 "$LOG" 2>/dev/null || echo "(no log yet)"
         echo ""
         echo "=== module status ==="
-        for sys in feedback metacog autopsy patterns skills synthesize evolve; do
+        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator; do
             stamp=""
             case "$sys" in
-                feedback)   stamp=$(stat -f %Sm "$ASSISTANT_DIR/feedback/profile.json" 2>/dev/null || echo "(none)") ;;
-                metacog)    stamp=$(stat -f %Sm "$ASSISTANT_DIR/metacognition/accuracy.json" 2>/dev/null || echo "(none)") ;;
-                autopsy)    stamp=$(stat -f %Sm "$ASSISTANT_DIR/autopsies/fixes.json" 2>/dev/null || echo "(none)") ;;
-                patterns)   stamp=$(stat -f %Sm "$ASSISTANT_DIR/patterns/patterns.json" 2>/dev/null || echo "(none)") ;;
-                skills)     stamp="$(ls "$ASSISTANT_DIR/skills/"*.json 2>/dev/null | grep -v -E '(index|last_processed)' | wc -l | tr -d ' ') skill(s)" ;;
-                synthesize) stamp=$(stat -f %Sm "$ASSISTANT_DIR/synthesis/watson_profile.json" 2>/dev/null || echo "(none)") ;;
-                evolve)     stamp=$(test -f "$ASSISTANT_DIR/config/personality.draft.md" && echo "PENDING" || echo "(none)") ;;
+                feedback)     stamp=$(stat -f %Sm "$ASSISTANT_DIR/feedback/profile.json" 2>/dev/null || echo "(none)") ;;
+                metacog)      stamp=$(stat -f %Sm "$ASSISTANT_DIR/metacognition/accuracy.json" 2>/dev/null || echo "(none)") ;;
+                autopsy)      stamp=$(stat -f %Sm "$ASSISTANT_DIR/autopsies/fixes.json" 2>/dev/null || echo "(none)") ;;
+                patterns)     stamp=$(stat -f %Sm "$ASSISTANT_DIR/patterns/patterns.json" 2>/dev/null || echo "(none)") ;;
+                skills)       n=$(ls "$ASSISTANT_DIR/skills/"*.json 2>/dev/null | grep -v -E '(index|last_processed)' | wc -l | tr -d ' \n' || true)
+                              stamp="${n:-0} skill(s)" ;;
+                synthesize)   stamp=$(stat -f %Sm "$ASSISTANT_DIR/synthesis/watson_profile.json" 2>/dev/null || echo "(none)") ;;
+                evolve)       stamp=$(test -f "$ASSISTANT_DIR/config/personality.draft.md" && echo "PENDING" || echo "(none)") ;;
+                orchestrator) if [[ -f "$ASSISTANT_DIR/orchestrator/stats.json" ]]; then
+                                  stamp=$(python3 -c "import json,sys; d=json.load(open('$ASSISTANT_DIR/orchestrator/stats.json')); print(f\"runs={d.get('runs',0)} ok_rate={d.get('ok_rate',0):.0%} avg_tasks={d.get('avg_tasks',0)}\")" 2>/dev/null || echo "(unreadable)")
+                              else
+                                  stamp="(none)"
+                              fi ;;
             esac
             printf "  %-12s %s\n" "$sys" "$stamp"
         done
@@ -107,6 +113,13 @@ for label in feedback metacog autopsy patterns; do
 done
 skills_path=$(locate_script "jarvis-skills.py")
 [[ -n "$skills_path" ]] && run_step "skills" "$PYTHON" "$skills_path" learn
+
+# Orchestrator stats — recompute success rate over recent runs and
+# persist to ~/.jarvis/orchestrator/stats.json. jarvis-think reads this
+# via system_prompt_hint() to bias against execute_plan when ok_rate
+# dips below threshold. Pure file I/O, no API calls.
+orch_path=$(locate_script "jarvis-orchestrate.py")
+[[ -n "$orch_path" ]] && run_step "orchestrator" "$PYTHON" "$orch_path" --update
 
 # Tier 2: heavier tasks. Each script's should_run() decides whether to fire
 # (interval / session-count thresholds). --heavy bypasses with --force.
