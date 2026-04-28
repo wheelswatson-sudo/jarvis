@@ -645,6 +645,41 @@ def _load_telegram_module():
         return None
 
 
+def _load_contacts_module():
+    global _contacts_mod
+    if _contacts_mod is not None:
+        return _contacts_mod
+    src = BIN_DIR / "jarvis-contacts.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_contacts", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _contacts_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: contacts module load failed ({e})\n")
+        return None
+
+
+def _maybe_note_contact(channel: str, handle: str, summary: str = "") -> None:
+    """Best-effort: tap the contacts module to record one interaction.
+    Silent on every failure mode — we don't want a contacts hiccup to
+    surface as a tool error."""
+    if not handle:
+        return
+    if os.environ.get("JARVIS_CONTACTS_AUTONOTE", "1") != "1":
+        return
+    mod = _load_contacts_module()
+    if mod is None:
+        return
+    try:
+        mod.note_interaction(channel=channel, handle=handle, summary=summary)
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: note_interaction skipped ({e})\n")
+
+
 def _load_style_module():
     global _style_mod
     if _style_mod is not None:
@@ -716,13 +751,17 @@ def _tool_send_email(args: dict, _mem: Memory) -> dict:
     mod = _load_email_module()
     if mod is None:
         return {"error": "jarvis-email module not installed"}
-    return mod.send_email(
+    out = mod.send_email(
         draft_id=args.get("draft_id"),
         to=args.get("to"),
         subject=args.get("subject"),
         body=args.get("body"),
         confirm=bool(args.get("confirm")),
     )
+    if isinstance(out, dict) and out.get("sent") and args.get("to"):
+        _maybe_note_contact("email", args["to"],
+                            summary=(args.get("subject") or "")[:200])
+    return out
 
 
 def _tool_reply_email(args: dict, _mem: Memory) -> dict:
@@ -733,8 +772,12 @@ def _tool_reply_email(args: dict, _mem: Memory) -> dict:
     body = args.get("body")
     if not thread_id or not body:
         return {"error": "thread_id and body required"}
-    return mod.reply_email(thread_id=thread_id, body=body,
-                            confirm=bool(args.get("confirm")))
+    out = mod.reply_email(thread_id=thread_id, body=body,
+                          confirm=bool(args.get("confirm")))
+    # No `to` on a reply call — the recipient is on the thread headers.
+    # We rely on enrich_contact's email harvester to pick the exchange up
+    # next time, so don't try to reverse-lookup the address here.
+    return out
 
 
 def _tool_check_calendar(args: dict, _mem: Memory) -> dict:
@@ -883,6 +926,36 @@ def _tool_telegram_search(args: dict, _mem: Memory) -> dict:
         group_name=args.get("group_name"),
         hours=int(args.get("hours") or 48),
     )
+
+
+def _tool_lookup_contact(args: dict, _mem: Memory) -> dict:
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.lookup_contact(name)
+
+
+def _tool_relationship_brief(args: dict, _mem: Memory) -> dict:
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.relationship_brief(name)
+
+
+def _tool_enrich_contact(args: dict, _mem: Memory) -> dict:
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.enrich_contact(name, force=bool(args.get("force")))
 
 
 def _tool_style_apply(args: dict, _mem: Memory) -> dict:
@@ -1447,6 +1520,74 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    ),
+    "lookup_contact": (
+        _tool_lookup_contact,
+        {
+            "name": "lookup_contact",
+            "description": (
+                "Pull Watson's stored contact record for someone — name, "
+                "email, telegram handle, relationship label, last "
+                "interaction, communication preference, recent topics. "
+                "This is a richer lookup than `search_contacts` (which "
+                "hits Apple Contacts + Messages history): contacts are "
+                "Watson's curated relationship memory. Use when the "
+                "user names someone you'd want a profile on. Returns "
+                "{found: false} if no match — fall back to search_contacts."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "Name, email, or @telegram handle (fuzzy)."},
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "relationship_brief": (
+        _tool_relationship_brief,
+        {
+            "name": "relationship_brief",
+            "description": (
+                "Voice-ready summary of Watson's relationship with someone: "
+                "who they are in his life, last interaction, open threads, "
+                "talking points. Use when Watson asks 'prepare for my call "
+                "with X', 'what's going on with X', 'remind me about X', or "
+                "before drafting a message to someone. Auto-builds the "
+                "brief on first call (Haiku synthesis over email + "
+                "Telegram + memory) and caches it for ~7 days."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "enrich_contact": (
+        _tool_enrich_contact,
+        {
+            "name": "enrich_contact",
+            "description": (
+                "Force-rebuild a contact's stored profile from current "
+                "interaction history. Use only when Watson asks to "
+                "'refresh' or 'update' someone's record, or after a "
+                "major event with that person. Normal flow uses "
+                "relationship_brief, which auto-refreshes when stale."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "force": {"type": "boolean",
+                              "description": "Re-synthesize even if fresh."},
+                },
+                "required": ["name"],
             },
         },
     ),

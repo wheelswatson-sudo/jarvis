@@ -224,6 +224,38 @@ def _tool_search_contacts(args: dict) -> dict:
         return {"error": "could not parse jarvis-recall output"}
 
 
+def _contacts():
+    """Lazy-load jarvis-contacts.py, mirror of _research()."""
+    global _contacts_mod_cached  # type: ignore[name-defined]
+    try:
+        return _contacts_mod_cached  # type: ignore[name-defined]
+    except NameError:
+        pass
+    src = BIN_DIR / "jarvis-contacts.py"
+    if not src.exists():
+        _contacts_mod_cached = None  # type: ignore[name-defined]
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_contacts", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _contacts_mod_cached = mod  # type: ignore[name-defined]
+        return mod
+    except Exception:
+        _contacts_mod_cached = None  # type: ignore[name-defined]
+        return None
+
+
+def _tool_relationship_brief(args: dict) -> dict:
+    mod = _contacts()
+    if mod is None:
+        return {"error": "jarvis-contacts not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.relationship_brief(name)
+
+
 def _tool_web_search(args: dict) -> dict:
     mod = _research()
     if mod is None:
@@ -280,6 +312,7 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "check_email": _tool_check_email,
     "recall": _tool_recall,
     "search_contacts": _tool_search_contacts,
+    "relationship_brief": _tool_relationship_brief,
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
@@ -328,6 +361,7 @@ Tools available:
 - check_email(query?, max_results?) — Gmail search. Default "is:unread".
 - recall(query, limit?) — search Watson's memory store.
 - search_contacts(query) — look up a person (Apple Contacts + Messages).
+- relationship_brief(name) — Watson's curated relationship memory: brief, last interaction, talking points, open threads. Use when a meeting attendee is named — strictly better than search_contacts for prep.
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.
@@ -336,14 +370,14 @@ Examples:
 
 Goal: "prepare for my 2pm meeting"
 {
-  "rationale": "Pull meeting context, attendee history, and recent threads, then brief.",
+  "rationale": "Pull meeting context, attendee relationship brief, and recent threads, then synthesize.",
   "tasks": [
     {"id":"t1","tool":"check_calendar","args":{"date":"today","days":1},"depends_on":[]},
-    {"id":"t2","tool":"recall","args":{"query":"{{t1.events[0].summary}} attendees"},"depends_on":["t1"]},
+    {"id":"t2","tool":"relationship_brief","args":{"name":"{{t1.events[0].attendees[0]}}"},"depends_on":["t1"]},
     {"id":"t3","tool":"check_email","args":{"query":"newer_than:7d {{t1.events[0].summary}}","max_results":5},"depends_on":["t1"]},
     {"id":"t4","tool":"synthesize","args":{
-        "instruction":"Brief Watson on his next meeting. Lead with who is there, then last interactions, then open items, then 2-3 talking points.",
-        "inputs":{"meeting":"{{t1}}","memory":"{{t2}}","recent_email":"{{t3}}"}},
+        "instruction":"Brief Watson on his next meeting. Lead with who is there (use the relationship brief), then open threads with them, then 2-3 talking points.",
+        "inputs":{"meeting":"{{t1}}","attendee":"{{t2}}","recent_email":"{{t3}}"}},
       "depends_on":["t1","t2","t3"]}
   ]
 }
