@@ -513,6 +513,26 @@ def _system_health_section() -> str:
         return ""
 
 
+def _relationship_alerts_section() -> str:
+    """Pull the 'Relationship Alerts' markdown block from jarvis-network
+    when there are fading contacts, stale follow-ups, or pending intros.
+    Empty otherwise."""
+    if os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    src = BIN_DIR / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_network_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
 def _format_markdown(payload: dict, briefing_text: str) -> str:
     """The .md file is the canonical record. Header has metadata, body is
     the spoken text, footer has the structured payload for debugging."""
@@ -521,6 +541,9 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
         f"_Generated: {payload['generated_at']}_\n\n"
     )
     spoken = "## Spoken briefing\n\n" + briefing_text.strip() + "\n\n"
+    relationships = _relationship_alerts_section()
+    if relationships:
+        spoken += relationships + "\n"
     health = _system_health_section()
     if health:
         spoken += health + "\n"

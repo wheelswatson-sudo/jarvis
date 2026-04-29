@@ -277,6 +277,63 @@ def _tool_relationship_brief(args: dict) -> dict:
     return mod.relationship_brief(name)
 
 
+_network_mod_cached = None
+
+
+def _network():
+    global _network_mod_cached
+    if _network_mod_cached is not None:
+        return _network_mod_cached
+    src = BIN_DIR / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_network_orch", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _network_mod_cached = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-orchestrate: network module load failed ({e})\n")
+        return None
+
+
+def _tool_network_search(args: dict) -> dict:
+    mod = _network()
+    if mod is None:
+        return {"error": "jarvis-network not installed"}
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    filters = args.get("filters") or {}
+    if not isinstance(filters, dict):
+        filters = {}
+    return mod.network_search(query, filters=filters,
+                              limit=int(args.get("limit") or 8))
+
+
+def _tool_relationship_score(args: dict) -> dict:
+    mod = _network()
+    if mod is None:
+        return {"error": "jarvis-network not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.relationship_score(name)
+
+
+def _tool_network_suggest(args: dict) -> dict:
+    mod = _network()
+    if mod is None:
+        return {"error": "jarvis-network not installed"}
+    goal = (args.get("goal") or "").strip()
+    if not goal:
+        return {"error": "goal is required"}
+    return mod.network_suggest(goal)
+
+
 def _tool_web_search(args: dict) -> dict:
     mod = _research()
     if mod is None:
@@ -334,6 +391,9 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "recall": _tool_recall,
     "search_contacts": _tool_search_contacts,
     "relationship_brief": _tool_relationship_brief,
+    "network_search": _tool_network_search,
+    "relationship_score": _tool_relationship_score,
+    "network_suggest": _tool_network_suggest,
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
@@ -383,6 +443,9 @@ Tools available:
 - recall(query, limit?) — search Watson's memory store.
 - search_contacts(query) — look up a person (Apple Contacts + Messages).
 - relationship_brief(name) — Watson's curated relationship memory: brief, last interaction, talking points, open threads. Use when a meeting attendee is named — strictly better than search_contacts for prep.
+- network_search(query, filters?, limit?) — semantic search across Watson's network for skills / expertise / intro paths. Use when the goal needs "who do we know who can do X". Filters: {trust:[...], tag:[...], min_strength:0..1, recent_within_days:N}.
+- relationship_score(name) — deep per-relationship analysis: strength, trajectory, responsiveness, suggested next action with channel + timing. Use over relationship_brief when the goal is "what's the play with X" rather than "who is X".
+- network_suggest(goal) — Sonnet-backed planner for "who should I leverage to do X": picks primary + supporting contacts, suggests intro paths, sequences the approach. Heavier than network_search; use when the goal explicitly asks for a play.
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.
@@ -412,6 +475,32 @@ Goal: "research Acme Corp before my call"
     {"id":"t3","tool":"synthesize","args":{
         "instruction":"Brief Watson on Acme Corp before his call. Cover: what they do, recent news, who's relevant.",
         "inputs":{"web":"{{t1}}","memory":"{{t2}}"}},
+      "depends_on":["t1","t2"]}
+  ]
+}
+
+Goal: "close the Forge deal"
+{
+  "rationale": "Pull Watson's network plan for the deal, recent thread state, and synthesize.",
+  "tasks": [
+    {"id":"t1","tool":"network_suggest","args":{"goal":"close the Forge deal"},"depends_on":[]},
+    {"id":"t2","tool":"check_email","args":{"query":"Forge","max_results":5},"depends_on":[]},
+    {"id":"t3","tool":"synthesize","args":{
+        "instruction":"Roll the network plan and recent emails into a play: lead with primary contact + approach, then open threads, then sequence.",
+        "inputs":{"play":"{{t1}}","email":"{{t2}}"}},
+      "depends_on":["t1","t2"]}
+  ]
+}
+
+Goal: "I need a React engineer for the rewrite"
+{
+  "rationale": "Network search for matching skills, then suggest the approach.",
+  "tasks": [
+    {"id":"t1","tool":"network_search","args":{"query":"react frontend engineer","filters":{"min_strength":0.3}},"depends_on":[]},
+    {"id":"t2","tool":"network_suggest","args":{"goal":"hire a React engineer for the rewrite"},"depends_on":[]},
+    {"id":"t3","tool":"synthesize","args":{
+        "instruction":"Brief Watson on candidates and the play. Lead with the strongest contacts, then the suggested sequence.",
+        "inputs":{"candidates":"{{t1}}","plan":"{{t2}}"}},
       "depends_on":["t1","t2"]}
   ]
 }

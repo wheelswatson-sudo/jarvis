@@ -226,6 +226,55 @@ def _social_hint() -> str:
         return ""
 
 
+_NAME_TOKEN_RE = re.compile(r"\b([A-Z][a-zA-Z'\-]{1,})\b")
+
+
+def _detect_mentioned_names(text: str) -> list[str]:
+    """Pull capitalized name-like tokens out of one user turn. Heuristic —
+    looks at tokens that start uppercase and are at least 2 chars. Skips
+    common sentence starters by checking the lower-cased blocklist."""
+    if not text:
+        return []
+    blocked = {"sir", "i", "ok", "okay", "yes", "no", "the", "and", "but",
+               "monday", "tuesday", "wednesday", "thursday", "friday",
+               "saturday", "sunday", "january", "february", "march",
+               "april", "may", "june", "july", "august", "september",
+               "october", "november", "december", "jarvis"}
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in _NAME_TOKEN_RE.finditer(text):
+        tok = m.group(1)
+        norm = tok.lower()
+        if norm in blocked or norm in seen:
+            continue
+        seen.add(norm)
+        names.append(tok)
+        if len(names) >= 4:
+            break
+    return names
+
+
+def _network_hint(user_text: str | None = None) -> str:
+    """One-liner from jarvis-network. Lazy-loaded; pays nothing on installs
+    without the network module. Honors JARVIS_NETWORK gate."""
+    if os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_network_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        names = _detect_mentioned_names(user_text or "")
+        return mod.context_hint(mentioned_names=names or None) or ""
+    except Exception:
+        return ""
+
+
 def _capability_health_hint() -> str:
     """One-line hint when the reconciliation agent has flagged any capability.
     Reads ~/.jarvis/state/capability-reconciliation.json (written nightly by
@@ -270,8 +319,10 @@ def _briefing_hint() -> str:
 class ContextEngine:
     """Builds the predictive priming block for the system prompt."""
 
-    def __init__(self, now: datetime | None = None) -> None:
+    def __init__(self, now: datetime | None = None,
+                 user_text: str | None = None) -> None:
         self.now = now or datetime.now().astimezone()
+        self.user_text = user_text
 
     def predict(self) -> str:
         """Return a ## Current Context block. Empty string if disabled."""
@@ -325,6 +376,12 @@ class ContextEngine:
         cap_health = _capability_health_hint()
         if cap_health:
             lines.append(cap_health)
+
+        # Network hint — keys off names mentioned in the current user turn
+        # if available; falls back to surfacing a fading inner-circle alert.
+        network = _network_hint(self.user_text)
+        if network:
+            lines.append(network)
 
         body = "\n".join(lines).strip()
         if not body:

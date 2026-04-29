@@ -201,11 +201,47 @@ def _load_contacts():
         return None
 
 
+def _load_network():
+    """Lazy-load jarvis-network. Returns the module or None — caller treats
+    as a no-op when missing so an install without the network module still
+    routes notifications cleanly."""
+    src = _bin_dir() / "jarvis-network.py"
+    if not src.exists():
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_network_notif", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception as e:
+        _log(f"network module load failed: {e}")
+        return None
+
+
+def _trust_to_importance(trust: str) -> int | None:
+    """Map jarvis-network trust_level to a sender importance score.
+    Returns None when trust isn't a known label so the caller falls back
+    to the legacy relationship-string heuristic."""
+    return {
+        "inner_circle": 4,
+        "trusted":      3,
+        "professional": 2,
+        "acquaintance": 1,
+        "cold":         1,
+    }.get((trust or "").lower())
+
+
 def _sender_importance(sender: str | None, rules: dict) -> int:
     """Return a 0..4 importance score for the sender. Order:
     1. Explicit rule override (block=-99, low=0, high=4)
-    2. Contacts record relationship_label / sentiment / interaction_count
-    3. Default 1 (unknown)."""
+    2. Network trust_level (inner_circle=4 ... cold=1)
+    3. Contacts relationship_label / interaction_count fallback
+    4. Default 1 (unknown).
+
+    Adds a +2 bump when the sender is a fading inner_circle contact (per
+    the network alerts cache) so a "hey, where've you been" from a quiet
+    co-founder cuts through the queue threshold."""
     if not sender:
         return 0
     s_norm = (sender or "").strip().lower().lstrip("@")
@@ -228,18 +264,31 @@ def _sender_importance(sender: str | None, rules: dict) -> int:
     if not isinstance(res, dict) or not res.get("found"):
         return 1
     rec = res.get("contact") or {}
-    rel = (rec.get("relationship") or "").lower()
-    if any(tok in rel for tok in ("investor", "client", "founder peer",
-                                   "co-founder", "spouse", "partner")):
-        return 4
-    if any(tok in rel for tok in ("friend", "team", "advisor", "mentor")):
-        return 3
-    count = int(rec.get("interaction_count") or 0)
-    if count > 30:
-        return 3
-    if count > 5:
-        return 2
-    return 1
+
+    # Prefer the network's trust_level when present — it's a composite
+    # signal, more reliable than a single relationship label string.
+    base = _trust_to_importance(rec.get("trust_level"))
+    if base is None:
+        rel = (rec.get("relationship") or "").lower()
+        if any(tok in rel for tok in ("investor", "client", "founder peer",
+                                       "co-founder", "spouse", "partner")):
+            base = 4
+        elif any(tok in rel for tok in ("friend", "team", "advisor", "mentor")):
+            base = 3
+        else:
+            count = int(rec.get("interaction_count") or 0)
+            base = 3 if count > 30 else 2 if count > 5 else 1
+
+    # Fading inner-circle bump (only when feature is on).
+    net = _load_network()
+    if net is not None:
+        try:
+            bump = net.fading_inner_circle_priority_boost(sender)
+        except Exception:
+            bump = 0
+        if bump:
+            base = min(4, base + bump)
+    return base
 
 
 # ── Urgency keyword scan ────────────────────────────────────────────

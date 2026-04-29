@@ -162,6 +162,12 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "social_search": "social",
     "social_post": "social",
     "social_reply": "social",
+    "network_search": "network",
+    "network_map": "network",
+    "relationship_score": "network",
+    "network_suggest": "network",
+    "enrich_network": "network",
+    "network_alerts": "network",
     "web_search": "research",
     "research_topic": "research",
     "execute_plan": "orchestrator",
@@ -822,6 +828,29 @@ def _load_social_module():
         return None
 
 
+_network_mod = None
+
+
+def _load_network_module():
+    global _network_mod
+    if _network_mod is not None:
+        return _network_mod
+    src = BIN_DIR / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_network", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _network_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: network module load failed ({e})\n")
+        return None
+
+
 def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None]:
     """Run text through jarvis-style.apply_style if the module + profile
     are present. Returns (final_text, style_result) — style_result is None
@@ -1263,6 +1292,63 @@ def _tool_social_reply(args: dict, _mem: Memory) -> dict:
         message=message,
         confirm=bool(args.get("confirm")),
     )
+
+
+# ── Network intelligence handlers ──────────────────────────────────
+def _tool_network_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_network_module()
+    if mod is None:
+        return {"error": "jarvis-network module not installed"}
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    filters = args.get("filters") or {}
+    if not isinstance(filters, dict):
+        filters = {}
+    return mod.network_search(query, filters=filters,
+                              limit=int(args.get("limit") or 8))
+
+
+def _tool_network_map(args: dict, _mem: Memory) -> dict:
+    mod = _load_network_module()
+    if mod is None:
+        return {"error": "jarvis-network module not installed"}
+    focus = args.get("focus")
+    return mod.network_map(focus=focus or None)
+
+
+def _tool_relationship_score(args: dict, _mem: Memory) -> dict:
+    mod = _load_network_module()
+    if mod is None:
+        return {"error": "jarvis-network module not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.relationship_score(name)
+
+
+def _tool_network_suggest(args: dict, _mem: Memory) -> dict:
+    mod = _load_network_module()
+    if mod is None:
+        return {"error": "jarvis-network module not installed"}
+    goal = (args.get("goal") or "").strip()
+    if not goal:
+        return {"error": "goal is required"}
+    return mod.network_suggest(goal)
+
+
+def _tool_enrich_network(args: dict, _mem: Memory) -> dict:
+    mod = _load_network_module()
+    if mod is None:
+        return {"error": "jarvis-network module not installed"}
+    return mod.enrich_network(force=bool(args.get("force")))
+
+
+def _tool_network_alerts(_args: dict, _mem: Memory) -> dict:
+    mod = _load_network_module()
+    if mod is None:
+        return {"error": "jarvis-network module not installed"}
+    return mod.network_alerts()
 
 
 # Tool registry — name → (handler, schema)
@@ -2164,6 +2250,154 @@ TOOLS: dict[str, tuple[Any, dict]] = {
             },
         },
     ),
+    "network_search": (
+        _tool_network_search,
+        {
+            "name": "network_search",
+            "description": (
+                "Semantic search across Watson's professional network — "
+                "skills, expertise areas, intro paths, tags, and brief text. "
+                "Use when Watson asks 'who do I know who can do X', 'find "
+                "me a React dev', 'who in my network knows about fintech'. "
+                "Filterable by trust level, tag, minimum relationship "
+                "strength, and recency."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Skill, expertise, topic, or tag to match against.",
+                    },
+                    "filters": {
+                        "type": "object",
+                        "description": "Optional filters: {trust: 'inner_circle' | "
+                                       "list, tag: 'austin' | list, min_strength: 0.5, "
+                                       "recent_within_days: 30}.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default 8).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    ),
+    "network_map": (
+        _tool_network_map,
+        {
+            "name": "network_map",
+            "description": (
+                "Overview of Watson's network. Without `focus`, returns "
+                "everyone bucketed by trust level (inner_circle / trusted / "
+                "professional / acquaintance / cold). With `focus` set to a "
+                "topic or skill, returns the relevant people plus their "
+                "connections (mutual contacts and intro paths). Use for "
+                "'show me my network', 'who's around the Forge tier work', "
+                "'who matters in fintech right now'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "focus": {
+                        "type": "string",
+                        "description": "Optional topic / skill / project to scope the map.",
+                    },
+                },
+            },
+        },
+    ),
+    "relationship_score": (
+        _tool_relationship_score,
+        {
+            "name": "relationship_score",
+            "description": (
+                "Deep analysis of a single relationship — pulls every "
+                "channel, computes strength (0-1), trust level, trajectory "
+                "(active / warm / cooling / dormant), responsiveness, and "
+                "suggests the next action with optimal channel and timing. "
+                "Use when Watson asks 'how am I doing with X', 'should I "
+                "reach out to Y', 'where do I stand with Z'. Heavier than "
+                "relationship_brief — use brief for context, score for "
+                "decision-making."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Contact name (fuzzy match).",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "network_suggest": (
+        _tool_network_suggest,
+        {
+            "name": "network_suggest",
+            "description": (
+                "Given a goal, suggest who in Watson's network to leverage "
+                "and the approach sequence. Sonnet-backed — picks the "
+                "right combination of primary contacts, supporting "
+                "contacts, and intro paths, then orders the steps. Use for "
+                "'close the Forge deal', 'who should I tap for the React "
+                "rewrite', 'help me get this hire across the line'. "
+                "Slower than network_search; reach for it when the question "
+                "is 'what's the play' rather than 'who knows X'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The goal Watson wants to advance.",
+                    },
+                },
+                "required": ["goal"],
+            },
+        },
+    ),
+    "enrich_network": (
+        _tool_enrich_network,
+        {
+            "name": "enrich_network",
+            "description": (
+                "Force-refresh Watson's network: recompute relationship "
+                "strength + trust levels for every contact, and call Haiku "
+                "to extract skills, expertise areas, and intro paths from "
+                "recent chat history. Normally runs weekly via the self-"
+                "improvement daemon — only invoke this on Watson's explicit "
+                "request ('refresh my network', 'rebuild contacts')."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Bypass freshness check, re-extract everything.",
+                    },
+                },
+            },
+        },
+    ),
+    "network_alerts": (
+        _tool_network_alerts,
+        {
+            "name": "network_alerts",
+            "description": (
+                "Proactive relationship signals — fading inner-circle / "
+                "trusted contacts, stale open follow-ups, and pending "
+                "intro opportunities. Use when Watson asks 'who am I "
+                "neglecting', 'anything I should reach out about', "
+                "'relationship status', or as part of a wrap-up. Cheap; "
+                "pulls from the cached alerts file."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
 }
 
 
@@ -2413,7 +2647,7 @@ def _build_system_blocks(data: dict, user_text: str) -> list[dict]:
     ctx_mod = _load_context_module()
     if ctx_mod is not None:
         try:
-            ctx_block = ctx_mod.ContextEngine().predict()
+            ctx_block = ctx_mod.ContextEngine(user_text=user_text).predict()
             if ctx_block:
                 blocks.append({"type": "text", "text": ctx_block})
         except Exception as e:

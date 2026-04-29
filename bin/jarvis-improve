@@ -77,7 +77,7 @@ case "$mode" in
         tail -30 "$LOG" 2>/dev/null || echo "(no log yet)"
         echo ""
         echo "=== module status ==="
-        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator style contacts reconcile; do
+        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator style contacts network reconcile; do
             stamp=""
             case "$sys" in
                 feedback)     stamp=$(stat -f %Sm "$ASSISTANT_DIR/feedback/profile.json" 2>/dev/null || echo "(none)") ;;
@@ -96,6 +96,11 @@ case "$mode" in
                               fi ;;
                 orchestrator) if [[ -f "$ASSISTANT_DIR/orchestrator/stats.json" ]]; then
                                   stamp=$(python3 -c "import json,sys; d=json.load(open('$ASSISTANT_DIR/orchestrator/stats.json')); print(f\"runs={d.get('runs',0)} ok_rate={d.get('ok_rate',0):.0%} avg_tasks={d.get('avg_tasks',0)}\")" 2>/dev/null || echo "(unreadable)")
+                              else
+                                  stamp="(none)"
+                              fi ;;
+                network)      if [[ -f "$ASSISTANT_DIR/state/network-alerts.json" ]]; then
+                                  stamp=$(python3 -c "import json; d=json.load(open('$ASSISTANT_DIR/state/network-alerts.json')); print(f\"alerts={len(d.get('alerts',[]))} fading={len(d.get('fading',[]))} follow_ups={len(d.get('follow_ups',[]))}\")" 2>/dev/null || echo "(unreadable)")
                               else
                                   stamp="(none)"
                               fi ;;
@@ -161,6 +166,14 @@ style_path=$(locate_script "jarvis-style.py")
 # contact list doesn't burn the rate limit on one self-improvement pass.
 contacts_path=$(locate_script "jarvis-contacts.py")
 [[ -n "$contacts_path" ]] && run_step "contacts" "$PYTHON" "$contacts_path"
+
+# Network intelligence — recompute relationship_strength + trust_level
+# for every contact, extract skills/expertise/intros via Haiku for any
+# stale records, then refresh ~/.jarvis/state/network-alerts.json. The
+# default cadence inside enrich_network is 7 days per contact and capped
+# at JARVIS_NETWORK_BATCH_CAP per run, so this no-ops most invocations.
+network_path=$(locate_script "jarvis-network.py")
+[[ -n "$network_path" ]] && run_step "network" "$PYTHON" "$network_path"
 
 # Tier 2: heavier tasks. Each script's should_run() decides whether to fire
 # (interval / session-count thresholds). --heavy bypasses with --force.
