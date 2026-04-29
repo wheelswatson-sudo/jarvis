@@ -133,6 +133,25 @@ def _load_primitive_module():
 _primitive_mod = _load_primitive_module()
 
 
+# ── demo-mode fixtures: optional, gated by JARVIS_DEMO=1 ──────────────
+def _load_demo_module():
+    src = LIB_DIR / "demo_data.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "demo_data.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("demo_data", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_demo_mod = _load_demo_module()
+
+
 # Bucketing for the outcome ledger. Tools without an entry get bucketed by
 # their tool name (so e.g. `recall` rolls up under `recall`); the six working
 # capabilities cluster their related tools so reconciliation health is reported
@@ -4790,15 +4809,31 @@ def _execute_one_tool(b: dict, mem) -> dict:
     name = b.get("name")
     args = b.get("input") or {}
     started = time.monotonic()
-    handler_pair = TOOLS.get(name)
-    if not handler_pair:
-        result = {"error": f"unknown tool: {name}"}
-    else:
-        handler, _schema = handler_pair
+
+    # Demo mode: short-circuit external-API tools through fixtures so the
+    # orchestrator + briefing demo without every key configured. Tools the
+    # demo table doesn't list (memory, clock, timers, shell, workflows,
+    # notifications) fall through to the real handler — they don't need
+    # external credentials.
+    demo_result = None
+    if _demo_mod is not None and _demo_mod.is_demo() and name:
         try:
-            result = handler(args, mem)
+            demo_result = _demo_mod.demo_dispatch(name, args)
         except Exception as e:
-            result = {"error": f"tool {name} failed: {e}"}
+            demo_result = {"error": f"demo dispatch failed for {name}: {e}", "demo": True}
+
+    if demo_result is not None:
+        result = demo_result
+    else:
+        handler_pair = TOOLS.get(name)
+        if not handler_pair:
+            result = {"error": f"unknown tool: {name}"}
+        else:
+            handler, _schema = handler_pair
+            try:
+                result = handler(args, mem)
+            except Exception as e:
+                result = {"error": f"tool {name} failed: {e}"}
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
     if _ledger_mod is not None:

@@ -80,6 +80,24 @@ def _load_ledger():
 _ledger_mod = _load_ledger()
 
 
+def _load_demo():
+    src = LIB_DIR / "demo_data.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "demo_data.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("demo_data", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_demo_mod = _load_demo()
+
+
 PLANNER_MODEL = os.environ.get("JARVIS_ORCH_PLANNER_MODEL", "claude-sonnet-4-6")
 SYNTH_MODEL = os.environ.get("JARVIS_ORCH_SYNTH_MODEL", "claude-sonnet-4-6")
 MAX_TASKS = int(os.environ.get("JARVIS_ORCH_MAX_TASKS", "8"))
@@ -818,8 +836,18 @@ def _run_one(task: dict, results: dict[str, Any]) -> tuple[str, dict, float]:
     tool = task["tool"]
     raw_args = task.get("args") or {}
     args = _substitute(raw_args, results)
-    handler = TOOLS.get(tool)
     start = time.monotonic()
+
+    # Demo mode short-circuit. `synthesize` is special — even in demo mode
+    # it runs the real Haiku call, because the whole point of the demo
+    # is showing the model rolling up the (mock) inputs into prose.
+    if (_demo_mod is not None and _demo_mod.is_demo() and tool != "synthesize"
+            and isinstance(args, dict)):
+        mock = _demo_mod.demo_dispatch(tool, args)
+        if mock is not None:
+            return tid, mock, time.monotonic() - start
+
+    handler = TOOLS.get(tool)
     if handler is None:
         return tid, {"error": f"unknown tool: {tool}"}, 0.0
     try:

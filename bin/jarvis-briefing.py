@@ -56,6 +56,32 @@ PER_MEETING_PREP = os.environ.get("JARVIS_BRIEFING_PER_MEETING_PREP", "0") == "1
 MAX_MEETING_PREPS = int(os.environ.get("JARVIS_BRIEFING_MAX_PREPS", "3"))
 
 
+# ── demo-mode fixtures (optional, gated by JARVIS_DEMO=1) ────────────
+LIB_DIR = ASSISTANT_DIR / "lib"
+
+
+def _load_demo():
+    src = LIB_DIR / "demo_data.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "demo_data.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("demo_data", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_demo_mod = _load_demo()
+
+
+def _is_demo() -> bool:
+    return _demo_mod is not None and _demo_mod.is_demo()
+
+
 # ── Sibling module loaders ──────────────────────────────────────────
 def _load_sibling(name: str):
     src = BIN_DIR / f"{name}.py"
@@ -166,6 +192,8 @@ def _anthropic_call(api_key: str, model: str, system: str,
 
 # ── Source pulls ────────────────────────────────────────────────────
 def _pull_calendar() -> dict:
+    if _is_demo():
+        return _demo_mod.mock_calendar()
     mod = _calendar()
     if mod is None:
         return {"error": "calendar unavailable"}
@@ -179,6 +207,11 @@ def _pull_email() -> dict:
     """Pull two batches: starred (anything Watson flagged for follow-up)
     and unread newer than 1d. Both capped tight — this is breakfast, not
     inbox triage."""
+    if _is_demo():
+        return {
+            "starred": _demo_mod.mock_email_inbox("is:starred newer_than:7d", 5),
+            "unread":  _demo_mod.mock_email_inbox("is:unread newer_than:1d", 8),
+        }
     mod = _email()
     if mod is None:
         return {"error": "email unavailable"}
@@ -195,6 +228,8 @@ def _pull_email() -> dict:
 
 
 def _pull_pending_notifications() -> list[dict]:
+    if _is_demo():
+        return _demo_mod.mock_pending_notifications()
     pending = ASSISTANT_DIR / "notifications" / "pending.json"
     if not pending.exists():
         return []
@@ -207,6 +242,8 @@ def _pull_pending_notifications() -> list[dict]:
 
 
 def _pull_memory_recent(limit: int = 5) -> list[dict]:
+    if _is_demo():
+        return _demo_mod.mock_memory_recent(limit)
     mod = _memory()
     if mod is None:
         return []
@@ -220,6 +257,8 @@ def _pull_memory_recent(limit: int = 5) -> list[dict]:
 def _pull_telegram(hours: int = 12) -> dict:
     """Pull the per-group digest. Only includes groups with activity in
     the window — empty groups are dropped before this returns."""
+    if _is_demo():
+        return _demo_mod.mock_telegram_digest(hours)
     mod = _telegram()
     if mod is None:
         return {"groups": []}
@@ -236,6 +275,8 @@ def _pull_telegram(hours: int = 12) -> dict:
 def _pull_social(hours: int = 12) -> dict:
     """Pull the per-platform social digest. Same soft-fail contract as
     telegram — breakfast does not block on social."""
+    if _is_demo():
+        return _demo_mod.mock_social_digest(hours)
     mod = _social()
     if mod is None:
         return {"platforms": []}
@@ -251,6 +292,8 @@ def _pull_social(hours: int = 12) -> dict:
 def _pull_stripe() -> dict:
     """Pull the Stripe revenue snapshot. Soft-fail — briefing must never
     block on a Stripe outage."""
+    if _is_demo():
+        return _demo_mod.mock_briefing_stripe()
     if os.environ.get("JARVIS_STRIPE", "1") == "0":
         return {}
     src = BIN_DIR / "jarvis-stripe.py"
@@ -273,6 +316,8 @@ def _pull_stripe() -> dict:
 def _pull_weather() -> dict:
     """Best-effort weather via wttr.in (no key needed). Skip if it 404s,
     rate-limits, or just takes too long — breakfast doesn't wait."""
+    if _is_demo():
+        return _demo_mod.mock_weather()
     if os.environ.get("JARVIS_BRIEFING_WEATHER", "1") != "1":
         return {}
     location = os.environ.get("JARVIS_WEATHER_LOCATION", "")  # blank = autodetect
@@ -539,6 +584,8 @@ def _system_health_section() -> str:
     """Pull the 'System Health' markdown section from jarvis-reconcile when
     any capability has been flagged. Empty when everything is healthy so
     the briefing stays clean on quiet days."""
+    if _is_demo():
+        return ""
     src = BIN_DIR / "jarvis-reconcile.py"
     if not src.exists():
         src = Path(__file__).parent / "jarvis-reconcile.py"
@@ -557,6 +604,8 @@ def _relationship_alerts_section() -> str:
     """Pull the 'Relationship Alerts' markdown block from jarvis-network
     when there are fading contacts, stale follow-ups, or pending intros.
     Empty otherwise."""
+    if _is_demo():
+        return ""
     if os.environ.get("JARVIS_NETWORK", "1") != "1":
         return ""
     src = BIN_DIR / "jarvis-network.py"
@@ -576,6 +625,8 @@ def _relationship_alerts_section() -> str:
 def _linkedin_changes_section() -> str:
     """Contact-tier LinkedIn changes from the last 24h. Empty when
     nothing landed so the briefing doesn't pad on quiet days."""
+    if _is_demo():
+        return ""
     src = BIN_DIR / "jarvis-linkedin.py"
     if not src.exists():
         src = Path(__file__).parent / "jarvis-linkedin.py"
@@ -611,6 +662,8 @@ def _workflows_section() -> str:
     """Pull the 'Scheduled Workflows' markdown block — what ran
     overnight, what's coming today, any failures. Empty when nothing
     relevant."""
+    if _is_demo():
+        return ""
     if os.environ.get("JARVIS_WORKFLOWS", "1") != "1":
         return ""
     src = BIN_DIR / "jarvis-workflows.py"
@@ -630,6 +683,16 @@ def _workflows_section() -> str:
 def _stripe_section() -> str:
     """Pull the 'Revenue' markdown block from jarvis-stripe. Empty when
     Stripe isn't configured or there's nothing material to surface."""
+    if _is_demo():
+        # Render a minimal markdown block from fixture data so the
+        # demo briefing has a Revenue section without hitting Stripe.
+        d = _demo_mod.mock_briefing_stripe()
+        return (
+            "## Revenue\n\n"
+            f"- MRR ${d['mrr_dollars']:,.0f} ({d['active_subscriptions']} active subs)\n"
+            f"- {d['new_subscribers_7d']} new subscribers this week\n"
+            f"- 30d trend: {'↑' if d['revenue_trend_pct'] >= 0 else '↓'}{abs(d['revenue_trend_pct'])}%\n"
+        )
     if os.environ.get("JARVIS_STRIPE", "1") == "0":
         return ""
     src = BIN_DIR / "jarvis-stripe.py"
@@ -649,6 +712,18 @@ def _stripe_section() -> str:
 def _commitments_section() -> str:
     """Pull the 'Commitments' markdown block — overdue, due today, due
     this week. Empty when nothing pressing."""
+    if _is_demo():
+        rep = _demo_mod.mock_commitment_report()
+        lines = ["## Commitments\n"]
+        if rep.get("due_today"):
+            lines.append("**Due today:**")
+            for c in rep["due_today"]:
+                lines.append(f"- {c['summary']}")
+        if rep.get("due_this_week"):
+            lines.append("\n**Due this week:**")
+            for c in rep["due_this_week"]:
+                lines.append(f"- {c['summary']}")
+        return "\n".join(lines) + "\n"
     if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
         return ""
     src = BIN_DIR / "jarvis-commitments.py"
@@ -669,6 +744,20 @@ def _commitments_section() -> str:
 def _imessages_section() -> str:
     """Pull the 'iMessages' subsection — unread inbound from contacts.
     Empty when nothing is sitting unread."""
+    if _is_demo():
+        # Lightweight demo block — the iMessage DB read is gated off so we
+        # don't leak Watson's real unread thread into a prospect-facing demo.
+        rec = _demo_mod.mock_imessage_check({})
+        by_handle = rec.get("by_handle") or {}
+        if not by_handle:
+            return ""
+        lines = ["## iMessages\n"]
+        for handle, msgs in list(by_handle.items())[:5]:
+            if not msgs:
+                continue
+            preview = (msgs[0].get("text") or "")[:120]
+            lines.append(f"- **{handle}** ({len(msgs)} unread): {preview}")
+        return "\n".join(lines) + "\n"
     if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
         return ""
     src = BIN_DIR / "jarvis-apple.py"
