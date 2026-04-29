@@ -389,6 +389,27 @@ def _capability_health_hint() -> str:
         return ""
 
 
+def _meeting_prep_hint() -> str:
+    """One-liner from jarvis-meeting-prep when a prep note is sitting in
+    Apple Notes for an event in the next 30 minutes. Empty most of the
+    time — only fires right before a prepped meeting."""
+    if os.environ.get("JARVIS_MEETING_PREP", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-meeting-prep.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-meeting-prep.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_meeting_prep_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.pending_prep_hint() or ""
+    except Exception:
+        return ""
+
+
 def _briefing_hint() -> str:
     """Pull the briefing-pending one-liner from jarvis-briefing if today's
     briefing is sitting unread. Lazy-loaded — same pattern as patterns.py."""
@@ -454,6 +475,12 @@ class ContextEngine:
         briefing = _briefing_hint()
         if briefing:
             lines.append(briefing)
+
+        # Meeting prep — points at a saved Apple Note when a prepped
+        # meeting is coming up within 30 minutes.
+        prep = _meeting_prep_hint()
+        if prep:
+            lines.append(prep)
 
         telegram = _telegram_hint()
         if telegram:

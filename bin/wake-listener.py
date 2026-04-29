@@ -784,6 +784,9 @@ _telegram_announced_ids: set = set()
 _notifications_mod = None
 _social_mod = None
 _social_thread = None
+
+_meeting_prep_mod = None
+_meeting_prep_thread = None
 _social_announced_ids: set = set()
 
 
@@ -870,6 +873,47 @@ def _load_social_module():
     except Exception as e:
         log(f"social module load failed: {e}")
         return None
+
+
+def _load_meeting_prep_module():
+    """Lazy import of jarvis-meeting-prep.py — same pattern as social/telegram."""
+    global _meeting_prep_mod
+    if _meeting_prep_mod is not None:
+        return _meeting_prep_mod
+    src = BIN_DIR / "jarvis-meeting-prep.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_meeting_prep", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _meeting_prep_mod = mod
+        return mod
+    except Exception as e:
+        log(f"meeting-prep module load failed: {e}")
+        return None
+
+
+def _start_meeting_prep_polling() -> None:
+    """Daemon thread that scans the calendar every few minutes for
+    upcoming meetings and prep them ~15 min before they start. Silent
+    no-op when the gate is off or the module is missing."""
+    global _meeting_prep_thread
+    if _meeting_prep_thread is not None and _meeting_prep_thread.is_alive():
+        return
+    if os.environ.get("JARVIS_MEETING_PREP", "1") != "1":
+        return
+    mod = _load_meeting_prep_module()
+    if mod is None:
+        return
+    try:
+        t = threading.Thread(target=mod.poll_loop,
+                             name="meeting-prep-poller", daemon=True)
+        t.start()
+        _meeting_prep_thread = t
+        log("Meeting-prep polling thread started")
+    except Exception as e:
+        log(f"meeting-prep thread spawn failed: {e}")
 
 
 def _start_social_polling() -> None:
@@ -1577,6 +1621,11 @@ def main():
     # Same for social — daemon thread, silent no-op when no platform
     # token is set and feeds.json is missing.
     _start_social_polling()
+
+    # Meeting prep — daemon thread that scans the calendar window every
+    # few minutes and preps upcoming meetings ~15 min before they start.
+    # Silent no-op when JARVIS_MEETING_PREP=0.
+    _start_meeting_prep_polling()
 
     # Pre-warm the response audio cache in the background. Common phrases
     # ("Got it.", "Good morning, sir.", etc.) get fetched from ElevenLabs

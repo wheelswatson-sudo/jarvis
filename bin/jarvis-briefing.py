@@ -352,14 +352,17 @@ def _build_synth_prompt(payload: dict) -> str:
     parts.append(f"WEEKDAY: {payload['weekday']}")
     cal = payload.get("calendar") or {}
     events = cal.get("events") or []
+    prep_status = _meeting_prep_status_map()
     if events:
         evs = []
         for e in events[:8]:
             attendees = ", ".join(e.get("attendees") or [])
+            prep_tag = " [prepped]" if prep_status.get(e.get("id") or "") else ""
             evs.append(
                 f"- {e.get('start', '')} — {e.get('summary', '(untitled)')}"
                 + (f" [with {attendees}]" if attendees else "")
                 + (f" [{e.get('location')}]" if e.get("location") else "")
+                + prep_tag
             )
         parts.append("CALENDAR:\n" + "\n".join(evs))
     elif "error" in cal:
@@ -585,6 +588,23 @@ def _linkedin_changes_section() -> str:
         return mod.briefing_section(days=1) or ""
     except Exception:
         return ""
+
+
+def _meeting_prep_status_map() -> dict[str, str]:
+    """Return event_id → 'prepped' for events on the prepped state file.
+    Used in the synth prompt so the briefing announces which upcoming
+    meetings already have prep notes saved."""
+    if os.environ.get("JARVIS_MEETING_PREP", "1") != "1":
+        return {}
+    state_file = ASSISTANT_DIR / "state" / "meeting_prep.json"
+    if not state_file.exists():
+        return {}
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        prepped = data.get("prepped") or {}
+    except Exception:
+        return {}
+    return {k: "prepped" for k in prepped.keys()}
 
 
 def _stripe_section() -> str:

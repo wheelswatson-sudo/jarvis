@@ -197,6 +197,8 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "stripe_customer": "stripe",
     "stripe_revenue": "stripe",
     "stripe_alerts": "stripe",
+    "meeting_prep": "meeting_prep",
+    "meeting_prep_settings": "meeting_prep",
     "web_search": "research",
     "research_topic": "research",
     "execute_plan": "orchestrator",
@@ -907,6 +909,7 @@ _commitments_mod = None
 _trello_mod = None
 _apple_mod = None
 _stripe_mod = None
+_meeting_prep_mod = None
 
 
 def _load_commitments_module():
@@ -986,6 +989,26 @@ def _load_stripe_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: stripe module load failed ({e})\n")
+        return None
+
+
+def _load_meeting_prep_module():
+    global _meeting_prep_mod
+    if _meeting_prep_mod is not None:
+        return _meeting_prep_mod
+    src = BIN_DIR / "jarvis-meeting-prep.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-meeting-prep.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_meeting_prep", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _meeting_prep_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: meeting-prep module load failed ({e})\n")
         return None
 
 
@@ -1789,6 +1812,31 @@ def _tool_stripe_alerts(_args: dict, _mem: Memory) -> dict:
     if mod is None:
         return {"error": "jarvis-stripe module not installed"}
     return mod.stripe_alerts()
+
+
+# ── Meeting prep handlers ──────────────────────────────────────────
+def _tool_meeting_prep(args: dict, _mem: Memory) -> dict:
+    mod = _load_meeting_prep_module()
+    if mod is None:
+        return {"error": "jarvis-meeting-prep module not installed"}
+    target = args.get("event_id_or_time") or args.get("event_id") or args.get("when")
+    return mod.meeting_prep(target)
+
+
+def _tool_meeting_prep_settings(args: dict, _mem: Memory) -> dict:
+    mod = _load_meeting_prep_module()
+    if mod is None:
+        return {"error": "jarvis-meeting-prep module not installed"}
+    lt = args.get("lead_time_minutes")
+    if lt is not None:
+        try:
+            lt = int(lt)
+        except Exception:
+            return {"error": "lead_time_minutes must be an integer"}
+    auto = args.get("auto")
+    if auto is not None:
+        auto = bool(auto)
+    return mod.meeting_prep_settings(lead_time_minutes=lt, auto=auto)
 
 
 # Tool registry — name → (handler, schema)
@@ -3421,6 +3469,48 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                 "or as part of a wrap-up scan."
             ),
             "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "meeting_prep": (
+        _tool_meeting_prep,
+        {
+            "name": "meeting_prep",
+            "description": (
+                "Manually prep a meeting. Pulls attendees, relationship "
+                "briefs, open commitments, recent emails/iMessages, "
+                "LinkedIn changes, and Stripe customer status; calls the "
+                "orchestrator to synthesize a voice-ready brief; saves "
+                "it to Apple Notes under the 'Jarvis/Meeting Prep' "
+                "folder. Use for 'prep me for the next meeting', 'prep "
+                "for my 2pm', or when the auto-poller hasn't fired yet. "
+                "With no event_id_or_time, preps the next upcoming "
+                "today; pass an event id for a specific event."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "event_id_or_time": {"type": "string"},
+                },
+            },
+        },
+    ),
+    "meeting_prep_settings": (
+        _tool_meeting_prep_settings,
+        {
+            "name": "meeting_prep_settings",
+            "description": (
+                "Read or update meeting-prep settings. Pass nothing to "
+                "see current state. lead_time_minutes controls how "
+                "early to fire (default 15). auto=false disables the "
+                "background poller without removing the module."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "lead_time_minutes": {"type": "integer"},
+                    "auto": {"type": "boolean"},
+                },
+            },
         },
     ),
 }
