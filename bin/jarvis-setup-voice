@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# JARVIS — First-time setup wizard
+set -euo pipefail
+
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+CONFIG_DIR="$ASSISTANT_DIR/config"
+ENV_FILE="$CONFIG_DIR/.env"
+SETTINGS_FILE="$CONFIG_DIR/settings.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+clear
+echo ""
+echo -e "${CYAN}"
+cat << 'BANNER'
+       ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
+       ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
+       ██║███████║██████╔╝██║   ██║██║███████╗
+  ██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
+  ╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
+   ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
+   Just A Rather Very Intelligent System
+BANNER
+echo -e "${NC}"
+echo -e "  ${BOLD}Setup Wizard${NC}"
+echo -e "  ─────────────────────────────────────────"
+echo ""
+
+# ─── Create directories ───────────────────────────────────────────────
+mkdir -p "$CONFIG_DIR" "$ASSISTANT_DIR/cache"
+
+# ─── ElevenLabs API Key ───────────────────────────────────────────────
+echo -e "${CYAN}Step 1/4:${NC} ElevenLabs API Key"
+echo -e "  Get yours at: ${BLUE}https://elevenlabs.io/app/settings/api-keys${NC}"
+echo ""
+
+if [[ -f "$ENV_FILE" ]] && grep -q "ELEVENLABS_API_KEY" "$ENV_FILE" 2>/dev/null; then
+    existing_key=$(grep "ELEVENLABS_API_KEY" "$ENV_FILE" | cut -d= -f2)
+    echo -e "  ${GREEN}Existing key found:${NC} ${existing_key:0:12}..."
+    echo -n "  Keep existing key? [Y/n]: "
+    read -r keep_key
+    if [[ "${keep_key,,}" == "n" ]]; then
+        echo -n "  Enter new API key: "
+        read -r api_key
+    else
+        api_key="$existing_key"
+    fi
+else
+    echo -n "  Enter your ElevenLabs API key: "
+    read -r api_key
+fi
+
+if [[ -z "$api_key" ]]; then
+    echo -e "${RED}  API key is required.${NC}"
+    exit 1
+fi
+
+# Validate key
+echo -n "  Validating key..."
+http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    "https://api.elevenlabs.io/v1/user" \
+    -H "xi-api-key: ${api_key}")
+
+if [[ "$http_code" == "200" ]]; then
+    echo -e " ${GREEN}Valid!${NC}"
+else
+    echo -e " ${RED}Invalid key (HTTP $http_code). Check your key and try again.${NC}"
+    exit 1
+fi
+
+# Save env
+cat > "$ENV_FILE" << EOF
+# JARVIS Voice Configuration
+ELEVENLABS_API_KEY=${api_key}
+EOF
+chmod 600 "$ENV_FILE"
+
+echo ""
+
+# ─── Voice Selection ──────────────────────────────────────────────────
+echo -e "${CYAN}Step 2/4:${NC} Choose Your Voice"
+echo ""
+
+# Fetch available voices
+voices_json=$(curl -s "https://api.elevenlabs.io/v1/voices" \
+    -H "xi-api-key: ${api_key}")
+
+# Show British/formal voices first (JARVIS-appropriate)
+echo -e "  ${BOLD}Recommended for JARVIS:${NC}"
+echo "$voices_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+idx = 1
+recommended = []
+others = []
+for v in data.get('voices', []):
+    labels = v.get('labels', {})
+    accent = labels.get('accent', '')
+    gender = labels.get('gender', '')
+    name = v['name'].split(' - ')[0] if ' - ' in v['name'] else v['name']
+    desc = v['name'].split(' - ')[1] if ' - ' in v['name'] else labels.get('descriptive', '')
+    entry = (v['voice_id'], name, gender, accent, desc)
+    if 'british' in accent.lower() and gender == 'male':
+        recommended.append(entry)
+    else:
+        others.append(entry)
+
+for vid, name, gender, accent, desc in recommended:
+    star = ' *' if 'George' in name else ''
+    print(f'    [{idx}] {name:<20} {accent:<12} {desc}{star}')
+    idx += 1
+print()
+print('  Other voices:')
+for vid, name, gender, accent, desc in others[:10]:
+    print(f'    [{idx}] {name:<20} {accent:<12} {desc}')
+    idx += 1
+
+# Output voice IDs for selection
+print('---VOICE_MAP---')
+all_voices = recommended + others[:10]
+for i, (vid, name, gender, accent, desc) in enumerate(all_voices, 1):
+    print(f'{i}:{vid}:{name}')
+"
+
+echo ""
+echo -e "  ${YELLOW}* Recommended${NC}"
+echo -n "  Select voice number [1]: "
+read -r voice_choice
+voice_choice="${voice_choice:-1}"
+
+# Extract voice ID from selection
+selected=$(echo "$voices_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+voices = []
+for v in data.get('voices', []):
+    labels = v.get('labels', {})
+    accent = labels.get('accent', '')
+    gender = labels.get('gender', '')
+    name = v['name'].split(' - ')[0] if ' - ' in v['name'] else v['name']
+    entry = (v['voice_id'], name)
+    if 'british' in accent.lower() and gender == 'male':
+        voices.insert(0, entry)  # prioritize
+    else:
+        voices.append(entry)
+
+# Deduplicate while preserving order
+seen = set()
+unique = []
+for vid, name in voices:
+    if vid not in seen:
+        seen.add(vid)
+        unique.append((vid, name))
+
+idx = int('${voice_choice}') - 1
+if 0 <= idx < len(unique):
+    print(f'{unique[idx][0]}|{unique[idx][1]}')
+else:
+    print(f'{unique[0][0]}|{unique[0][1]}')
+")
+
+voice_id=$(echo "$selected" | cut -d'|' -f1)
+voice_name=$(echo "$selected" | cut -d'|' -f2)
+echo -e "  ${GREEN}Selected: $voice_name${NC}"
+echo ""
+
+# ─── Personality Settings ─────────────────────────────────────────────
+echo -e "${CYAN}Step 3/4:${NC} Personality Calibration"
+echo ""
+echo "  Rate each trait from 0-100 (press Enter for defaults):"
+echo ""
+
+echo -n "  Humor     [75] (0=serious, 100=maximum wit):        "
+read -r humor
+humor="${humor:-75}"
+
+echo -n "  Formality [80] (0=casual, 100=full butler protocol): "
+read -r formality
+formality="${formality:-80}"
+
+echo -n "  Proactivity [70] (0=reactive, 100=fully anticipatory): "
+read -r proactivity
+proactivity="${proactivity:-70}"
+
+echo -n "  Honesty   [90] (0=diplomatic, 100=brutally honest): "
+read -r honesty
+honesty="${honesty:-90}"
+
+echo ""
+
+# ─── Save settings ────────────────────────────────────────────────────
+cat > "$SETTINGS_FILE" << EOF
+{
+    "voice_id": "${voice_id}",
+    "voice_name": "${voice_name}",
+    "model_id": "eleven_turbo_v2_5",
+    "stability": 0.5,
+    "similarity_boost": 0.85,
+    "style": 0.2,
+    "humor": ${humor},
+    "formality": ${formality},
+    "proactivity": ${proactivity},
+    "honesty": ${honesty}
+}
+EOF
+
+echo -e "${CYAN}Step 4/4:${NC} Testing Voice"
+echo ""
+
+# Source env and test (Keychain → .env)
+source "$ENV_FILE"
+[[ -x "$(dirname "$0")/jarvis-secrets" ]] && eval "$("$(dirname "$0")/jarvis-secrets" --export 2>/dev/null)"
+ASSISTANT_DIR="$ASSISTANT_DIR" "$(dirname "$0")/jarvis" --test
+
+echo ""
+echo -e "  ${GREEN}╔══════════════════════════════════════════════════╗${NC}"
+echo -e "  ${GREEN}║${NC}          ${BOLD}JARVIS is ready, sir.${NC}                   ${GREEN}║${NC}"
+echo -e "  ${GREEN}╚══════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "  Quick start:"
+echo -e "    ${CYAN}jarvis \"Hello sir\"${NC}            Speak text"
+echo -e "    ${CYAN}jarvis --settings${NC}              View settings"
+echo -e "    ${CYAN}jarvis --set humor 90${NC}          Adjust personality"
+echo -e "    ${CYAN}jarvis --test${NC}                  Test voice"
+echo ""
+echo -e "  Use with Claude Code:"
+echo -e "    Copy ${CYAN}~/.jarvis/config/personality.md${NC} as your CLAUDE.md"
+echo -e "    Then ask Claude to speak responses with: ${CYAN}jarvis \"text\"${NC}"
+echo ""

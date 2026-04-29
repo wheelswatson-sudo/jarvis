@@ -1,236 +1,622 @@
-#!/usr/bin/env bash
-# JARVIS — First-time setup wizard
-set -euo pipefail
+#!/usr/bin/env python3
+"""
+JARVIS — comprehensive setup validator.
 
-ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
-CONFIG_DIR="$ASSISTANT_DIR/config"
-ENV_FILE="$CONFIG_DIR/.env"
-SETTINGS_FILE="$CONFIG_DIR/settings.json"
+Walks every dependency, credential, and directory Jarvis touches; reports
+status as GREEN (ready) / YELLOW (works with reduced scope) / RED (will
+crash). Read-only by default; --init creates missing dirs and writes a
+stub `.env` so the user has somewhere to paste keys.
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+Usage:
+    bin/jarvis-setup --check        # validate, no writes
+    bin/jarvis-setup --init         # create dirs + stub .env, then validate
+    bin/jarvis-setup                # alias for --check
 
-clear
-echo ""
-echo -e "${CYAN}"
-cat << 'BANNER'
-       ██╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗
-       ██║██╔══██╗██╔══██╗██║   ██║██║██╔════╝
-       ██║███████║██████╔╝██║   ██║██║███████╗
-  ██   ██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║
-  ╚█████╔╝██║  ██║██║  ██║ ╚████╔╝ ██║███████║
-   ╚════╝ ╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝
-   Just A Rather Very Intelligent System
-BANNER
-echo -e "${NC}"
-echo -e "  ${BOLD}Setup Wizard${NC}"
-echo -e "  ─────────────────────────────────────────"
-echo ""
+The original interactive voice wizard moved to `bin/jarvis-setup-voice`
+and is still launched the same way (it does ElevenLabs + personality).
 
-# ─── Create directories ───────────────────────────────────────────────
-mkdir -p "$CONFIG_DIR" "$ASSISTANT_DIR/cache"
+Exit codes:
+    0   no RED checks (Jarvis can boot in some configuration)
+    1   one or more RED checks (Jarvis will crash on the affected path)
+"""
 
-# ─── ElevenLabs API Key ───────────────────────────────────────────────
-echo -e "${CYAN}Step 1/4:${NC} ElevenLabs API Key"
-echo -e "  Get yours at: ${BLUE}https://elevenlabs.io/app/settings/api-keys${NC}"
-echo ""
+from __future__ import annotations
 
-if [[ -f "$ENV_FILE" ]] && grep -q "ELEVENLABS_API_KEY" "$ENV_FILE" 2>/dev/null; then
-    existing_key=$(grep "ELEVENLABS_API_KEY" "$ENV_FILE" | cut -d= -f2)
-    echo -e "  ${GREEN}Existing key found:${NC} ${existing_key:0:12}..."
-    echo -n "  Keep existing key? [Y/n]: "
-    read -r keep_key
-    if [[ "${keep_key,,}" == "n" ]]; then
-        echo -n "  Enter new API key: "
-        read -r api_key
-    else
-        api_key="$existing_key"
-    fi
-else
-    echo -n "  Enter your ElevenLabs API key: "
-    read -r api_key
-fi
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
 
-if [[ -z "$api_key" ]]; then
-    echo -e "${RED}  API key is required.${NC}"
-    exit 1
-fi
+ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
+CONFIG_DIR = ASSISTANT_DIR / "config"
+ENV_FILE = CONFIG_DIR / ".env"
+CRED_DIR = ASSISTANT_DIR / "credentials"
+GOOGLE_TOKEN = CRED_DIR / "google.json"
+GOOGLE_OAUTH_CLIENT = CRED_DIR / "oauth_client.json"
 
-# Validate key
-echo -n "  Validating key..."
-http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-    "https://api.elevenlabs.io/v1/user" \
-    -H "xi-api-key: ${api_key}")
+# All dirs the various modules write to. Created by --init; checked by --check.
+REQUIRED_DIRS = [
+    ASSISTANT_DIR,
+    ASSISTANT_DIR / "bin",
+    ASSISTANT_DIR / "lib",
+    ASSISTANT_DIR / "cache",
+    ASSISTANT_DIR / "config",
+    ASSISTANT_DIR / "credentials",
+    ASSISTANT_DIR / "hooks",
+    ASSISTANT_DIR / "logs",
+    ASSISTANT_DIR / "memory",
+    ASSISTANT_DIR / "state",
+    ASSISTANT_DIR / "notifications",
+    ASSISTANT_DIR / "briefings",
+    ASSISTANT_DIR / "trello",
+    ASSISTANT_DIR / "linkedin",
+]
 
-if [[ "$http_code" == "200" ]]; then
-    echo -e " ${GREEN}Valid!${NC}"
-else
-    echo -e " ${RED}Invalid key (HTTP $http_code). Check your key and try again.${NC}"
-    exit 1
-fi
+# ── Colors / status ───────────────────────────────────────────────────
+NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+def _c(code: str, s: str) -> str:
+    return s if NO_COLOR else f"\033[{code}m{s}\033[0m"
+def green(s: str) -> str:  return _c("32", s)
+def red(s: str) -> str:    return _c("31", s)
+def yellow(s: str) -> str: return _c("33", s)
+def cyan(s: str) -> str:   return _c("36", s)
+def bold(s: str) -> str:   return _c("1",  s)
+def dim(s: str) -> str:    return _c("2",  s)
 
-# Save env
-cat > "$ENV_FILE" << EOF
-# JARVIS Voice Configuration
-ELEVENLABS_API_KEY=${api_key}
-EOF
-chmod 600 "$ENV_FILE"
+GREEN_DOT  = green("●")
+YELLOW_DOT = yellow("●")
+RED_DOT    = red("●")
 
-echo ""
+# ── Result accumulator ────────────────────────────────────────────────
+class Report:
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str, str, str]] = []  # (level, group, name, msg)
+        self.features: dict[str, bool] = {}              # feature → available
 
-# ─── Voice Selection ──────────────────────────────────────────────────
-echo -e "${CYAN}Step 2/4:${NC} Choose Your Voice"
-echo ""
+    def add(self, level: str, group: str, name: str, msg: str = "") -> None:
+        self.rows.append((level, group, name, msg))
 
-# Fetch available voices
-voices_json=$(curl -s "https://api.elevenlabs.io/v1/voices" \
-    -H "xi-api-key: ${api_key}")
+    def ok(self, group: str, name: str, msg: str = "") -> None:
+        self.add("ok", group, name, msg)
 
-# Show British/formal voices first (JARVIS-appropriate)
-echo -e "  ${BOLD}Recommended for JARVIS:${NC}"
-echo "$voices_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-idx = 1
-recommended = []
-others = []
-for v in data.get('voices', []):
-    labels = v.get('labels', {})
-    accent = labels.get('accent', '')
-    gender = labels.get('gender', '')
-    name = v['name'].split(' - ')[0] if ' - ' in v['name'] else v['name']
-    desc = v['name'].split(' - ')[1] if ' - ' in v['name'] else labels.get('descriptive', '')
-    entry = (v['voice_id'], name, gender, accent, desc)
-    if 'british' in accent.lower() and gender == 'male':
-        recommended.append(entry)
+    def warn(self, group: str, name: str, msg: str = "") -> None:
+        self.add("warn", group, name, msg)
+
+    def fail(self, group: str, name: str, msg: str = "") -> None:
+        self.add("fail", group, name, msg)
+
+    def has_red(self) -> bool:
+        return any(r[0] == "fail" for r in self.rows)
+
+
+# ── 1. Python + packages ──────────────────────────────────────────────
+def check_python(rep: Report) -> None:
+    v = sys.version_info
+    label = f"Python {v.major}.{v.minor}.{v.micro}"
+    if (v.major, v.minor) >= (3, 10):
+        rep.ok("Python", label)
     else:
-        others.append(entry)
+        rep.fail("Python", label, "need 3.10+")
 
-for vid, name, gender, accent, desc in recommended:
-    star = ' *' if 'George' in name else ''
-    print(f'    [{idx}] {name:<20} {accent:<12} {desc}{star}')
-    idx += 1
-print()
-print('  Other voices:')
-for vid, name, gender, accent, desc in others[:10]:
-    print(f'    [{idx}] {name:<20} {accent:<12} {desc}')
-    idx += 1
 
-# Output voice IDs for selection
-print('---VOICE_MAP---')
-all_voices = recommended + others[:10]
-for i, (vid, name, gender, accent, desc) in enumerate(all_voices, 1):
-    print(f'{i}:{vid}:{name}')
-"
+REQUIRED_PACKAGES = [
+    # name, import_name, what-it's-for
+    ("google-api-python-client", "googleapiclient", "Gmail + Calendar"),
+    ("google-auth-oauthlib", "google_auth_oauthlib", "Gmail + Calendar OAuth"),
+    ("google-auth-httplib2", "google_auth_httplib2", "Gmail + Calendar transport"),
+]
+OPTIONAL_PACKAGES = [
+    ("websockets", "websockets", "Deepgram streaming STT"),
+    ("pyaudio", "pyaudio", "microphone capture for voice loop"),
+    ("anthropic", "anthropic", "official SDK (Jarvis uses urllib by default)"),
+    ("mlx-lm", "mlx_lm", "local Apple Silicon model (optional)"),
+]
 
-echo ""
-echo -e "  ${YELLOW}* Recommended${NC}"
-echo -n "  Select voice number [1]: "
-read -r voice_choice
-voice_choice="${voice_choice:-1}"
+def check_packages(rep: Report) -> None:
+    import importlib.util
+    for pip_name, mod_name, purpose in REQUIRED_PACKAGES:
+        if importlib.util.find_spec(mod_name) is not None:
+            rep.ok("Packages", pip_name, purpose)
+        else:
+            rep.fail("Packages", pip_name, f"required for {purpose}; pip install {pip_name}")
+    for pip_name, mod_name, purpose in OPTIONAL_PACKAGES:
+        if importlib.util.find_spec(mod_name) is not None:
+            rep.ok("Packages", pip_name, f"optional — {purpose}")
+        else:
+            rep.warn("Packages", pip_name, f"optional — {purpose}; pip install {pip_name}")
 
-# Extract voice ID from selection
-selected=$(echo "$voices_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-voices = []
-for v in data.get('voices', []):
-    labels = v.get('labels', {})
-    accent = labels.get('accent', '')
-    gender = labels.get('gender', '')
-    name = v['name'].split(' - ')[0] if ' - ' in v['name'] else v['name']
-    entry = (v['voice_id'], name)
-    if 'british' in accent.lower() and gender == 'male':
-        voices.insert(0, entry)  # prioritize
+
+# ── 2. Credentials ────────────────────────────────────────────────────
+def _env(name: str) -> str:
+    return (os.environ.get(name) or "").strip()
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    """Best-effort parse of a KEY=VALUE .env file. Quotes stripped."""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            v = v.strip().strip('"').strip("'")
+            out[k.strip()] = v
+    except Exception:
+        pass
+    return out
+
+
+def _resolve_secret(name: str, env_overlay: dict[str, str]) -> str:
+    """Process env first, then ~/.jarvis/config/.env. Don't trigger Keychain
+    prompts during a setup check — that's intrusive and slow."""
+    val = _env(name)
+    if val:
+        return val
+    return (env_overlay.get(name) or "").strip()
+
+
+def check_anthropic(rep: Report, val: str) -> None:
+    if not val:
+        rep.fail("Credentials", "ANTHROPIC_API_KEY", "not set — required for every reasoning call")
+        rep.features["anthropic"] = False
+        return
+    # Live ping: smallest viable call. max_tokens has a per-model minimum
+    # (some models reject <8), so we ask for 8 to keep the validator
+    # robust across model upgrades.
+    payload = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "x-api-key": val,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            r.read(64)
+        rep.ok("Credentials", "ANTHROPIC_API_KEY", "live ping OK")
+        rep.features["anthropic"] = True
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if e.code == 401:
+            rep.fail("Credentials", "ANTHROPIC_API_KEY", "401 unauthorized — bad key")
+            rep.features["anthropic"] = False
+        elif e.code == 400 and "credit balance" in body.lower():
+            rep.fail("Credentials", "ANTHROPIC_API_KEY",
+                     "key is valid but account is out of credits — top up at console.anthropic.com")
+            rep.features["anthropic"] = False
+        elif e.code == 429:
+            rep.warn("Credentials", "ANTHROPIC_API_KEY", "rate-limited; key works")
+            rep.features["anthropic"] = True
+        else:
+            rep.warn("Credentials", "ANTHROPIC_API_KEY", f"HTTP {e.code} on ping (key may still work)")
+            rep.features["anthropic"] = True
+    except Exception as e:
+        rep.warn("Credentials", "ANTHROPIC_API_KEY", f"network error on ping ({e}); key format ok")
+        rep.features["anthropic"] = True  # assume usable; network may be flaky
+
+
+def check_deepgram(rep: Report, val: str) -> None:
+    if not val:
+        rep.warn("Credentials", "DEEPGRAM_API_KEY", "not set — voice STT (jarvis-listen) disabled")
+        rep.features["voice_stt"] = False
+        return
+    # Deepgram keys are 40 hex chars. Format-only check; live call would
+    # require a websocket handshake which is slow and noisy.
+    if len(val) >= 32 and all(c in "0123456789abcdefABCDEF" for c in val):
+        rep.ok("Credentials", "DEEPGRAM_API_KEY", "format ok")
     else:
-        voices.append(entry)
+        rep.warn("Credentials", "DEEPGRAM_API_KEY", "set, but format looks unusual")
+    rep.features["voice_stt"] = True
 
-# Deduplicate while preserving order
-seen = set()
-unique = []
-for vid, name in voices:
-    if vid not in seen:
-        seen.add(vid)
-        unique.append((vid, name))
 
-idx = int('${voice_choice}') - 1
-if 0 <= idx < len(unique):
-    print(f'{unique[idx][0]}|{unique[idx][1]}')
-else:
-    print(f'{unique[0][0]}|{unique[0][1]}')
-")
+def check_elevenlabs(rep: Report, val: str) -> None:
+    if not val:
+        rep.warn("Credentials", "ELEVENLABS_API_KEY", "not set — TTS (`jarvis \"...\"`) will fail")
+        rep.features["voice_tts"] = False
+        return
+    try:
+        req = urllib.request.Request(
+            "https://api.elevenlabs.io/v1/user",
+            headers={"xi-api-key": val},
+        )
+        with urllib.request.urlopen(req, timeout=6) as r:
+            r.read(64)
+        rep.ok("Credentials", "ELEVENLABS_API_KEY", "live ping OK")
+        rep.features["voice_tts"] = True
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            rep.fail("Credentials", "ELEVENLABS_API_KEY", "401 unauthorized — bad key")
+            rep.features["voice_tts"] = False
+        else:
+            rep.warn("Credentials", "ELEVENLABS_API_KEY", f"HTTP {e.code} (key may still work)")
+            rep.features["voice_tts"] = True
+    except Exception as e:
+        rep.warn("Credentials", "ELEVENLABS_API_KEY", f"network error on ping ({e})")
+        rep.features["voice_tts"] = True
 
-voice_id=$(echo "$selected" | cut -d'|' -f1)
-voice_name=$(echo "$selected" | cut -d'|' -f2)
-echo -e "  ${GREEN}Selected: $voice_name${NC}"
-echo ""
 
-# ─── Personality Settings ─────────────────────────────────────────────
-echo -e "${CYAN}Step 3/4:${NC} Personality Calibration"
-echo ""
-echo "  Rate each trait from 0-100 (press Enter for defaults):"
-echo ""
+def check_telegram(rep: Report, val: str) -> None:
+    if not val:
+        rep.warn("Credentials", "TELEGRAM_BOT_TOKEN", "not set — Telegram features off")
+        rep.features["telegram"] = False
+        return
+    try:
+        req = urllib.request.Request(f"https://api.telegram.org/bot{val}/getMe")
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        if data.get("ok"):
+            uname = (data.get("result") or {}).get("username") or "?"
+            rep.ok("Credentials", "TELEGRAM_BOT_TOKEN", f"bot @{uname}")
+            rep.features["telegram"] = True
+        else:
+            rep.fail("Credentials", "TELEGRAM_BOT_TOKEN", "getMe returned ok=false")
+            rep.features["telegram"] = False
+    except Exception as e:
+        rep.warn("Credentials", "TELEGRAM_BOT_TOKEN", f"getMe failed ({e})")
+        rep.features["telegram"] = False
 
-echo -n "  Humor     [75] (0=serious, 100=maximum wit):        "
-read -r humor
-humor="${humor:-75}"
 
-echo -n "  Formality [80] (0=casual, 100=full butler protocol): "
-read -r formality
-formality="${formality:-80}"
+def check_stripe(rep: Report, val: str) -> None:
+    if not val:
+        rep.warn("Credentials", "STRIPE_SECRET_KEY", "not set — revenue intelligence off")
+        rep.features["stripe"] = False
+        return
+    try:
+        req = urllib.request.Request(
+            "https://api.stripe.com/v1/balance",
+            headers={"Authorization": f"Bearer {val}"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            r.read(64)
+        mode = "live" if val.startswith("sk_live_") else ("test" if val.startswith("sk_test_") else "?")
+        rep.ok("Credentials", "STRIPE_SECRET_KEY", f"{mode}-mode key, /v1/balance OK")
+        rep.features["stripe"] = True
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            rep.fail("Credentials", "STRIPE_SECRET_KEY", "401 unauthorized — bad key")
+            rep.features["stripe"] = False
+        else:
+            rep.warn("Credentials", "STRIPE_SECRET_KEY", f"HTTP {e.code}")
+            rep.features["stripe"] = False
+    except Exception as e:
+        rep.warn("Credentials", "STRIPE_SECRET_KEY", f"network error ({e})")
+        rep.features["stripe"] = False
 
-echo -n "  Proactivity [70] (0=reactive, 100=fully anticipatory): "
-read -r proactivity
-proactivity="${proactivity:-70}"
 
-echo -n "  Honesty   [90] (0=diplomatic, 100=brutally honest): "
-read -r honesty
-honesty="${honesty:-90}"
+def check_trello(rep: Report, key: str, token: str) -> None:
+    if not (key and token):
+        rep.warn("Credentials", "TRELLO_API_KEY/TOKEN", "not set — Trello sync off")
+        rep.features["trello"] = False
+        return
+    try:
+        url = f"https://api.trello.com/1/members/me?key={key}&token={token}"
+        with urllib.request.urlopen(url, timeout=6) as r:
+            data = json.loads(r.read())
+        rep.ok("Credentials", "TRELLO_API_KEY/TOKEN", f"member @{data.get('username', '?')}")
+        rep.features["trello"] = True
+    except urllib.error.HTTPError as e:
+        rep.warn("Credentials", "TRELLO_API_KEY/TOKEN", f"HTTP {e.code} on /members/me")
+        rep.features["trello"] = False
+    except Exception as e:
+        rep.warn("Credentials", "TRELLO_API_KEY/TOKEN", f"network error ({e})")
+        rep.features["trello"] = False
 
-echo ""
 
-# ─── Save settings ────────────────────────────────────────────────────
-cat > "$SETTINGS_FILE" << EOF
-{
-    "voice_id": "${voice_id}",
-    "voice_name": "${voice_name}",
-    "model_id": "eleven_turbo_v2_5",
-    "stability": 0.5,
-    "similarity_boost": 0.85,
-    "style": 0.2,
-    "humor": ${humor},
-    "formality": ${formality},
-    "proactivity": ${proactivity},
-    "honesty": ${honesty}
-}
-EOF
+def check_linkedin(rep: Report, val: str) -> None:
+    if not val:
+        rep.warn("Credentials", "LINKEDIN_COOKIE", "not set — LinkedIn enrichment off")
+        rep.features["linkedin"] = False
+        return
+    rep.ok("Credentials", "LINKEDIN_COOKIE", f"set ({len(val)} chars; can't validate without burning a request)")
+    rep.features["linkedin"] = True
 
-echo -e "${CYAN}Step 4/4:${NC} Testing Voice"
-echo ""
 
-# Source env and test (Keychain → .env)
-source "$ENV_FILE"
-[[ -x "$(dirname "$0")/jarvis-secrets" ]] && eval "$("$(dirname "$0")/jarvis-secrets" --export 2>/dev/null)"
-ASSISTANT_DIR="$ASSISTANT_DIR" "$(dirname "$0")/jarvis" --test
+def check_set_only(rep: Report, name: str, feature: str, val: str, purpose: str) -> None:
+    if val:
+        rep.ok("Credentials", name, purpose)
+        rep.features[feature] = True
+    else:
+        rep.warn("Credentials", name, f"not set — {purpose} off")
+        rep.features[feature] = False
 
-echo ""
-echo -e "  ${GREEN}╔══════════════════════════════════════════════════╗${NC}"
-echo -e "  ${GREEN}║${NC}          ${BOLD}JARVIS is ready, sir.${NC}                   ${GREEN}║${NC}"
-echo -e "  ${GREEN}╚══════════════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "  Quick start:"
-echo -e "    ${CYAN}jarvis \"Hello sir\"${NC}            Speak text"
-echo -e "    ${CYAN}jarvis --settings${NC}              View settings"
-echo -e "    ${CYAN}jarvis --set humor 90${NC}          Adjust personality"
-echo -e "    ${CYAN}jarvis --test${NC}                  Test voice"
-echo ""
-echo -e "  Use with Claude Code:"
-echo -e "    Copy ${CYAN}~/.jarvis/config/personality.md${NC} as your CLAUDE.md"
-echo -e "    Then ask Claude to speak responses with: ${CYAN}jarvis \"text\"${NC}"
-echo ""
+
+def check_search(rep: Report, serp: str, brave: str) -> None:
+    if serp:
+        rep.ok("Credentials", "SERPAPI_KEY", "primary search backend")
+        rep.features["search"] = True
+    elif brave:
+        rep.ok("Credentials", "BRAVE_SEARCH_KEY", "search backend (Brave)")
+        rep.features["search"] = True
+    else:
+        rep.warn("Credentials", "SERPAPI_KEY/BRAVE_SEARCH_KEY", "neither set — research falls back to scraping (rate-limited)")
+        rep.features["search"] = False
+
+
+def check_google_oauth(rep: Report) -> None:
+    if not GOOGLE_OAUTH_CLIENT.exists():
+        rep.warn("Credentials", "Google OAuth client", f"{GOOGLE_OAUTH_CLIENT} missing — Gmail/Calendar disabled")
+        rep.features["gmail"] = False
+        rep.features["gcal"] = False
+        return
+    if not GOOGLE_TOKEN.exists():
+        rep.warn("Credentials", "Google token", f"{GOOGLE_TOKEN} missing — run `bin/jarvis-email --auth` to grant")
+        rep.features["gmail"] = False
+        rep.features["gcal"] = False
+        return
+    try:
+        data = json.loads(GOOGLE_TOKEN.read_text(encoding="utf-8"))
+        scopes = data.get("scopes") or []
+        has_gmail = any("gmail" in s for s in scopes)
+        has_cal = any("calendar" in s for s in scopes)
+        bits = []
+        if has_gmail: bits.append("gmail")
+        if has_cal:   bits.append("calendar")
+        rep.ok("Credentials", "Google token", f"scopes: {', '.join(bits) or 'none?'}")
+        rep.features["gmail"] = has_gmail
+        rep.features["gcal"] = has_cal
+    except Exception as e:
+        rep.warn("Credentials", "Google token", f"unreadable ({e})")
+        rep.features["gmail"] = False
+        rep.features["gcal"] = False
+
+
+def check_claude_cli_token(rep: Report, val: str) -> None:
+    if val:
+        rep.ok("Credentials", "CLAUDE_CODE_OAUTH_TOKEN", "cron jobs can use Claude CLI")
+        rep.features["cron_claude"] = True
+    else:
+        rep.warn("Credentials", "CLAUDE_CODE_OAUTH_TOKEN",
+                 "not set — overnight cron jobs (morning-digest, morning-show) will fail; run `claude setup-token`")
+        rep.features["cron_claude"] = False
+
+
+# ── 3. Directory layout ───────────────────────────────────────────────
+def check_dirs(rep: Report, init: bool) -> None:
+    for d in REQUIRED_DIRS:
+        if d.is_dir():
+            rep.ok("Directories", str(d).replace(str(Path.home()), "~"))
+        elif init:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                rep.ok("Directories", str(d).replace(str(Path.home()), "~"), "created")
+            except Exception as e:
+                rep.fail("Directories", str(d), f"could not create ({e})")
+        else:
+            rep.warn("Directories", str(d).replace(str(Path.home()), "~"), "missing — run --init")
+
+
+# ── 4. Hardware ───────────────────────────────────────────────────────
+def check_hardware(rep: Report) -> None:
+    sys_name = platform.system()
+    machine = platform.machine()
+    rep.ok("Hardware", "OS", f"{sys_name} {platform.release()} ({machine})")
+
+    apple_silicon = sys_name == "Darwin" and machine == "arm64"
+    if apple_silicon:
+        rep.ok("Hardware", "Apple Silicon", "detected — local mlx model viable")
+    else:
+        rep.warn("Hardware", "Apple Silicon", "not detected — local mlx model unavailable")
+
+    # RAM via sysctl on macOS, /proc/meminfo on Linux. Best-effort.
+    ram_gb: float | None = None
+    try:
+        if sys_name == "Darwin" and shutil.which("sysctl"):
+            out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                 capture_output=True, text=True, timeout=2)
+            ram_gb = int(out.stdout.strip()) / (1024 ** 3)
+        elif sys_name == "Linux" and Path("/proc/meminfo").exists():
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemTotal:"):
+                    ram_gb = int(line.split()[1]) / (1024 ** 2)
+                    break
+    except Exception:
+        ram_gb = None
+
+    if ram_gb is not None:
+        if ram_gb >= 16:
+            rep.ok("Hardware", "RAM", f"{ram_gb:.0f} GB")
+        else:
+            rep.warn("Hardware", "RAM", f"{ram_gb:.0f} GB — local model dicey under 16 GB")
+    else:
+        rep.warn("Hardware", "RAM", "could not detect")
+
+    # GPU info on Mac (best-effort, one-line summary).
+    if sys_name == "Darwin" and shutil.which("system_profiler"):
+        try:
+            out = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType"],
+                capture_output=True, text=True, timeout=4,
+            )
+            gpu_line = ""
+            for line in out.stdout.splitlines():
+                s = line.strip()
+                if s.startswith("Chipset Model:"):
+                    gpu_line = s.split(":", 1)[1].strip()
+                    break
+            if gpu_line:
+                rep.ok("Hardware", "GPU", gpu_line)
+        except Exception:
+            pass
+
+
+# ── 5. .env stub ──────────────────────────────────────────────────────
+ENV_STUB_TEMPLATE = """# JARVIS environment — paste keys here, file is sourced at process start.
+# Required:
+ANTHROPIC_API_KEY=
+# Voice (optional but core to the EA experience):
+ELEVENLABS_API_KEY=
+DEEPGRAM_API_KEY=
+# Cron / overnight jobs (run `claude setup-token` once, paste here):
+CLAUDE_CODE_OAUTH_TOKEN=
+# Optional integrations — leave blank to disable that surface:
+TELEGRAM_BOT_TOKEN=
+STRIPE_SECRET_KEY=
+TRELLO_API_KEY=
+TRELLO_TOKEN=
+LINKEDIN_COOKIE=
+TWITTER_BEARER_TOKEN=
+INSTAGRAM_ACCESS_TOKEN=
+# Research backend (one of):
+SERPAPI_KEY=
+BRAVE_SEARCH_KEY=
+"""
+
+
+def maybe_write_env_stub(rep: Report) -> None:
+    if ENV_FILE.exists():
+        rep.ok("Init", str(ENV_FILE).replace(str(Path.home()), "~"), "already present — left untouched")
+        return
+    try:
+        ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ENV_FILE.write_text(ENV_STUB_TEMPLATE, encoding="utf-8")
+        ENV_FILE.chmod(0o600)
+        rep.ok("Init", str(ENV_FILE).replace(str(Path.home()), "~"),
+               "stub written — paste your keys, then re-run --check")
+    except Exception as e:
+        rep.fail("Init", str(ENV_FILE), f"write failed ({e})")
+
+
+# ── 6. Feature summary ────────────────────────────────────────────────
+FEATURE_LABELS: list[tuple[str, str, list[str]]] = [
+    # (feature key in rep.features, display name, AND-of-required keys)
+    ("voice_loop",  "Voice loop (listen + speak)",        ["anthropic", "voice_stt", "voice_tts"]),
+    ("orchestrator","Orchestrator (multi-step planning)", ["anthropic"]),
+    ("briefing",    "Morning briefing",                   ["anthropic"]),
+    ("email",       "Email triage / draft / send",        ["anthropic", "gmail"]),
+    ("calendar",    "Calendar read / write",              ["anthropic", "gcal"]),
+    ("telegram",    "Telegram digest / send",             ["anthropic", "telegram"]),
+    ("stripe",      "Stripe revenue intelligence",        ["anthropic", "stripe"]),
+    ("trello",      "Trello sync",                        ["anthropic", "trello"]),
+    ("linkedin",    "LinkedIn enrichment",                ["anthropic", "linkedin"]),
+    ("twitter",     "Twitter monitoring",                 ["anthropic", "twitter"]),
+    ("instagram",   "Instagram monitoring",               ["anthropic", "instagram"]),
+    ("research",    "Web research / scout",               ["anthropic"]),  # search optional
+    ("cron_jobs",   "Overnight cron (morning-digest)",    ["anthropic", "cron_claude"]),
+]
+
+
+def render_features(rep: Report) -> None:
+    print()
+    print(bold("Feature availability:"))
+    for _key, label, deps in FEATURE_LABELS:
+        ok = all(rep.features.get(d, False) for d in deps)
+        if ok:
+            print(f"  {GREEN_DOT} {label}")
+        else:
+            missing = [d for d in deps if not rep.features.get(d, False)]
+            print(f"  {RED_DOT} {label}  {dim('— needs ' + ', '.join(missing))}")
+    # demo-mode hint — explicit because it's the May 1 escape hatch.
+    if rep.features.get("anthropic"):
+        print(f"  {cyan('★')} Demo mode (JARVIS_DEMO=1)  {dim('— mocks unconfigured APIs; needs only ANTHROPIC_API_KEY')}")
+
+
+# ── Render ────────────────────────────────────────────────────────────
+def render(rep: Report) -> None:
+    groups: dict[str, list[tuple[str, str, str]]] = {}
+    for level, group, name, msg in rep.rows:
+        groups.setdefault(group, []).append((level, name, msg))
+
+    print()
+    print(bold("JARVIS setup status"))
+    print(dim(f"  ASSISTANT_DIR={ASSISTANT_DIR}"))
+    print()
+
+    icon = {"ok": GREEN_DOT, "warn": YELLOW_DOT, "fail": RED_DOT}
+    for group in ["Python", "Packages", "Hardware", "Directories", "Credentials", "Init"]:
+        rows = groups.get(group)
+        if not rows:
+            continue
+        print(bold(group))
+        for level, name, msg in rows:
+            tail = f"  {dim(msg)}" if msg else ""
+            print(f"  {icon[level]} {name}{tail}")
+        print()
+
+
+# ── CLI ───────────────────────────────────────────────────────────────
+def run_checks(init: bool) -> int:
+    rep = Report()
+
+    if init:
+        check_dirs(rep, init=True)
+        maybe_write_env_stub(rep)
+
+    check_python(rep)
+    check_packages(rep)
+    check_hardware(rep)
+    if not init:
+        check_dirs(rep, init=False)
+
+    env_overlay = _load_env_file(ENV_FILE)
+    def get(name: str) -> str: return _resolve_secret(name, env_overlay)
+
+    check_anthropic(rep, get("ANTHROPIC_API_KEY"))
+    check_deepgram(rep, get("DEEPGRAM_API_KEY"))
+    check_elevenlabs(rep, get("ELEVENLABS_API_KEY"))
+    check_telegram(rep, get("TELEGRAM_BOT_TOKEN"))
+    check_stripe(rep, get("STRIPE_SECRET_KEY"))
+    check_trello(rep, get("TRELLO_API_KEY"), get("TRELLO_TOKEN"))
+    check_linkedin(rep, get("LINKEDIN_COOKIE"))
+    check_set_only(rep, "TWITTER_BEARER_TOKEN", "twitter",
+                   get("TWITTER_BEARER_TOKEN"), "Twitter monitoring")
+    check_set_only(rep, "INSTAGRAM_ACCESS_TOKEN", "instagram",
+                   get("INSTAGRAM_ACCESS_TOKEN"), "Instagram monitoring")
+    check_search(rep, get("SERPAPI_KEY"), get("BRAVE_SEARCH_KEY"))
+    check_google_oauth(rep)
+    check_claude_cli_token(rep, get("CLAUDE_CODE_OAUTH_TOKEN"))
+
+    # Voice loop is a derived feature (STT + TTS + Anthropic).
+    rep.features["voice_loop"] = (
+        rep.features.get("anthropic", False)
+        and rep.features.get("voice_stt", False)
+        and rep.features.get("voice_tts", False)
+    )
+
+    render(rep)
+    render_features(rep)
+
+    if rep.has_red():
+        print()
+        print(red("RED checks present — Jarvis will crash on the affected paths."))
+        print(dim("Fix the failing items above (or set JARVIS_DEMO=1 to mock them out)."))
+        return 1
+
+    if any(r[0] == "warn" for r in rep.rows):
+        print()
+        print(yellow("All required checks passed; some integrations are partial. Jarvis will boot."))
+    else:
+        print()
+        print(green("All systems nominal, sir."))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    init = "--init" in args
+    if "-h" in args or "--help" in args:
+        sys.stdout.write(__doc__ or "")
+        return 0
+    return run_checks(init=init)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
