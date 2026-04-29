@@ -109,7 +109,7 @@ def _anthropic_call(api_key: str, model: str, system: str,
                 time.sleep(1 + attempt * 1.5)
                 continue
             raise RuntimeError(f"API error {e.code}: {e}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             last_err = e
             if attempt < 2:
                 time.sleep(1 + attempt * 1.5)

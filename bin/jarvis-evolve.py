@@ -341,7 +341,7 @@ def run(force: bool = False) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             resp = json.loads(r.read())
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
         sys.stderr.write(f"jarvis-evolve: API error {e}\n")
         return None
 
