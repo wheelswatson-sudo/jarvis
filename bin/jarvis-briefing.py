@@ -607,6 +607,26 @@ def _meeting_prep_status_map() -> dict[str, str]:
     return {k: "prepped" for k in prepped.keys()}
 
 
+def _workflows_section() -> str:
+    """Pull the 'Scheduled Workflows' markdown block — what ran
+    overnight, what's coming today, any failures. Empty when nothing
+    relevant."""
+    if os.environ.get("JARVIS_WORKFLOWS", "1") != "1":
+        return ""
+    src = BIN_DIR / "jarvis-workflows.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-workflows.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_workflows_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
 def _stripe_section() -> str:
     """Pull the 'Revenue' markdown block from jarvis-stripe. Empty when
     Stripe isn't configured or there's nothing material to surface."""
@@ -677,6 +697,9 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
     revenue = _stripe_section()
     if revenue:
         spoken += revenue + "\n"
+    workflows = _workflows_section()
+    if workflows:
+        spoken += workflows + "\n"
     commitments = _commitments_section()
     if commitments:
         spoken += commitments + "\n"

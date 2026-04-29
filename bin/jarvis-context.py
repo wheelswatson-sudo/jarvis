@@ -389,6 +389,26 @@ def _capability_health_hint() -> str:
         return ""
 
 
+def _workflows_hint() -> str:
+    """One-liner from jarvis-workflows when a recurring workflow has
+    failed on its last run. Empty when everything is healthy."""
+    if os.environ.get("JARVIS_WORKFLOWS", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-workflows.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-workflows.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_workflows_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint() or ""
+    except Exception:
+        return ""
+
+
 def _meeting_prep_hint() -> str:
     """One-liner from jarvis-meeting-prep when a prep note is sitting in
     Apple Notes for an event in the next 30 minutes. Empty most of the
@@ -481,6 +501,13 @@ class ContextEngine:
         prep = _meeting_prep_hint()
         if prep:
             lines.append(prep)
+
+        # Workflow failures — surfaces when a scheduled workflow's
+        # last run failed so Jarvis leads with "X is broken" if Watson
+        # asks "anything wrong".
+        workflows = _workflows_hint()
+        if workflows:
+            lines.append(workflows)
 
         telegram = _telegram_hint()
         if telegram:

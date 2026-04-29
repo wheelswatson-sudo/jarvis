@@ -199,6 +199,11 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "stripe_alerts": "stripe",
     "meeting_prep": "meeting_prep",
     "meeting_prep_settings": "meeting_prep",
+    "create_workflow": "workflows",
+    "list_workflows": "workflows",
+    "run_workflow": "workflows",
+    "update_workflow": "workflows",
+    "delete_workflow": "workflows",
     "web_search": "research",
     "research_topic": "research",
     "execute_plan": "orchestrator",
@@ -910,6 +915,7 @@ _trello_mod = None
 _apple_mod = None
 _stripe_mod = None
 _meeting_prep_mod = None
+_workflows_mod = None
 
 
 def _load_commitments_module():
@@ -1009,6 +1015,26 @@ def _load_meeting_prep_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: meeting-prep module load failed ({e})\n")
+        return None
+
+
+def _load_workflows_module():
+    global _workflows_mod
+    if _workflows_mod is not None:
+        return _workflows_mod
+    src = BIN_DIR / "jarvis-workflows.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-workflows.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_workflows", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _workflows_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: workflows module load failed ({e})\n")
         return None
 
 
@@ -1837,6 +1863,74 @@ def _tool_meeting_prep_settings(args: dict, _mem: Memory) -> dict:
     if auto is not None:
         auto = bool(auto)
     return mod.meeting_prep_settings(lead_time_minutes=lt, auto=auto)
+
+
+# ── Workflow handlers ──────────────────────────────────────────────
+def _tool_create_workflow(args: dict, _mem: Memory) -> dict:
+    mod = _load_workflows_module()
+    if mod is None:
+        return {"error": "jarvis-workflows module not installed"}
+    name = (args.get("name") or "").strip()
+    goal = (args.get("goal") or "").strip()
+    schedule = (args.get("schedule") or "").strip()
+    if not name or not goal or not schedule:
+        return {"error": "name, goal, and schedule are required"}
+    notify = args.get("notify_on_complete")
+    if notify is None:
+        notify = args.get("notify", True)
+    return mod.create_workflow(name=name, goal=goal, schedule=schedule,
+                               notify_on_complete=bool(notify))
+
+
+def _tool_list_workflows(args: dict, _mem: Memory) -> dict:
+    mod = _load_workflows_module()
+    if mod is None:
+        return {"error": "jarvis-workflows module not installed"}
+    return mod.list_workflows(status=args.get("status"))
+
+
+def _tool_run_workflow(args: dict, _mem: Memory) -> dict:
+    mod = _load_workflows_module()
+    if mod is None:
+        return {"error": "jarvis-workflows module not installed"}
+    needle = (args.get("name_or_id") or args.get("name")
+              or args.get("id") or "").strip()
+    if not needle:
+        return {"error": "name_or_id is required"}
+    return mod.run_workflow(needle)
+
+
+def _tool_update_workflow(args: dict, _mem: Memory) -> dict:
+    mod = _load_workflows_module()
+    if mod is None:
+        return {"error": "jarvis-workflows module not installed"}
+    needle = (args.get("name_or_id") or args.get("name")
+              or args.get("id") or "").strip()
+    if not needle:
+        return {"error": "name_or_id is required"}
+    enabled = args.get("enabled")
+    if enabled is not None:
+        enabled = bool(enabled)
+    notify = args.get("notify_on_complete")
+    if notify is not None:
+        notify = bool(notify)
+    return mod.update_workflow(
+        needle, enabled=enabled,
+        schedule=args.get("schedule"),
+        goal=args.get("goal"),
+        notify_on_complete=notify,
+    )
+
+
+def _tool_delete_workflow(args: dict, _mem: Memory) -> dict:
+    mod = _load_workflows_module()
+    if mod is None:
+        return {"error": "jarvis-workflows module not installed"}
+    needle = (args.get("name_or_id") or args.get("name")
+              or args.get("id") or "").strip()
+    if not needle:
+        return {"error": "name_or_id is required"}
+    return mod.delete_workflow(needle, confirm=bool(args.get("confirm")))
 
 
 # Tool registry — name → (handler, schema)
@@ -3510,6 +3604,110 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "lead_time_minutes": {"type": "integer"},
                     "auto": {"type": "boolean"},
                 },
+            },
+        },
+    ),
+    "create_workflow": (
+        _tool_create_workflow,
+        {
+            "name": "create_workflow",
+            "description": (
+                "Create a recurring workflow. The goal is handed to the "
+                "orchestrator's execute_plan on every fire — same as a "
+                "voice command. schedule accepts a 5-field cron "
+                "expression OR natural language ('every Monday at 8am', "
+                "'daily at 6pm', 'first of each month'). Use when "
+                "Watson says 'every Monday do X', 'every morning Y', "
+                "'remind me to Z monthly'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "schedule": {"type": "string"},
+                    "notify_on_complete": {"type": "boolean"},
+                },
+                "required": ["name", "goal", "schedule"],
+            },
+        },
+    ),
+    "list_workflows": (
+        _tool_list_workflows,
+        {
+            "name": "list_workflows",
+            "description": (
+                "List Watson's recurring workflows. status filter ∈ "
+                "all|enabled|disabled|failed|succeeded. Use for 'what "
+                "automations do I have', 'what's running on a "
+                "schedule', 'any workflows failing'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                },
+            },
+        },
+    ),
+    "run_workflow": (
+        _tool_run_workflow,
+        {
+            "name": "run_workflow",
+            "description": (
+                "Manually fire a workflow now. Resolves by id, exact "
+                "name, or unique substring. Use for 'run my weekly "
+                "review', 'fire the metrics workflow'. Doesn't change "
+                "the cron cadence — the next scheduled run still fires."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string"},
+                },
+                "required": ["name_or_id"],
+            },
+        },
+    ),
+    "update_workflow": (
+        _tool_update_workflow,
+        {
+            "name": "update_workflow",
+            "description": (
+                "Modify a workflow. Use for 'pause the weekly review', "
+                "'change the schedule to Tuesday', 'tweak the goal'. "
+                "Pass only the fields that should change."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "schedule": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "notify_on_complete": {"type": "boolean"},
+                },
+                "required": ["name_or_id"],
+            },
+        },
+    ),
+    "delete_workflow": (
+        _tool_delete_workflow,
+        {
+            "name": "delete_workflow",
+            "description": (
+                "Remove a workflow. Two-stage: confirm=false returns "
+                "the would-delete record so Watson can confirm out "
+                "loud, confirm=true actually removes it. Same flow as "
+                "delete_event."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["name_or_id"],
             },
         },
     ),

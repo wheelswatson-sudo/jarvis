@@ -222,6 +222,13 @@ trello_path=$(locate_script "jarvis-trello.py")
 stripe_path=$(locate_script "jarvis-stripe.py")
 [[ -n "$stripe_path" ]] && run_step "stripe-alerts" "$PYTHON" "$stripe_path" alerts
 
+# Recurring workflows — fire any workflow whose next_run has passed.
+# Each workflow's goal is handed to the orchestrator's execute_plan;
+# results are recorded under ~/.jarvis/workflows/runs and notifications
+# fire when notify_on_complete is set. Cheap when nothing is due.
+workflows_path=$(locate_script "jarvis-workflows.py")
+[[ -n "$workflows_path" ]] && run_step "workflows" "$PYTHON" "$workflows_path" --tick
+
 # Reminders sync — push every open commitment that isn't already on
 # Apple Reminders to the 'Jarvis' list, so the iPhone fires a real
 # notification. Lightweight wrapper around apple_add_reminder. Skips on
