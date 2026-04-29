@@ -115,6 +115,24 @@ def _load_ledger_module():
 _ledger_mod = _load_ledger_module()
 
 
+def _load_primitive_module():
+    src = LIB_DIR / "primitive.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "primitive.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("primitive", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_primitive_mod = _load_primitive_module()
+
+
 # Bucketing for the outcome ledger. Tools without an entry get bucketed by
 # their tool name (so e.g. `recall` rolls up under `recall`); the six working
 # capabilities cluster their related tools so reconciliation health is reported
@@ -827,6 +845,10 @@ def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None
 
 
 def _tool_check_email(args: dict, _mem: Memory) -> dict:
+    """Email-triage migration proof — uses the primitive layer for outcome
+    tracking. The central _execute_one_tool wrap already emits to the ledger
+    on every call; this handler stays tiny because the primitive layer covers
+    the cross-capability concerns."""
     mod = _load_email_module()
     if mod is None:
         return {"error": "jarvis-email module not installed"}
@@ -837,6 +859,9 @@ def _tool_check_email(args: dict, _mem: Memory) -> dict:
 
 
 def _tool_draft_email(args: dict, _mem: Memory) -> dict:
+    """Pulls relevant context (memory + contacts + email history) via
+    primitive.retrieve() before drafting so Claude has the recipient's
+    history attached to the draft preview."""
     mod = _load_email_module()
     if mod is None:
         return {"error": "jarvis-email module not installed"}
@@ -850,10 +875,32 @@ def _tool_draft_email(args: dict, _mem: Memory) -> dict:
     )
     if isinstance(out, dict) and style_res and not style_res.get("passthrough"):
         out["style_applied"] = True
+
+    # Attach prior context for the recipient so the next round of Claude has
+    # what it needs to refine the draft. Best-effort — never blocks the draft.
+    if isinstance(out, dict) and not out.get("error") and _primitive_mod is not None:
+        recipient = args.get("to") or ""
+        subject = args.get("subject") or ""
+        query = " ".join(s for s in (recipient, subject) if s).strip()
+        if query:
+            try:
+                hits = _primitive_mod.retrieve(
+                    query, sources=["memory", "contacts", "email"], limit=3,
+                )
+                if hits:
+                    out["prior_context"] = [
+                        {"source": h["source"], "text": h["text"][:200]}
+                        for h in hits
+                    ]
+            except Exception:
+                pass
     return out
 
 
 def _tool_send_email(args: dict, _mem: Memory) -> dict:
+    """Records the send via primitive.remember() so the next 'who did I
+    email about X' query has a fast KV hit, and updates contact memory
+    via the existing channel."""
     mod = _load_email_module()
     if mod is None:
         return {"error": "jarvis-email module not installed"}
@@ -864,9 +911,26 @@ def _tool_send_email(args: dict, _mem: Memory) -> dict:
         body=args.get("body"),
         confirm=bool(args.get("confirm")),
     )
-    if isinstance(out, dict) and out.get("sent") and args.get("to"):
-        _maybe_note_contact("email", args["to"],
-                            summary=(args.get("subject") or "")[:200])
+    if isinstance(out, dict) and out.get("sent"):
+        recipient = args.get("to") or ""
+        if recipient:
+            _maybe_note_contact("email", recipient,
+                                summary=(args.get("subject") or "")[:200])
+        # Drop a primitive memory pointer so the next session can fast-path
+        # "what did I send to <recipient>" without re-querying Gmail.
+        if _primitive_mod is not None and recipient:
+            try:
+                _primitive_mod.remember(
+                    f"last_email_to:{recipient}",
+                    {
+                        "subject": args.get("subject") or "",
+                        "thread_id": out.get("thread_id"),
+                        "message_id": out.get("message_id"),
+                    },
+                    ttl_days=30,
+                )
+            except Exception:
+                pass
     return out
 
 

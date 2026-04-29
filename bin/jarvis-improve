@@ -127,6 +127,16 @@ skills_path=$(locate_script "jarvis-skills.py")
 orch_path=$(locate_script "jarvis-orchestrate.py")
 [[ -n "$orch_path" ]] && run_step "orchestrator" "$PYTHON" "$orch_path" --update
 
+# Primitive scheduler — fire any due schedules in
+# ~/.jarvis/state/schedules.json. Cheap (file scan) on every pass; heavy
+# only when something is actually due. Keeps schedule firing tied to the
+# self-improvement loop so we don't need a second daemon.
+PRIMITIVE_LIB=""
+for candidate in "$ASSISTANT_DIR/lib/primitive.py" "$SCRIPT_DIR/../lib/primitive.py"; do
+    [[ -f "$candidate" ]] && { PRIMITIVE_LIB="$candidate"; break; }
+done
+[[ -n "$PRIMITIVE_LIB" ]] && run_step "schedules" "$PYTHON" "$PRIMITIVE_LIB" run-due
+
 # Style profile refresh — internal pending_refresh() check skips when the
 # profile is fresh (default: every 6 days), so this no-ops most invocations.
 # When it does fire, it pulls recent sent email + Telegram and rebuilds the
