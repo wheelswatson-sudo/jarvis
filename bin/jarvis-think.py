@@ -152,6 +152,25 @@ def _load_demo_module():
 _demo_mod = _load_demo_module()
 
 
+# ── model router: lazy-loaded; absent file → API path is the only path. ──
+def _load_router_module():
+    src = LIB_DIR / "model_router.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "model_router.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("model_router", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_router_mod = _load_router_module()
+
+
 # Bucketing for the outcome ledger. Tools without an entry get bucketed by
 # their tool name (so e.g. `recall` rolls up under `recall`); the six working
 # capabilities cluster their related tools so reconciliation health is reported
@@ -237,6 +256,8 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "run_command": "shell",
     "get_time": "clock",
     "get_date": "clock",
+    "model_status": "model",
+    "model_stats": "model",
 }
 
 
@@ -1950,6 +1971,245 @@ def _tool_delete_workflow(args: dict, _mem: Memory) -> dict:
     if not needle:
         return {"error": "name_or_id is required"}
     return mod.delete_workflow(needle, confirm=bool(args.get("confirm")))
+
+
+# ── local-model status/stats handlers ─────────────────────────────────
+def _tool_model_status(_args: dict, _mem: Memory) -> dict:
+    """Probe the local inference server's /healthz and report whether
+    Tier 1 + Tier 2 are reachable. When the router lib is missing or
+    JARVIS_LOCAL_MODEL is off, return the configured-but-disabled state."""
+    if _router_mod is None:
+        return {"error": "model_router not installed",
+                "local_model_enabled": False}
+    enabled = os.environ.get("JARVIS_LOCAL_MODEL") == "1"
+    endpoint = _router_mod.local_endpoint()
+    health_url = endpoint.rsplit("/v1/", 1)[0].rstrip("/") + "/healthz"
+    try:
+        with urllib.request.urlopen(health_url, timeout=3) as r:
+            health = json.loads(r.read())
+    except Exception as e:
+        return {
+            "local_model_enabled": enabled,
+            "endpoint": endpoint,
+            "reachable": False,
+            "error": str(e),
+        }
+    return {
+        "local_model_enabled": enabled,
+        "endpoint": endpoint,
+        "reachable": True,
+        "health": health,
+    }
+
+
+def _tool_model_stats(args: dict, _mem: Memory) -> dict:
+    """Roll up routing decisions over the last `hours` (default 24).
+    Reads the outcome ledger via model_router.routing_stats()."""
+    if _router_mod is None:
+        return {"error": "model_router not installed"}
+    try:
+        hours = float(args.get("hours") or 24.0)
+    except (TypeError, ValueError):
+        hours = 24.0
+    try:
+        return _router_mod.routing_stats(hours=hours)
+    except Exception as e:
+        return {"error": f"routing_stats failed: {e}"}
+
+
+# ── OpenAI-format translators (for the local model path) ──────────────
+# The local serve.py speaks OpenAI Chat Completions; everything inside this
+# module speaks Anthropic. These two translators bridge the formats so the
+# user never sees the difference. Anthropic system blocks → OpenAI system
+# message. Anthropic tool_use/tool_result blocks → OpenAI tool_calls / tool
+# role messages. Tools array → function-spec array.
+def _to_openai_system(system_field) -> str:
+    if isinstance(system_field, str):
+        return system_field
+    if isinstance(system_field, list):
+        out: list[str] = []
+        for blk in system_field:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                out.append(blk.get("text") or "")
+        return "\n\n".join(s for s in out if s)
+    return ""
+
+
+def _to_openai_messages(messages: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+        if not isinstance(content, list):
+            out.append({"role": role, "content": ""})
+            continue
+        # block-list form: split into the matching OpenAI shape
+        if role == "user":
+            text_parts: list[str] = []
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                if blk.get("type") == "text":
+                    text_parts.append(blk.get("text") or "")
+                elif blk.get("type") == "tool_result":
+                    raw = blk.get("content")
+                    if isinstance(raw, list):
+                        # nested text blocks inside the tool_result
+                        raw = "".join(b.get("text", "") for b in raw
+                                      if isinstance(b, dict))
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": blk.get("tool_use_id") or "",
+                        "name": blk.get("name") or "tool",
+                        "content": raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False),
+                    })
+            if text_parts:
+                out.append({"role": "user", "content": "\n".join(text_parts)})
+        elif role == "assistant":
+            text_parts = []
+            tool_calls: list[dict] = []
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                if blk.get("type") == "text":
+                    text_parts.append(blk.get("text") or "")
+                elif blk.get("type") == "tool_use":
+                    tool_calls.append({
+                        "id": blk.get("id") or "",
+                        "type": "function",
+                        "function": {
+                            "name": blk.get("name") or "",
+                            "arguments": json.dumps(blk.get("input") or {}, ensure_ascii=False),
+                        },
+                    })
+            entry: dict = {"role": "assistant", "content": "\n".join(text_parts) or None}
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            out.append(entry)
+        else:
+            out.append({"role": role, "content": str(content)})
+    return out
+
+
+def _to_openai_tools(tools: list[dict]) -> list[dict]:
+    return [{
+        "type": "function",
+        "function": {
+            "name": s.get("name"),
+            "description": (s.get("description") or "").strip(),
+            "parameters": s.get("input_schema") or {"type": "object", "properties": {}},
+        },
+    } for s in (tools or [])]
+
+
+def _stream_local_model(model_id: str, system, messages: list[dict],
+                        tools: list[dict]):
+    """Buffered local-model call that yields the same event shape as
+    `_stream_anthropic`. Raises on any error so the caller can fall back
+    to the Anthropic path. We don't actually stream — we drain the local
+    response in one go and replay it as a single ('text_delta', ...) +
+    one ('block_stop', ...) per block + a terminal ('message_stop', ...)."""
+    if _router_mod is None:
+        raise RuntimeError("model_router not loaded")
+    Backend = _router_mod.ModelBackend
+    backend = _router_mod.route("complex_conversation", context=None)
+    if backend == Backend.API_FALLBACK:
+        raise RuntimeError("router selected API fallback")
+
+    served_model = _router_mod.model_name_for(backend)
+    endpoint = _router_mod.local_endpoint()
+
+    payload = {
+        "model": served_model,
+        "messages": [
+            {"role": "system", "content": _to_openai_system(system)},
+            *_to_openai_messages(messages),
+        ],
+        "tools": _to_openai_tools(tools),
+        "max_tokens": MAX_TOKENS,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"content-type": "application/json"},
+    )
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            resp = json.loads(r.read())
+    except Exception as e:
+        # Surface failure to the caller; record_decision logs the bounce.
+        try:
+            _router_mod.record_decision(
+                "complex_conversation", backend,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                accepted=False, extra={"error": str(e)[:200]},
+            )
+        except Exception:
+            pass
+        raise
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    choice = (resp.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    finish = choice.get("finish_reason") or "stop"
+    content = msg.get("content") or ""
+    tool_calls = msg.get("tool_calls") or []
+
+    blocks: list[dict] = []
+    if content:
+        text_block = {"type": "text", "text": content}
+        blocks.append(text_block)
+        yield ("text_delta", content)
+        yield ("block_stop", text_block)
+    for tc in tool_calls:
+        f = tc.get("function") or {}
+        try:
+            args = json.loads(f.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        block = {
+            "type": "tool_use",
+            "id": tc.get("id") or f"toolu_local_{int(time.time() * 1000)}",
+            "name": f.get("name") or "",
+            "input": args,
+        }
+        blocks.append(block)
+        yield ("block_stop", block)
+
+    stop_map = {"stop": "end_turn", "tool_calls": "tool_use",
+                "length": "max_tokens", "function_call": "tool_use"}
+    yield ("message_stop", {
+        "stop_reason": stop_map.get(finish, "end_turn"),
+        "blocks": blocks,
+        "usage": resp.get("usage") or {},
+    })
+
+    try:
+        _router_mod.record_decision(
+            "complex_conversation", backend,
+            latency_ms=elapsed_ms, accepted=True,
+            extra={"served_model": served_model,
+                   "tool_calls": len(tool_calls)},
+        )
+    except Exception:
+        pass
+
+
+def _try_local_buffered(system, messages: list[dict], tools: list[dict]):
+    """Return the full event list from the local model, or None on any
+    failure (so run_turn can fall through to the Anthropic path)."""
+    if os.environ.get("JARVIS_LOCAL_MODEL") != "1":
+        return None
+    try:
+        return list(_stream_local_model("local", system, messages, tools))
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: local model bounce → API ({e})\n")
+        return None
 
 
 # Tool registry — name → (handler, schema)
@@ -3730,6 +3990,40 @@ TOOLS: dict[str, tuple[Any, dict]] = {
             },
         },
     ),
+    "model_status": (
+        _tool_model_status,
+        {
+            "name": "model_status",
+            "description": (
+                "Probe the local Jarvis Core inference server. Returns "
+                "whether the local model is enabled (JARVIS_LOCAL_MODEL=1), "
+                "whether the /healthz endpoint is reachable, and which "
+                "Tier 1/Tier 2 models are loaded. Use when the user asks "
+                "if the local model is online or why a turn fell back to "
+                "the API."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "model_stats": (
+        _tool_model_stats,
+        {
+            "name": "model_stats",
+            "description": (
+                "Routing distribution + accuracy metrics for the local "
+                "model over the last `hours` (default 24). Reports counts "
+                "per backend (tier1_local / tier2_local / api_fallback), "
+                "escalation rate, and p95 latency by tier."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "number",
+                              "description": "Look-back window in hours (default 24)."}
+                },
+            },
+        },
+    ),
 }
 
 
@@ -4994,7 +5288,18 @@ def run_turn(user_text: str) -> str:
             stop_reason: str | None = None
             usage: dict = {}
             try:
-                for evt, payload in _stream_anthropic(api_key, model, system, convo, tool_schemas):
+                # JARVIS_LOCAL_MODEL=1 routes the inference call through the
+                # local model server first; on any error we fall through to
+                # the Anthropic path so a missing/unhealthy local model never
+                # breaks the foreground turn. Buffered (non-streaming) for
+                # the local path — TTS feeder still works on the single
+                # text_delta yield.
+                local_events = _try_local_buffered(system, convo, tool_schemas)
+                if local_events is not None:
+                    event_iter: Any = iter(local_events)
+                else:
+                    event_iter = _stream_anthropic(api_key, model, system, convo, tool_schemas)
+                for evt, payload in event_iter:
                     if evt == "text_delta":
                         round_text += payload
                         if feeder:
