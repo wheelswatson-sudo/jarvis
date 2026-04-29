@@ -1,0 +1,99 @@
+{
+  "_comment": "Default training config for Jarvis Core. Two tiers: a 3B extraction/routing model and a 14B synthesis model. Paths use ~ expansion at load time.",
+  "tiers": {
+    "tier1": {
+      "base_model": "Qwen/Qwen2.5-3B-Instruct",
+      "served_model_id": "qwen2.5-3b-jarvis",
+      "model_dir": "~/.jarvis/models/tier1",
+      "lora_dir": "~/.jarvis/models/tier1-lora",
+      "merged_dir": "~/.jarvis/models/tier1-merged",
+      "context_length": 4096,
+      "lora": {
+        "rank": 16,
+        "alpha": 32,
+        "dropout": 0.05,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+      },
+      "sft": {
+        "epochs": 3,
+        "batch_size": 4,
+        "grad_accum_steps": 4,
+        "learning_rate": 0.0002,
+        "warmup_steps": 50,
+        "max_seq_len": 2048,
+        "save_steps": 200,
+        "eval_steps": 200,
+        "logging_steps": 25,
+        "weight_decay": 0.01,
+        "lr_scheduler": "cosine"
+      }
+    },
+    "tier2": {
+      "base_model": "Qwen/Qwen2.5-14B-Instruct",
+      "served_model_id": "qwen2.5-14b-jarvis",
+      "model_dir": "~/.jarvis/models/tier2",
+      "lora_dir": "~/.jarvis/models/tier2-lora",
+      "merged_dir": "~/.jarvis/models/tier2-merged",
+      "context_length": 8192,
+      "lora": {
+        "rank": 16,
+        "alpha": 32,
+        "dropout": 0.05,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+      },
+      "sft": {
+        "epochs": 2,
+        "batch_size": 1,
+        "grad_accum_steps": 16,
+        "learning_rate": 0.0001,
+        "warmup_steps": 100,
+        "max_seq_len": 4096,
+        "save_steps": 200,
+        "eval_steps": 200,
+        "logging_steps": 25,
+        "weight_decay": 0.01,
+        "lr_scheduler": "cosine"
+      }
+    }
+  },
+  "dataset": {
+    "train_glob": "~/.jarvis/training/dataset-v*.jsonl",
+    "eval_glob": "~/.jarvis/training/eval-v*.jsonl",
+    "use_latest_only": true,
+    "min_examples": 500
+  },
+  "evaluation": {
+    "thresholds": {
+      "tool_selection_accuracy": 0.85,
+      "parameter_extraction_accuracy": 0.90,
+      "schema_validity_rate": 0.98,
+      "p95_latency_ms_tier1": 350,
+      "p95_latency_ms_tier2": 1200
+    },
+    "regression_tolerance": 0.02,
+    "eval_suite": "all"
+  },
+  "schedule": {
+    "retrain_cadence": "weekly",
+    "retrain_day": "sunday",
+    "retrain_hour_local": 3,
+    "auto_promote": false,
+    "auto_promote_thresholds": {
+      "tool_selection_accuracy_min": 0.88,
+      "regression_max": 0.01
+    }
+  },
+  "hardware": {
+    "prefer": "auto",
+    "apple_silicon_backend": "mlx",
+    "cuda_backend": "unsloth",
+    "fallback_backend": "transformers",
+    "load_in_4bit": true,
+    "qlora": true
+  },
+  "serving": {
+    "endpoint": "http://127.0.0.1:8741/v1/chat/completions",
+    "ollama_url": "http://127.0.0.1:11434",
+    "preferred_runtime": "ollama"
+  }
+}
