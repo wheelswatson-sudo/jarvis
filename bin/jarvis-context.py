@@ -226,6 +226,26 @@ def _social_hint() -> str:
         return ""
 
 
+def _capability_health_hint() -> str:
+    """One-line hint when the reconciliation agent has flagged any capability.
+    Reads ~/.jarvis/state/capability-reconciliation.json (written nightly by
+    bin/jarvis-reconcile.py). Empty when nothing is flagged so the cache
+    stays warm in the common case."""
+    src = ASSISTANT_DIR / "bin" / "jarvis-reconcile.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-reconcile.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_reconcile_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint() or ""
+    except Exception:
+        return ""
+
+
 def _briefing_hint() -> str:
     """Pull the briefing-pending one-liner from jarvis-briefing if today's
     briefing is sitting unread. Lazy-loaded — same pattern as patterns.py."""
@@ -301,6 +321,10 @@ class ContextEngine:
         notifications = _notifications_hint()
         if notifications:
             lines.append(notifications)
+
+        cap_health = _capability_health_hint()
+        if cap_health:
+            lines.append(cap_health)
 
         body = "\n".join(lines).strip()
         if not body:

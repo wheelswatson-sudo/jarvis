@@ -495,6 +495,24 @@ def _briefing_path(date: str | None = None) -> Path:
     return BRIEFINGS_DIR / f"{date or _today_str()}.md"
 
 
+def _system_health_section() -> str:
+    """Pull the 'System Health' markdown section from jarvis-reconcile when
+    any capability has been flagged. Empty when everything is healthy so
+    the briefing stays clean on quiet days."""
+    src = BIN_DIR / "jarvis-reconcile.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-reconcile.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_reconcile_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
 def _format_markdown(payload: dict, briefing_text: str) -> str:
     """The .md file is the canonical record. Header has metadata, body is
     the spoken text, footer has the structured payload for debugging."""
@@ -503,6 +521,9 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
         f"_Generated: {payload['generated_at']}_\n\n"
     )
     spoken = "## Spoken briefing\n\n" + briefing_text.strip() + "\n\n"
+    health = _system_health_section()
+    if health:
+        spoken += health + "\n"
     raw = (
         "## Source data\n\n"
         "```json\n"
