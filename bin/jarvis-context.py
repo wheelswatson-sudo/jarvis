@@ -275,6 +275,66 @@ def _network_hint(user_text: str | None = None) -> str:
         return ""
 
 
+def _commitments_hint(user_text: str | None = None) -> str:
+    """One-liner from jarvis-commitments — counts of overdue / due-
+    today / due-this-week. When the current turn mentions a contact,
+    also surface any open commitments touching them so Watson lands
+    with the right context already in the prompt."""
+    if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_commitments_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception:
+        return ""
+    try:
+        base = mod.context_hint() or ""
+    except Exception:
+        base = ""
+    extras: list[str] = []
+    for name in _detect_mentioned_names(user_text or "")[:2]:
+        try:
+            hint = mod.context_hint_for_contact(name)
+            if hint:
+                extras.append(hint)
+        except Exception:
+            continue
+    parts = [p for p in [base, *extras] if p]
+    return "\n".join(parts)
+
+
+def _imessage_hint() -> str:
+    """One-liner when there are unread iMessages in the last 6h. Cheap:
+    SQLite read against the local chat.db, no network."""
+    if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_apple_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        out = mod.imessage_check(hours=6, limit=10, unread_only=True)
+    except Exception:
+        return ""
+    msgs = (out or {}).get("messages") or []
+    if not msgs:
+        return ""
+    return (f"**iMessages:** {len(msgs)} unread in the last 6h. If Watson "
+            f"asks 'check messages' / 'any new texts', call imessage_check.")
+
+
 def _capability_health_hint() -> str:
     """One-line hint when the reconciliation agent has flagged any capability.
     Reads ~/.jarvis/state/capability-reconciliation.json (written nightly by
@@ -382,6 +442,14 @@ class ContextEngine:
         network = _network_hint(self.user_text)
         if network:
             lines.append(network)
+
+        commitments = _commitments_hint(self.user_text)
+        if commitments:
+            lines.append(commitments)
+
+        imessages = _imessage_hint()
+        if imessages:
+            lines.append(imessages)
 
         body = "\n".join(lines).strip()
         if not body:

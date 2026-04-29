@@ -342,6 +342,43 @@ def _topics_from_subjects(subjects: Iterable[str], cap: int = 8) -> list[str]:
     return out
 
 
+def _imessage_history_for(rec: dict, hours: float = 24 * 90,
+                          limit: int = 50) -> list[dict]:
+    """Pull recent iMessages with this contact via jarvis-apple. Best-
+    effort: returns [] if Full Disk Access isn't granted or jarvis-apple
+    isn't installed."""
+    candidates: list[str] = []
+    for k in ("phone", "phone_number", "imessage", "imessage_handle"):
+        v = (rec.get(k) or "").strip()
+        if v:
+            candidates.append(v)
+    em = (rec.get("email") or "").strip()
+    if em:
+        candidates.append(em)
+    if not candidates:
+        return []
+    src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        src = ASSISTANT_DIR / "bin" / "jarvis-apple.py"
+    if not src.exists():
+        return []
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_apple_net", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception:
+        return []
+    for handle in candidates:
+        try:
+            out = mod.imessage_check(contact=handle, hours=hours, limit=limit)
+        except Exception:
+            continue
+        if out and out.get("ok") and out.get("messages"):
+            return out["messages"]
+    return []
+
+
 def _rebuild_interaction_history(rec: dict, history: dict) -> None:
     """Update rec['interaction_history'] in place from the raw history dict
     (whatever shape jarvis-contacts returned). Sentiment is set to neutral
@@ -349,10 +386,12 @@ def _rebuild_interaction_history(rec: dict, history: dict) -> None:
     em = history.get("email") or []
     tg = history.get("telegram") or []
     so = history.get("social") or []
+    im = history.get("imessage") or _imessage_history_for(rec)
 
     em_chars = sum(len((e.get("snippet") or "")) for e in em)
     tg_chars = sum(len((t.get("text") or "")) for t in tg)
     so_chars = sum(len((s.get("text") or "")) for s in so)
+    im_chars = sum(len((m.get("text") or "")) for m in im)
 
     rec.setdefault("interaction_history", {})
     rec["interaction_history"]["email"] = {
@@ -372,6 +411,12 @@ def _rebuild_interaction_history(rec: dict, history: dict) -> None:
         "topics": [],
         "sentiment": (rec.get("interaction_history") or {}).get("social", {}).get("sentiment") or "neutral",
         "avg_chars": int(so_chars / len(so)) if so else 0,
+    }
+    rec["interaction_history"]["imessage"] = {
+        "count": len(im),
+        "topics": [],
+        "sentiment": (rec.get("interaction_history") or {}).get("imessage", {}).get("sentiment") or "neutral",
+        "avg_chars": int(im_chars / len(im)) if im else 0,
     }
 
 

@@ -82,10 +82,12 @@ DEFAULT_SOURCE_WEIGHTS = {
     "calendar": 5,
     "orchestrator": 4,
     "telegram": 3,
+    "imessage": 4,
     "social": 2,
     "email": 2,
     "timer": 4,
     "reminder": 4,
+    "commitment": 5,
     "manual": 2,
     "system": 1,
 }

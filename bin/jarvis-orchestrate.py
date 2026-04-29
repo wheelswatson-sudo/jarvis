@@ -109,6 +109,8 @@ _email_mod = None
 _calendar_mod = None
 _memory_mod = None
 _research_mod = None
+_commitments_mod = None
+_apple_mod = None
 
 
 def _email():
@@ -137,6 +139,20 @@ def _research():
     if _research_mod is None:
         _research_mod = _load_sibling("jarvis-research")
     return _research_mod
+
+
+def _commitments():
+    global _commitments_mod
+    if _commitments_mod is None:
+        _commitments_mod = _load_sibling("jarvis-commitments")
+    return _commitments_mod
+
+
+def _apple():
+    global _apple_mod
+    if _apple_mod is None:
+        _apple_mod = _load_sibling("jarvis-apple")
+    return _apple_mod
 
 
 # ── Anthropic call (slim, blocking — one shot per planner/synth) ─────
@@ -385,6 +401,50 @@ def _tool_synthesize(args: dict) -> dict:
     return {"text": text}
 
 
+def _tool_list_commitments(args: dict) -> dict:
+    mod = _commitments()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    return mod.list_commitments(
+        status=args.get("status") or "open",
+        owner=args.get("owner"),
+        contact=args.get("contact"),
+        days_ahead=args.get("days_ahead", 7),
+        limit=int(args.get("limit") or 10),
+    )
+
+
+def _tool_commitment_report(args: dict) -> dict:
+    mod = _commitments()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    return mod.commitment_report(days=int(args.get("days") or 7))
+
+
+def _tool_apple_save_note(args: dict) -> dict:
+    mod = _apple()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    title = (args.get("title") or "").strip()
+    content = args.get("content") or ""
+    if not title or not content:
+        return {"error": "title and content required"}
+    return mod.apple_save_note(title, content,
+                               folder=args.get("folder") or "Jarvis")
+
+
+def _tool_imessage_check(args: dict) -> dict:
+    mod = _apple()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    return mod.imessage_check(
+        contact=args.get("contact"),
+        hours=float(args.get("hours") or 24),
+        limit=int(args.get("limit") or 10),
+        unread_only=bool(args.get("unread_only", False)),
+    )
+
+
 TOOLS: dict[str, Callable[[dict], dict]] = {
     "check_calendar": _tool_check_calendar,
     "check_email": _tool_check_email,
@@ -397,6 +457,10 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
+    "list_commitments": _tool_list_commitments,
+    "commitment_report": _tool_commitment_report,
+    "apple_save_note": _tool_apple_save_note,
+    "imessage_check": _tool_imessage_check,
 }
 
 
@@ -448,21 +512,26 @@ Tools available:
 - network_suggest(goal) — Sonnet-backed planner for "who should I leverage to do X": picks primary + supporting contacts, suggests intro paths, sequences the approach. Heavier than network_search; use when the goal explicitly asks for a play.
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
+- list_commitments(status?, owner?, contact?, days_ahead?, limit?) — pending commitments. Filter by contact when prepping for a meeting with someone — surfaces "you owe them X" / "they owe you Y".
+- commitment_report(days?) — buckets: overdue, due today, due this week, others-owe-watson, recently-completed.
+- apple_save_note(title, content, folder?) — write the synthesis to Apple Notes so Watson has it on his phone. Use as a final step for prep plans, never instead of synthesize.
+- imessage_check(contact?, hours?, unread_only?) — recent inbound iMessages from chat.db. Use when prepping for a person to surface recent texts.
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.
 
 Examples:
 
 Goal: "prepare for my 2pm meeting"
 {
-  "rationale": "Pull meeting context, attendee relationship brief, and recent threads, then synthesize.",
+  "rationale": "Pull meeting context, attendee relationship brief, recent threads, and any open commitments with them, then synthesize.",
   "tasks": [
     {"id":"t1","tool":"check_calendar","args":{"date":"today","days":1},"depends_on":[]},
     {"id":"t2","tool":"relationship_brief","args":{"name":"{{t1.events[0].attendees[0]}}"},"depends_on":["t1"]},
     {"id":"t3","tool":"check_email","args":{"query":"newer_than:7d {{t1.events[0].summary}}","max_results":5},"depends_on":["t1"]},
-    {"id":"t4","tool":"synthesize","args":{
-        "instruction":"Brief Watson on his next meeting. Lead with who is there (use the relationship brief), then open threads with them, then 2-3 talking points.",
-        "inputs":{"meeting":"{{t1}}","attendee":"{{t2}}","recent_email":"{{t3}}"}},
-      "depends_on":["t1","t2","t3"]}
+    {"id":"t4","tool":"list_commitments","args":{"contact":"{{t1.events[0].attendees[0]}}","days_ahead":null},"depends_on":["t1"]},
+    {"id":"t5","tool":"synthesize","args":{
+        "instruction":"Brief Watson on his next meeting. Lead with who is there (use the relationship brief), then any open commitments with them (you owe them / they owe you), then open threads from email, then 2-3 talking points.",
+        "inputs":{"meeting":"{{t1}}","attendee":"{{t2}}","recent_email":"{{t3}}","commitments":"{{t4}}"}},
+      "depends_on":["t1","t2","t3","t4"]}
   ]
 }
 

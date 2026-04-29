@@ -175,6 +175,19 @@ contacts_path=$(locate_script "jarvis-contacts.py")
 network_path=$(locate_script "jarvis-network.py")
 [[ -n "$network_path" ]] && run_step "network" "$PYTHON" "$network_path"
 
+# Commitment mirrors — push new commitments to Trello + Apple Reminders
+# and pull completion signals back. Each subsystem skips cleanly if it
+# isn't configured (no Trello key / no JARVIS_REMINDERS), so this
+# no-ops on installs without external mirrors.
+commitments_path=$(locate_script "jarvis-commitments.py")
+if [[ -n "$commitments_path" ]]; then
+    [[ "${JARVIS_TRELLO:-1}" == "1" ]] && \
+        run_step "trello-sync" "$PYTHON" "$commitments_path" sync --systems trello
+    [[ "${JARVIS_REMINDERS:-1}" == "1" ]] && \
+        run_step "reminders-sync" "$PYTHON" "$commitments_path" sync --systems apple
+    run_step "commitments-overdue" "$PYTHON" "$commitments_path" mark-overdue
+fi
+
 # Tier 2: heavier tasks. Each script's should_run() decides whether to fire
 # (interval / session-count thresholds). --heavy bypasses with --force.
 # --light skips this whole block.
