@@ -533,6 +533,23 @@ def _relationship_alerts_section() -> str:
         return ""
 
 
+def _linkedin_changes_section() -> str:
+    """Contact-tier LinkedIn changes from the last 24h. Empty when
+    nothing landed so the briefing doesn't pad on quiet days."""
+    src = BIN_DIR / "jarvis-linkedin.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-linkedin.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_linkedin_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section(days=1) or ""
+    except Exception:
+        return ""
+
+
 def _format_markdown(payload: dict, briefing_text: str) -> str:
     """The .md file is the canonical record. Header has metadata, body is
     the spoken text, footer has the structured payload for debugging."""
@@ -544,6 +561,9 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
     relationships = _relationship_alerts_section()
     if relationships:
         spoken += relationships + "\n"
+    linkedin = _linkedin_changes_section()
+    if linkedin:
+        spoken += linkedin + "\n"
     health = _system_health_section()
     if health:
         spoken += health + "\n"

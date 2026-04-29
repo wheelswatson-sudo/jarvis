@@ -168,6 +168,11 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "network_suggest": "network",
     "enrich_network": "network",
     "network_alerts": "network",
+    "linkedin_enrich": "network",
+    "linkedin_sync": "network",
+    "linkedin_monitor": "network",
+    "linkedin_changes": "network",
+    "linkedin_search": "network",
     "web_search": "research",
     "research_topic": "research",
     "execute_plan": "orchestrator",
@@ -851,6 +856,29 @@ def _load_network_module():
         return None
 
 
+_linkedin_mod = None
+
+
+def _load_linkedin_module():
+    global _linkedin_mod
+    if _linkedin_mod is not None:
+        return _linkedin_mod
+    src = BIN_DIR / "jarvis-linkedin.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-linkedin.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_linkedin", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _linkedin_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: linkedin module load failed ({e})\n")
+        return None
+
+
 def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None]:
     """Run text through jarvis-style.apply_style if the module + profile
     are present. Returns (final_text, style_result) — style_result is None
@@ -1349,6 +1377,52 @@ def _tool_network_alerts(_args: dict, _mem: Memory) -> dict:
     if mod is None:
         return {"error": "jarvis-network module not installed"}
     return mod.network_alerts()
+
+
+# ── LinkedIn handlers ──────────────────────────────────────────────
+def _tool_linkedin_enrich(args: dict, _mem: Memory) -> dict:
+    mod = _load_linkedin_module()
+    if mod is None:
+        return {"error": "jarvis-linkedin module not installed"}
+    target = (args.get("name_or_url") or args.get("name") or "").strip()
+    if not target:
+        return {"error": "name_or_url is required"}
+    return mod.linkedin_enrich(target, force=bool(args.get("force")))
+
+
+def _tool_linkedin_sync(args: dict, _mem: Memory) -> dict:
+    mod = _load_linkedin_module()
+    if mod is None:
+        return {"error": "jarvis-linkedin module not installed"}
+    return mod.linkedin_sync(limit=args.get("limit"))
+
+
+def _tool_linkedin_monitor(_args: dict, _mem: Memory) -> dict:
+    mod = _load_linkedin_module()
+    if mod is None:
+        return {"error": "jarvis-linkedin module not installed"}
+    return mod.linkedin_monitor()
+
+
+def _tool_linkedin_changes(args: dict, _mem: Memory) -> dict:
+    mod = _load_linkedin_module()
+    if mod is None:
+        return {"error": "jarvis-linkedin module not installed"}
+    days = int(args.get("days") or 7)
+    contacts_only = args.get("contacts_only")
+    if contacts_only is None:
+        contacts_only = True
+    return mod.linkedin_changes(days=days, contacts_only=bool(contacts_only))
+
+
+def _tool_linkedin_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_linkedin_module()
+    if mod is None:
+        return {"error": "jarvis-linkedin module not installed"}
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    return mod.linkedin_search(query)
 
 
 # Tool registry — name → (handler, schema)
@@ -2396,6 +2470,127 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                 "pulls from the cached alerts file."
             ),
             "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "linkedin_enrich": (
+        _tool_linkedin_enrich,
+        {
+            "name": "linkedin_enrich",
+            "description": (
+                "Pull one LinkedIn profile via the Voyager API and merge "
+                "it into the matching contact (or store it as "
+                "linkedin_only when no contact matches). Use when Watson "
+                "says 'enrich Corbin with LinkedIn', 'pull Karina's "
+                "LinkedIn profile', or 'add LinkedIn data for X'. "
+                "Accepts a name OR a profile URL. Cached for 7 days "
+                "unless force=true."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_url": {
+                        "type": "string",
+                        "description": "Contact name (fuzzy match against "
+                                       "people.json) or a linkedin.com/in/... URL.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Bypass the 7-day cache and re-scrape now.",
+                    },
+                },
+                "required": ["name_or_url"],
+            },
+        },
+    ),
+    "linkedin_sync": (
+        _tool_linkedin_sync,
+        {
+            "name": "linkedin_sync",
+            "description": (
+                "Walk Watson's LinkedIn connection list. Connections "
+                "matching a contact get a full profile fetch + merge; "
+                "the rest get a thin skeleton tagged linkedin_only. "
+                "Stateful — re-running picks up where the last run left "
+                "off (cursor in sync_state.json). Capped per run to "
+                "respect Voyager rate limits. Heavy — only invoke on "
+                "Watson's explicit ask ('sync my LinkedIn', 'pull my "
+                "connections')."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Hard cap on this run (default 50).",
+                    },
+                },
+            },
+        },
+    ),
+    "linkedin_monitor": (
+        _tool_linkedin_monitor,
+        {
+            "name": "linkedin_monitor",
+            "description": (
+                "Re-scrape LinkedIn profiles whose snapshot is overdue "
+                "and write change records (role moves, headline updates, "
+                "skill additions, location moves). Contacts re-scrape "
+                "every 7 days, linkedin_only every 30 days. Normally "
+                "runs weekly via the self-improvement daemon — invoke "
+                "directly only when Watson asks 'check LinkedIn for "
+                "updates' or similar."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "linkedin_changes": (
+        _tool_linkedin_changes,
+        {
+            "name": "linkedin_changes",
+            "description": (
+                "Report recent LinkedIn changes from the cached log. "
+                "Contacts-only by default — linkedin_only signals stay "
+                "hidden unless contacts_only=false. Use when Watson asks "
+                "'check LinkedIn changes', 'who in my network changed "
+                "jobs', 'any LinkedIn updates this week'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Window in days (default 7).",
+                    },
+                    "contacts_only": {
+                        "type": "boolean",
+                        "description": "Filter to contact-tier signals only "
+                                       "(default true).",
+                    },
+                },
+            },
+        },
+    ),
+    "linkedin_search": (
+        _tool_linkedin_search,
+        {
+            "name": "linkedin_search",
+            "description": (
+                "Search Watson's cached LinkedIn profiles by company, "
+                "title, skill, or location. Contact matches are boosted "
+                "above linkedin_only matches. Use for 'who works at "
+                "Google', 'who in my network knows Python', 'any "
+                "PMs in Denver'. Local — instant — no API call."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Free text — company, role, skill, location.",
+                    },
+                },
+                "required": ["query"],
+            },
         },
     ),
 }

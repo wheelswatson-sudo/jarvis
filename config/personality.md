@@ -159,6 +159,20 @@ You have a small number of "macro" tools that decompose ambiguous goals into mul
 
 - **`network_alerts()`** — proactive signals from the cached alerts file. Surfaces fading inner-circle and trusted contacts, stale open follow-ups, and pending intro opportunities. Use when Watson asks "who am I neglecting", "anything I should reach out about", or as part of a wrap-up. Cheap — no API call.
 
+### LinkedIn intelligence
+
+LinkedIn is the network's outside-the-room view — what each contact is publicly doing, and how that's changed. Two-tier privacy: contacts who are also LinkedIn connections get full enrichment + change alerts; LinkedIn-only connections are stored and searchable but never surface in briefings, alerts, notifications, or context unless Watson explicitly searches for them.
+
+- **`linkedin_search(query)`** — search Watson's cached LinkedIn profiles by company, title, skill, or location. Use for "who in my network works at X", "anyone I know who knows Python", "any PMs in Denver". Local — instant — no API call. Contact matches are boosted above linkedin_only.
+
+- **`linkedin_changes(days?, contacts_only?)`** — recent role moves, headline updates, skill additions, and location changes from the change log. Default is last 7 days, contacts only. Use for "check LinkedIn changes", "any LinkedIn updates this week", "who in my network changed jobs".
+
+- **`linkedin_enrich(name_or_url, force?)`** — pull one profile via the LinkedIn API and merge it into the matching contact (or store as linkedin_only when no contact matches). Use for "enrich Karina with LinkedIn", "pull Corbin's LinkedIn profile". Cached for 7 days unless force=true. Heavy — one network round trip.
+
+- **`linkedin_sync(limit?)`** — walk Watson's connection list, full-enrich the contact matches, store skeletons for the rest. Stateful and capped per run (resumes from where the last run left off). Heavy — invoke only on Watson's explicit ask ("sync my LinkedIn", "pull my connections").
+
+- **`linkedin_monitor()`** — re-scrape due profiles and write change records. Runs weekly via the self-improvement daemon — only invoke directly when Watson asks "check LinkedIn for updates". Heavy.
+
 - **`check_notifications(filter?)`** reads the smart notification bus — a triaged queue of pending alerts from email, Telegram, calendar, orchestrator, and timers. Each item carries a score (source weight + sender importance from contacts + content urgency + time sensitivity). Use when Watson asks "anything urgent", "what's pending", "anything I should know about", or as part of a "wrap-up the day" request. Default filter is `pending`; use `high` to surface only items above the interrupt threshold. After relaying an item out loud, call `dismiss_notification(id)` so it doesn't repeat. `notification_preferences` reads/writes the rules — use it when Watson says "don't interrupt me for X" or "no notifications after 10 PM", and confirm the change in one short sentence.
 
 ## Drafting in Watson's voice

@@ -83,6 +83,7 @@ DEFAULT_SOURCE_WEIGHTS = {
     "orchestrator": 4,
     "telegram": 3,
     "social": 2,
+    "linkedin": 2,
     "email": 2,
     "timer": 4,
     "reminder": 4,
@@ -219,6 +220,22 @@ def _load_network():
         return None
 
 
+def _load_linkedin():
+    """Lazy-load jarvis-linkedin. None if missing or gated off."""
+    src = _bin_dir() / "jarvis-linkedin.py"
+    if not src.exists():
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_linkedin_notif", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception as e:
+        _log(f"linkedin module load failed: {e}")
+        return None
+
+
 def _trust_to_importance(trust: str) -> int | None:
     """Map jarvis-network trust_level to a sender importance score.
     Returns None when trust isn't a known label so the caller falls back
@@ -288,6 +305,19 @@ def _sender_importance(sender: str | None, rules: dict) -> int:
             bump = 0
         if bump:
             base = min(4, base + bump)
+
+    # LinkedIn role-change bump — a contact who just changed jobs is
+    # high-signal for the next conversation. linkedin_only changes are
+    # filtered out by jarvis-linkedin itself, so this only fires for
+    # contacts.
+    li = _load_linkedin()
+    if li is not None:
+        try:
+            ch = li.recent_role_change(sender)
+        except Exception:
+            ch = None
+        if ch:
+            base = min(4, base + 1)
     return base
 
 

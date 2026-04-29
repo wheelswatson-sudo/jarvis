@@ -275,6 +275,28 @@ def _network_hint(user_text: str | None = None) -> str:
         return ""
 
 
+def _linkedin_hint(user_text: str | None = None) -> str:
+    """One-liner from jarvis-linkedin when a mentioned contact has a
+    recent role / headline / location change on file. Contacts only —
+    linkedin_only profiles are filtered out by the module."""
+    src = ASSISTANT_DIR / "bin" / "jarvis-linkedin.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-linkedin.py"
+    if not src.exists():
+        return ""
+    names = _detect_mentioned_names(user_text or "")
+    if not names:
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_linkedin_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint(mentioned_names=names) or ""
+    except Exception:
+        return ""
+
+
 def _capability_health_hint() -> str:
     """One-line hint when the reconciliation agent has flagged any capability.
     Reads ~/.jarvis/state/capability-reconciliation.json (written nightly by
@@ -382,6 +404,12 @@ class ContextEngine:
         network = _network_hint(self.user_text)
         if network:
             lines.append(network)
+
+        # LinkedIn hint — recent role/headline/location moves for a
+        # mentioned contact. Empty when nothing fresh.
+        linkedin = _linkedin_hint(self.user_text)
+        if linkedin:
+            lines.append(linkedin)
 
         body = "\n".join(lines).strip()
         if not body:

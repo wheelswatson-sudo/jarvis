@@ -77,7 +77,7 @@ case "$mode" in
         tail -30 "$LOG" 2>/dev/null || echo "(no log yet)"
         echo ""
         echo "=== module status ==="
-        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator style contacts network reconcile; do
+        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator style contacts network linkedin reconcile; do
             stamp=""
             case "$sys" in
                 feedback)     stamp=$(stat -f %Sm "$ASSISTANT_DIR/feedback/profile.json" 2>/dev/null || echo "(none)") ;;
@@ -101,6 +101,11 @@ case "$mode" in
                               fi ;;
                 network)      if [[ -f "$ASSISTANT_DIR/state/network-alerts.json" ]]; then
                                   stamp=$(python3 -c "import json; d=json.load(open('$ASSISTANT_DIR/state/network-alerts.json')); print(f\"alerts={len(d.get('alerts',[]))} fading={len(d.get('fading',[]))} follow_ups={len(d.get('follow_ups',[]))}\")" 2>/dev/null || echo "(unreadable)")
+                              else
+                                  stamp="(none)"
+                              fi ;;
+                linkedin)     if [[ -d "$ASSISTANT_DIR/linkedin/profiles" ]]; then
+                                  stamp=$(python3 -c "import json,glob; ps=glob.glob('$ASSISTANT_DIR/linkedin/profiles/*.json'); c=sum(1 for p in ps if json.load(open(p)).get('in_contacts')); print(f'profiles={len(ps)} contacts={c} linkedin_only={len(ps)-c}')" 2>/dev/null || echo "(unreadable)")
                               else
                                   stamp="(none)"
                               fi ;;
@@ -174,6 +179,14 @@ contacts_path=$(locate_script "jarvis-contacts.py")
 # at JARVIS_NETWORK_BATCH_CAP per run, so this no-ops most invocations.
 network_path=$(locate_script "jarvis-network.py")
 [[ -n "$network_path" ]] && run_step "network" "$PYTHON" "$network_path"
+
+# LinkedIn change monitor — re-scrape due profiles (contacts every 7d,
+# linkedin_only every 30d) and write change records. Also enqueues
+# contact-tier role changes into the smart-notification bus. No-ops
+# without LINKEDIN_COOKIE configured. Capped at JARVIS_LINKEDIN_MONITOR_CAP
+# per run so a large connection set spreads across the week.
+linkedin_path=$(locate_script "jarvis-linkedin.py")
+[[ -n "$linkedin_path" ]] && run_step "linkedin" "$PYTHON" "$linkedin_path"
 
 # Tier 2: heavier tasks. Each script's should_run() decides whether to fire
 # (interval / session-count thresholds). --heavy bypasses with --force.

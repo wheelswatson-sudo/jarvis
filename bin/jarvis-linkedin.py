@@ -157,6 +157,14 @@ def _primitive():
     return _cache["primitive"]
 
 
+def _notifications():
+    if "notifications" not in _cache:
+        _cache["notifications"] = _load_module(
+            "jarvis_notifications_for_linkedin",
+            "jarvis-notifications.py", _BIN_SEARCH)
+    return _cache["notifications"]
+
+
 def _emit(action: str, status: str, **ctx) -> None:
     p = _primitive()
     if p is None:
@@ -952,6 +960,35 @@ def linkedin_sync(limit: int | None = None) -> dict:
     }
 
 
+# ── notification routing ──────────────────────────────────────────────
+def _route_changes_to_notifications(changes: list[dict]) -> None:
+    """Push contact-tier role changes into the smart-notification bus.
+    linkedin_only changes never reach this code — the caller filters by
+    in_contacts before invoking. Source weight + sender importance from
+    the bus produce the natural priority (inner_circle ≈ score 6,
+    professional ≈ 4, acquaintance ≈ 3)."""
+    notif = _notifications()
+    if notif is None:
+        return
+    for ch in changes:
+        if not ch.get("in_contacts"):
+            continue
+        if ch.get("type") != "role_change":
+            continue
+        name = ch.get("name") or "?"
+        new = ch.get("new") or ""
+        old = ch.get("old") or ""
+        content = f"{name} changed role: {old} → {new}".strip()
+        try:
+            notif.enqueue(
+                source="linkedin",
+                content=content,
+                sender=name,
+            )
+        except Exception as e:
+            _log(f"notify enqueue failed for {name}: {e}")
+
+
 # ── PUBLIC: linkedin_monitor ──────────────────────────────────────────
 def linkedin_monitor() -> dict:
     """Re-scrape due profiles and detect changes. Contact tier rescrapes
@@ -1017,6 +1054,7 @@ def linkedin_monitor() -> dict:
                 total_changes.extend(changes)
                 if is_contact:
                     contact_changes += sum(1 for c in changes if c.get("in_contacts"))
+                    _route_changes_to_notifications(changes)
             checked += 1
             time.sleep(REQUEST_DELAY_S)
         except Exception as e:
@@ -1275,14 +1313,35 @@ def recent_role_change(sender: str | None) -> dict | None:
 
 # ── main entrypoint (jarvis-improve) ──────────────────────────────────
 def main() -> int:
-    """Tier-2 entrypoint. Runs linkedin_monitor (cheap when nothing is
-    due). Always exits 0 so the chain doesn't break."""
+    """Tier-2 entrypoint. Runs linkedin_monitor every pass and
+    linkedin_sync every ~30 days. Cheap when nothing is due — the
+    rescrape interval and connection cursor cap each invocation. Always
+    exits 0 so the chain doesn't break."""
     if _gate_check() is not None:
         return 0
     try:
         linkedin_monitor()
     except Exception as e:
         _log(f"main monitor: {e}")
+
+    # Monthly connection sweep — keeps the linkedin_only set fresh and
+    # picks up new contacts who have a handle. Cadence read from sync
+    # state so a forced run from CLI doesn't change the rhythm.
+    try:
+        state = _load_sync_state()
+        last = state.get("last_sync")
+        run_sync = True
+        if last:
+            try:
+                age = time.time() - datetime.fromisoformat(last).timestamp()
+                run_sync = age >= int(os.environ.get(
+                    "JARVIS_LINKEDIN_SYNC_INTERVAL_S", str(30 * 86400)))
+            except Exception:
+                run_sync = True
+        if run_sync:
+            linkedin_sync()
+    except Exception as e:
+        _log(f"main sync: {e}")
     return 0
 
 

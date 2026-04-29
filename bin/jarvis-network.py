@@ -162,6 +162,13 @@ def _primitive():
     return _cache["primitive"]
 
 
+def _linkedin():
+    if "linkedin" not in _cache:
+        _cache["linkedin"] = _load_module("jarvis_linkedin_for_network",
+                                           "jarvis-linkedin.py", _BIN_SEARCH)
+    return _cache["linkedin"]
+
+
 def _emit(action: str, status: str, **ctx) -> None:
     p = _primitive()
     if p is None:
@@ -637,20 +644,75 @@ def enrich_network(force: bool = False) -> dict:
             people[k].setdefault("network_position", {})
             people[k]["network_position"].update(pos)
 
+    # LinkedIn pass — cheap when most contacts have no handle, capped per
+    # run so a large network doesn't blow the Voyager rate limit. Each
+    # call merges skills + industry into the contact record in place.
+    li_calls = _linkedin_pass(people, force=force)
+
     _save_people(people)
     elapsed = int((time.monotonic() - started) * 1000)
     _emit("enrich_network", "success" if not errors else "failed",
           enriched=enriched, skipped=skipped, haiku_calls=haiku_calls,
-          errors_count=len(errors))
+          linkedin_calls=li_calls, errors_count=len(errors))
     _log(f"enrich_network: enriched={enriched} skipped={skipped} "
-         f"haiku={haiku_calls} errors={len(errors)} ({elapsed}ms)")
+         f"haiku={haiku_calls} linkedin={li_calls} errors={len(errors)} "
+         f"({elapsed}ms)")
     return {
         "ok": True,
         "enriched": enriched,
         "skipped": skipped,
         "haiku_calls": haiku_calls,
+        "linkedin_calls": li_calls,
         "errors": errors,
     }
+
+
+def _linkedin_pass(people: dict, force: bool = False) -> int:
+    """Best-effort LinkedIn enrichment for contacts that already carry a
+    LinkedIn handle. Skips silently when the module isn't installed or
+    the cookie is missing. Cap is independent of the Haiku cap so a busy
+    LinkedIn week can't starve relationship_strength updates.
+
+    Returns the number of profiles fetched from LinkedIn this pass."""
+    li = _linkedin()
+    if li is None:
+        return 0
+    try:
+        gate = li._gate_check()  # type: ignore[attr-defined]
+    except Exception:
+        gate = {"error": "linkedin module not callable"}
+    if gate:
+        return 0
+    cap = int(os.environ.get("JARVIS_NETWORK_LINKEDIN_CAP", "5"))
+    calls = 0
+    for k, rec in people.items():
+        if calls >= cap:
+            break
+        handles = rec.get("social_handles") or {}
+        stored = (handles.get("linkedin") or "").strip()
+        if not stored:
+            continue
+        try:
+            res = li.linkedin_enrich(stored, force=force)  # type: ignore[attr-defined]
+        except Exception as e:
+            _log(f"linkedin enrich failed for {rec.get('name')}: {e}")
+            continue
+        # linkedin_enrich loads/saves people.json itself when a contact
+        # match is found; reload our copy so subsequent contacts see the
+        # merged values.
+        if isinstance(res, dict) and res.get("merged_into_contact"):
+            try:
+                fresh = _load_people()
+                # In-place refresh of the dict we're iterating — copy
+                # values onto the existing keys so the for-loop stays
+                # valid and downstream callers use the latest data.
+                for fk, fv in fresh.items():
+                    people[fk] = fv
+            except Exception:
+                pass
+        if isinstance(res, dict) and res.get("ok"):
+            calls += 1
+    return calls
 
 
 # ── PUBLIC: network_search ────────────────────────────────────────────
