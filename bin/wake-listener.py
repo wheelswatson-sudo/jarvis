@@ -454,6 +454,7 @@ def transcribe(audio_path):
                 ["which", path] if "/" not in path else ["test", "-x", path],
                 capture_output=True,
                 check=False,
+                timeout=2,
             )
             if result.returncode == 0:
                 whisper_cmd = path

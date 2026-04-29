@@ -750,7 +750,7 @@ def linkedin_enrich(name_or_url: str, force: bool = False) -> dict:
     if not name_or_url or not name_or_url.strip():
         _emit("linkedin_enrich", "failed", reason="no_input")
         return {"error": "name_or_url is required"}
-    cookie = os.environ["LINKEDIN_COOKIE"]
+    cookie = os.environ.get("LINKEDIN_COOKIE", "")
 
     linkedin_id = _vanity_from_url(name_or_url) or name_or_url.strip().lstrip("@")
 
@@ -828,7 +828,7 @@ def linkedin_sync(limit: int | None = None) -> dict:
     if gate:
         _emit("linkedin_sync", "skipped", reason="gate")
         return gate
-    cookie = os.environ["LINKEDIN_COOKIE"]
+    cookie = os.environ.get("LINKEDIN_COOKIE", "")
 
     cmod = _contacts()
     people = cmod._load_people() if cmod else {}  # type: ignore[attr-defined]
@@ -999,7 +999,7 @@ def linkedin_monitor() -> dict:
     if gate:
         _emit("linkedin_monitor", "skipped", reason="gate")
         return gate
-    cookie = os.environ["LINKEDIN_COOKIE"]
+    cookie = os.environ.get("LINKEDIN_COOKIE", "")
     cmod = _contacts()
     people = cmod._load_people() if cmod else {}  # type: ignore[attr-defined]
 
