@@ -277,6 +277,51 @@ def _tool_relationship_brief(args: dict) -> dict:
     return mod.relationship_brief(name)
 
 
+def _network():
+    """Lazy-load jarvis-network.py the same way _contacts() does."""
+    global _network_mod_cached  # type: ignore[name-defined]
+    try:
+        return _network_mod_cached  # type: ignore[name-defined]
+    except NameError:
+        pass
+    src = BIN_DIR / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        _network_mod_cached = None  # type: ignore[name-defined]
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_network", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _network_mod_cached = mod  # type: ignore[name-defined]
+        return mod
+    except Exception:
+        _network_mod_cached = None  # type: ignore[name-defined]
+        return None
+
+
+def _tool_network_search(args: dict) -> dict:
+    mod = _network()
+    if mod is None:
+        return {"error": "jarvis-network not installed"}
+    return mod.network_search(
+        query=args.get("query") or "",
+        filters=args.get("filters") or {},
+        limit=int(args.get("limit") or 10),
+    )
+
+
+def _tool_relationship_score(args: dict) -> dict:
+    mod = _network()
+    if mod is None:
+        return {"error": "jarvis-network not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.relationship_score(name)
+
+
 def _tool_web_search(args: dict) -> dict:
     mod = _research()
     if mod is None:
@@ -334,6 +379,8 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "recall": _tool_recall,
     "search_contacts": _tool_search_contacts,
     "relationship_brief": _tool_relationship_brief,
+    "network_search": _tool_network_search,
+    "relationship_score": _tool_relationship_score,
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
@@ -383,6 +430,8 @@ Tools available:
 - recall(query, limit?) — search Watson's memory store.
 - search_contacts(query) — look up a person (Apple Contacts + Messages).
 - relationship_brief(name) — Watson's curated relationship memory: brief, last interaction, talking points, open threads. Use when a meeting attendee is named — strictly better than search_contacts for prep.
+- network_search(query, filters?, limit?) — semantic search across the whole network: matches skills, expertise, intro targets, tags, topics. Use when the goal names a capability or domain ("fundraising", "React dev") rather than a specific person. Filters: trust_level, min_strength, channel, recency_days.
+- relationship_score(name) — analytical snapshot of one relationship: strength (0-1), trajectory (growing/stable/fading), days since contact, suggested next action. Strictly better than relationship_brief when the goal asks "should I reach out" or "how strong is this tie".
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.

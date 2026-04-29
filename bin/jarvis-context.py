@@ -226,6 +226,48 @@ def _social_hint() -> str:
         return ""
 
 
+def _network_hint() -> str:
+    """One-liner from jarvis-network when high-priority alerts (fading
+    inner_circle, follow-ups) are pending. Empty otherwise — same lazy-load
+    contract as the other hooks."""
+    if os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_network_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint() or ""
+    except Exception:
+        return ""
+
+
+def _named_contacts_hint(user_text: str) -> str:
+    """When Watson's current turn names a contact, surface a one-line
+    relationship hint so Jarvis answers from ground truth without burning a
+    tool round-trip on a name lookup."""
+    if not user_text or os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-network.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-network.py"
+    if not src.exists():
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_network_names", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.name_context_hint(user_text) or ""
+    except Exception:
+        return ""
+
+
 def _capability_health_hint() -> str:
     """One-line hint when the reconciliation agent has flagged any capability.
     Reads ~/.jarvis/state/capability-reconciliation.json (written nightly by
@@ -270,13 +312,19 @@ def _briefing_hint() -> str:
 class ContextEngine:
     """Builds the predictive priming block for the system prompt."""
 
-    def __init__(self, now: datetime | None = None) -> None:
+    def __init__(self, now: datetime | None = None,
+                 user_text: str | None = None) -> None:
         self.now = now or datetime.now().astimezone()
+        self.user_text = user_text or ""
 
-    def predict(self) -> str:
-        """Return a ## Current Context block. Empty string if disabled."""
+    def predict(self, user_text: str | None = None) -> str:
+        """Return a ## Current Context block. Empty string if disabled.
+        `user_text` (also accepted via the constructor) lets the engine
+        inject contact-specific hints when Watson names someone."""
         if os.environ.get("JARVIS_PREDICTIVE_CONTEXT", "1") != "1":
             return ""
+        if user_text:
+            self.user_text = user_text
 
         tod_label, tod_hint = _time_of_day_hint(self.now)
         timestamp = self.now.strftime("%A, %-I:%M %p")
@@ -321,6 +369,14 @@ class ContextEngine:
         notifications = _notifications_hint()
         if notifications:
             lines.append(notifications)
+
+        network = _network_hint()
+        if network:
+            lines.append(network)
+
+        named = _named_contacts_hint(self.user_text)
+        if named:
+            lines.append(named)
 
         cap_health = _capability_health_hint()
         if cap_health:
