@@ -248,6 +248,28 @@ def _pull_social(hours: int = 12) -> dict:
     return rec or {"platforms": []}
 
 
+def _pull_stripe() -> dict:
+    """Pull the Stripe revenue snapshot. Soft-fail — briefing must never
+    block on a Stripe outage."""
+    if os.environ.get("JARVIS_STRIPE", "1") == "0":
+        return {}
+    src = BIN_DIR / "jarvis-stripe.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-stripe.py"
+    if not src.exists():
+        return {}
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_stripe_brief_payload", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        snap = mod.stripe_dashboard()
+    except Exception as e:
+        return {"error": f"stripe: {e}"}
+    if isinstance(snap, dict) and snap.get("error"):
+        return {}  # silent — gate likely off, no need to clutter briefing
+    return snap or {}
+
+
 def _pull_weather() -> dict:
     """Best-effort weather via wttr.in (no key needed). Skip if it 404s,
     rate-limits, or just takes too long — breakfast doesn't wait."""
@@ -410,6 +432,21 @@ def _build_synth_prompt(payload: dict) -> str:
             lines.append(f"- {label}: {blurb}")
         parts.append("PER-MEETING CONTEXT:\n" + "\n".join(lines))
 
+    stripe = payload.get("stripe") or {}
+    if stripe and stripe.get("ok"):
+        bits = [
+            f"MRR ${stripe.get('mrr_dollars', 0):,.0f} "
+            f"({stripe.get('active_subscriptions', 0)} active subs)",
+        ]
+        if stripe.get("new_subscribers_7d"):
+            bits.append(f"{stripe['new_subscribers_7d']} new this week")
+        if stripe.get("revenue_trend_pct") is not None:
+            arrow = "↑" if stripe["revenue_trend_pct"] >= 0 else "↓"
+            bits.append(f"30d revenue {arrow}{abs(stripe['revenue_trend_pct'])}%")
+        if stripe.get("failed_payments_30d"):
+            bits.append(f"{stripe['failed_payments_30d']} failed payments")
+        parts.append("REVENUE: " + " · ".join(bits))
+
     weather = payload.get("weather") or {}
     if weather and weather.get("now_temp_f"):
         parts.append(
@@ -550,6 +587,25 @@ def _linkedin_changes_section() -> str:
         return ""
 
 
+def _stripe_section() -> str:
+    """Pull the 'Revenue' markdown block from jarvis-stripe. Empty when
+    Stripe isn't configured or there's nothing material to surface."""
+    if os.environ.get("JARVIS_STRIPE", "1") == "0":
+        return ""
+    src = BIN_DIR / "jarvis-stripe.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-stripe.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_stripe_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
 def _commitments_section() -> str:
     """Pull the 'Commitments' markdown block — overdue, due today, due
     this week. Empty when nothing pressing."""
@@ -598,6 +654,9 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
         f"_Generated: {payload['generated_at']}_\n\n"
     )
     spoken = "## Spoken briefing\n\n" + briefing_text.strip() + "\n\n"
+    revenue = _stripe_section()
+    if revenue:
+        spoken += revenue + "\n"
     commitments = _commitments_section()
     if commitments:
         spoken += commitments + "\n"
@@ -686,6 +745,7 @@ def generate_today(force: bool = False) -> dict:
     payload["social"] = _pull_social()
     payload["pending_notifications"] = _pull_pending_notifications()
     payload["memory_recent"] = _pull_memory_recent()
+    payload["stripe"] = _pull_stripe()
     payload["weather"] = _pull_weather()
 
     events = (payload["calendar"] or {}).get("events") or []

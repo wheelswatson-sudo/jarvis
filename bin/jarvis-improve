@@ -215,6 +215,13 @@ commitments_path=$(locate_script "jarvis-commitments.py")
 trello_path=$(locate_script "jarvis-trello.py")
 [[ -n "$trello_path" ]] && run_step "trello" "$PYTHON" "$trello_path"
 
+# Stripe alerts — scan for failed payments, expiring subscriptions,
+# signup spikes/drops, and at-risk customers; idempotently push high-
+# signal items into the smart-notification bus. No-ops without
+# STRIPE_SECRET_KEY in the env. Cheap (handful of API calls; cached).
+stripe_path=$(locate_script "jarvis-stripe.py")
+[[ -n "$stripe_path" ]] && run_step "stripe-alerts" "$PYTHON" "$stripe_path" alerts
+
 # Reminders sync — push every open commitment that isn't already on
 # Apple Reminders to the 'Jarvis' list, so the iPhone fires a real
 # notification. Lightweight wrapper around apple_add_reminder. Skips on

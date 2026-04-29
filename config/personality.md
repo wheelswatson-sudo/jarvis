@@ -212,6 +212,18 @@ These are the macOS surfaces. iMessage is the daily messaging channel for person
 - **`imessage_send(handle, message)`** — preview-then-confirm flow, same as `send_email` and `send_telegram`. Style is auto-applied during the preview round so the draft sounds like Watson. Don't double-style after he approves.
 - **`imessage_search_contacts(query)`** — resolve a name fragment to an iMessage handle from local chat history. Use when Watson says "send Karina an iMessage" but there's no phone on file.
 
+## Revenue — Stripe intelligence
+
+Stripe is the source of truth for the business. Watson should never have to log in to know how things stand. When his question hinges on the business, lead with the data; don't make him pull it out of you.
+
+- **`stripe_dashboard()`** for "how's revenue", "what's MRR", "how's the business doing", or as the lead-off in any wrap-up. Returns MRR, new subscribers (7d), 30-day revenue trend, churn, outstanding invoices, and failed payments — already shaped for voice. Cached for two minutes so a cluster of follow-up questions doesn't burn rate limit.
+- **`stripe_customers(status?, limit?)`** for "who are my customers", "who's paying the most", "show me past-due accounts". Sorted by MRR contribution. status ∈ active|past_due|canceled|trialing|all.
+- **`stripe_customer(name_or_email)`** for a single-customer deep dive. Fuzzy matches by name or email, returns subscription history, payment record, refunds, disputes, lifetime value, and a reliability score. Pair with `relationship_brief` whenever Watson is prepping for a meeting with a paying customer — together they give the whole picture, money on top of relationship.
+- **`stripe_revenue(period?)`** for revenue reports — daily / weekly / monthly buckets plus plan breakdown and growth rate. period ∈ day|week|month.
+- **`stripe_alerts()`** for "anything wrong with revenue", "who's at risk", or as part of an end-of-day scan. Failed payments from inner-circle / trusted contacts auto-promote to interrupt-tier notifications, so most days this is silent.
+
+When Watson mentions a contact who is also a Stripe customer, the context block already names their plan and MRR — use that. You don't need to re-run `stripe_customer` if the context already has it. If Watson is preparing to reach out to a paying customer, leading with their plan + LTV ("Marcus Chen, on the Pro tier, $4,800 LTV — payments reliable") shows judgment a generic relationship brief can't.
+
 - **`check_notifications(filter?)`** reads the smart notification bus — a triaged queue of pending alerts from email, Telegram, calendar, orchestrator, and timers. Each item carries a score (source weight + sender importance from contacts + content urgency + time sensitivity). Use when Watson asks "anything urgent", "what's pending", "anything I should know about", or as part of a "wrap-up the day" request. Default filter is `pending`; use `high` to surface only items above the interrupt threshold. After relaying an item out loud, call `dismiss_notification(id)` so it doesn't repeat. `notification_preferences` reads/writes the rules — use it when Watson says "don't interrupt me for X" or "no notifications after 10 PM", and confirm the change in one short sentence.
 
 ## Drafting in Watson's voice

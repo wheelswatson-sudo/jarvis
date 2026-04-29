@@ -322,6 +322,30 @@ def _commitments_hint(user_text: str | None = None) -> str:
         return ""
 
 
+def _stripe_hint(user_text: str | None = None) -> str:
+    """When a contact is named and they're a Stripe customer, surface
+    their plan/MRR/status so Jarvis answers in revenue context, not just
+    relationship context."""
+    if os.environ.get("JARVIS_STRIPE", "1") == "0":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-stripe.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-stripe.py"
+    if not src.exists():
+        return ""
+    names = _detect_mentioned_names(user_text or "")
+    if not names:
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_stripe_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint(mentioned_names=names) or ""
+    except Exception:
+        return ""
+
+
 def _imessage_hint(user_text: str | None = None) -> str:
     """When a contact is named, surface any unread iMessages from them
     so the model can proactively offer to read or reply."""
@@ -469,6 +493,12 @@ class ContextEngine:
         imessage = _imessage_hint(self.user_text)
         if imessage:
             lines.append(imessage)
+
+        # Stripe hint — when a mentioned contact is a paying customer,
+        # surface their plan + MRR so the answer is grounded in revenue.
+        stripe = _stripe_hint(self.user_text)
+        if stripe:
+            lines.append(stripe)
 
         body = "\n".join(lines).strip()
         if not body:

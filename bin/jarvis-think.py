@@ -192,6 +192,11 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "imessage_read": "messaging",
     "imessage_send": "messaging",
     "imessage_search_contacts": "messaging",
+    "stripe_dashboard": "stripe",
+    "stripe_customers": "stripe",
+    "stripe_customer": "stripe",
+    "stripe_revenue": "stripe",
+    "stripe_alerts": "stripe",
     "web_search": "research",
     "research_topic": "research",
     "execute_plan": "orchestrator",
@@ -901,6 +906,7 @@ def _load_linkedin_module():
 _commitments_mod = None
 _trello_mod = None
 _apple_mod = None
+_stripe_mod = None
 
 
 def _load_commitments_module():
@@ -960,6 +966,26 @@ def _load_apple_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: apple module load failed ({e})\n")
+        return None
+
+
+def _load_stripe_module():
+    global _stripe_mod
+    if _stripe_mod is not None:
+        return _stripe_mod
+    src = BIN_DIR / "jarvis-stripe.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-stripe.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_stripe", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _stripe_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: stripe module load failed ({e})\n")
         return None
 
 
@@ -1721,6 +1747,48 @@ def _tool_imessage_search_contacts(args: dict, _mem: Memory) -> dict:
     if not query:
         return {"error": "query is required"}
     return mod.imessage_search_contacts(query, limit=int(args.get("limit") or 12))
+
+
+# ── Stripe handlers ────────────────────────────────────────────────
+def _tool_stripe_dashboard(_args: dict, _mem: Memory) -> dict:
+    mod = _load_stripe_module()
+    if mod is None:
+        return {"error": "jarvis-stripe module not installed"}
+    return mod.stripe_dashboard()
+
+
+def _tool_stripe_customers(args: dict, _mem: Memory) -> dict:
+    mod = _load_stripe_module()
+    if mod is None:
+        return {"error": "jarvis-stripe module not installed"}
+    return mod.stripe_customers(
+        status=args.get("status") or "active",
+        limit=int(args.get("limit") or 20),
+    )
+
+
+def _tool_stripe_customer(args: dict, _mem: Memory) -> dict:
+    mod = _load_stripe_module()
+    if mod is None:
+        return {"error": "jarvis-stripe module not installed"}
+    needle = (args.get("name_or_email") or args.get("query") or "").strip()
+    if not needle:
+        return {"error": "name_or_email is required"}
+    return mod.stripe_customer(needle)
+
+
+def _tool_stripe_revenue(args: dict, _mem: Memory) -> dict:
+    mod = _load_stripe_module()
+    if mod is None:
+        return {"error": "jarvis-stripe module not installed"}
+    return mod.stripe_revenue(period=args.get("period") or "month")
+
+
+def _tool_stripe_alerts(_args: dict, _mem: Memory) -> dict:
+    mod = _load_stripe_module()
+    if mod is None:
+        return {"error": "jarvis-stripe module not installed"}
+    return mod.stripe_alerts()
 
 
 # Tool registry — name → (handler, schema)
@@ -3268,6 +3336,91 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                 },
                 "required": ["query"],
             },
+        },
+    ),
+    "stripe_dashboard": (
+        _tool_stripe_dashboard,
+        {
+            "name": "stripe_dashboard",
+            "description": (
+                "Quick revenue snapshot — MRR, new subscribers in the "
+                "last 7 days, 30-day revenue trend, churn, outstanding "
+                "invoices, failed payments. Use for 'how's revenue', "
+                "'what's MRR', 'how's the business doing', or as part "
+                "of a wrap-up. Cached for 2 minutes so repeated asks "
+                "don't burn rate limit."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "stripe_customers": (
+        _tool_stripe_customers,
+        {
+            "name": "stripe_customers",
+            "description": (
+                "List customers ranked by MRR contribution. Use for "
+                "'who are my customers', 'who pays the most', 'who's "
+                "past due'. status ∈ active|past_due|canceled|trialing|all."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    ),
+    "stripe_customer": (
+        _tool_stripe_customer,
+        {
+            "name": "stripe_customer",
+            "description": (
+                "Single-customer deep dive — subscriptions, payments, "
+                "refunds, disputes, lifetime value, reliability score. "
+                "Fuzzy matches by name or email. Use when Watson asks "
+                "about a specific customer's subscription or history."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_email": {"type": "string"},
+                },
+                "required": ["name_or_email"],
+            },
+        },
+    ),
+    "stripe_revenue": (
+        _tool_stripe_revenue,
+        {
+            "name": "stripe_revenue",
+            "description": (
+                "Revenue report bucketed by period — daily/weekly/"
+                "monthly aggregation, plan breakdown, growth rate. "
+                "Use for 'show me revenue', 'how did we do last "
+                "month', 'revenue by plan'. period ∈ day|week|month."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "period": {"type": "string"},
+                },
+            },
+        },
+    ),
+    "stripe_alerts": (
+        _tool_stripe_alerts,
+        {
+            "name": "stripe_alerts",
+            "description": (
+                "Proactive revenue alerts — failed payments, expiring "
+                "subscriptions, signup spikes/drops, at-risk customers. "
+                "Pushes high-signal items into the notification bus "
+                "(idempotent — already-alerted items are skipped). Use "
+                "for 'anything wrong with revenue', 'who's at risk', "
+                "or as part of a wrap-up scan."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
         },
     ),
 }

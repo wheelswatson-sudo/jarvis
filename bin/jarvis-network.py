@@ -176,6 +176,13 @@ def _apple():
     return _cache["apple"]
 
 
+def _stripe():
+    if "stripe" not in _cache:
+        _cache["stripe"] = _load_module("jarvis_stripe_for_network",
+                                          "jarvis-stripe.py", _BIN_SEARCH)
+    return _cache["stripe"]
+
+
 def _emit(action: str, status: str, **ctx) -> None:
     p = _primitive()
     if p is None:
@@ -661,15 +668,20 @@ def enrich_network(force: bool = False) -> dict:
     # when a contact doesn't have one yet. No-ops on non-macOS.
     apple_signals = _apple_pass(people)
 
+    # Stripe pass — annotate paying customers with subscription metadata.
+    # No-op when Stripe gate is off or STRIPE_SECRET_KEY isn't set.
+    stripe_signals = _stripe_pass(people)
+
     _save_people(people)
     elapsed = int((time.monotonic() - started) * 1000)
     _emit("enrich_network", "success" if not errors else "failed",
           enriched=enriched, skipped=skipped, haiku_calls=haiku_calls,
           linkedin_calls=li_calls, apple_signals=apple_signals,
+          stripe_signals=stripe_signals,
           errors_count=len(errors))
     _log(f"enrich_network: enriched={enriched} skipped={skipped} "
          f"haiku={haiku_calls} linkedin={li_calls} apple={apple_signals} "
-         f"errors={len(errors)} ({elapsed}ms)")
+         f"stripe={stripe_signals} errors={len(errors)} ({elapsed}ms)")
     return {
         "ok": True,
         "enriched": enriched,
@@ -677,8 +689,59 @@ def enrich_network(force: bool = False) -> dict:
         "haiku_calls": haiku_calls,
         "linkedin_calls": li_calls,
         "apple_signals": apple_signals,
+        "stripe_signals": stripe_signals,
         "errors": errors,
     }
+
+
+def _stripe_pass(people: dict) -> int:
+    """Fold Stripe customer status onto contacts. Each contact's email
+    (or name fallback) is matched against Stripe; on hit, customer_since,
+    plan, mrr_dollars, ltv_dollars, status, and reliability_score are
+    written under rec['stripe']. No-ops when Stripe gate is off or the
+    module is missing. Capped per run."""
+    sm = _stripe()
+    if sm is None:
+        return 0
+    try:
+        gate = sm._gate_check()  # type: ignore[attr-defined]
+    except Exception:
+        gate = {"error": "stripe gate not callable"}
+    if gate:
+        return 0
+    cap = int(os.environ.get("JARVIS_NETWORK_STRIPE_CAP", "20"))
+    enriched = 0
+    for k, rec in people.items():
+        if enriched >= cap:
+            break
+        needle = rec.get("email") or rec.get("name") or ""
+        if not needle:
+            continue
+        try:
+            cust = sm.customer_for_contact(needle)  # type: ignore[attr-defined]
+        except Exception:
+            continue
+        if not isinstance(cust, dict) or not cust.get("found"):
+            continue
+        rec["stripe"] = {
+            "customer_id": cust.get("customer_id"),
+            "customer_since": cust.get("customer_since"),
+            "plan": cust.get("plan"),
+            "mrr_dollars": cust.get("mrr_dollars"),
+            "ltv_dollars": cust.get("ltv_dollars"),
+            "status": cust.get("status"),
+            "delinquent": cust.get("delinquent", False),
+            "reliability_score": cust.get("reliability_score"),
+            "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        # Tag paying customers so network_search can filter on it.
+        tags = set(rec.get("tags") or [])
+        tags.add("customer")
+        if cust.get("delinquent"):
+            tags.add("delinquent")
+        rec["tags"] = sorted(tags)
+        enriched += 1
+    return enriched
 
 
 def _apple_pass(people: dict) -> int:

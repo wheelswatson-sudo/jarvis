@@ -446,6 +446,45 @@ def _tool_apple_list_reminders(args: dict) -> dict:
     )
 
 
+_stripe_mod_cached = None
+
+
+def _stripe():
+    global _stripe_mod_cached
+    if _stripe_mod_cached is not None:
+        return _stripe_mod_cached
+    src = BIN_DIR / "jarvis-stripe.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-stripe.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_stripe_orch", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _stripe_mod_cached = mod
+        return mod
+    except Exception:
+        return None
+
+
+def _tool_stripe_dashboard(_args: dict) -> dict:
+    mod = _stripe()
+    if mod is None:
+        return {"error": "jarvis-stripe not installed"}
+    return mod.stripe_dashboard()
+
+
+def _tool_stripe_customer(args: dict) -> dict:
+    mod = _stripe()
+    if mod is None:
+        return {"error": "jarvis-stripe not installed"}
+    needle = (args.get("name_or_email") or args.get("query") or "").strip()
+    if not needle:
+        return {"error": "name_or_email is required"}
+    return mod.stripe_customer(needle)
+
+
 def _tool_synthesize(args: dict) -> dict:
     """Cheap Haiku call that combines prior outputs into a short prose
     block. The planner uses this as the final 'roll up the briefing'
@@ -490,6 +529,8 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "imessage_check": _tool_imessage_check,
     "imessage_read": _tool_imessage_read,
     "apple_list_reminders": _tool_apple_list_reminders,
+    "stripe_dashboard": _tool_stripe_dashboard,
+    "stripe_customer": _tool_stripe_customer,
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
@@ -547,6 +588,8 @@ Tools available:
 - imessage_check(hours?) — recent inbound iMessages grouped by handle. Use for prep when Watson's about to talk to someone he texts.
 - imessage_read(handle, limit?) — message history with one handle, oldest→newest. Use when context for a reply matters.
 - apple_list_reminders(include_completed?) — pending reminders in the 'Jarvis' list. Pair with list_commitments when the goal touches reminders the iPhone might already hold.
+- stripe_dashboard() — MRR / new subs / 30d trend / churn / outstanding invoices. Reach for this in any "close the deal", "wrap up the day on revenue", or "prep for X customer" plan.
+- stripe_customer(name_or_email) — single-customer deep dive: subscriptions, payments, refunds, lifetime value, reliability. Pair with relationship_brief when prepping for a meeting with a paying customer.
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.
