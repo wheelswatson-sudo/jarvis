@@ -173,6 +173,25 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "linkedin_monitor": "network",
     "linkedin_changes": "network",
     "linkedin_search": "network",
+    "extract_commitments": "commitments",
+    "add_commitment": "commitments",
+    "list_commitments": "commitments",
+    "complete_commitment": "commitments",
+    "commitment_report": "commitments",
+    "trello_sync": "commitments",
+    "trello_boards": "commitments",
+    "trello_add": "commitments",
+    "trello_move": "commitments",
+    "apple_add_reminder": "apple",
+    "apple_list_reminders": "apple",
+    "apple_complete_reminder": "apple",
+    "apple_save_note": "apple",
+    "apple_read_note": "apple",
+    "apple_contacts_search": "apple",
+    "imessage_check": "messaging",
+    "imessage_read": "messaging",
+    "imessage_send": "messaging",
+    "imessage_search_contacts": "messaging",
     "web_search": "research",
     "research_topic": "research",
     "execute_plan": "orchestrator",
@@ -879,6 +898,71 @@ def _load_linkedin_module():
         return None
 
 
+_commitments_mod = None
+_trello_mod = None
+_apple_mod = None
+
+
+def _load_commitments_module():
+    global _commitments_mod
+    if _commitments_mod is not None:
+        return _commitments_mod
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_commitments", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _commitments_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: commitments module load failed ({e})\n")
+        return None
+
+
+def _load_trello_module():
+    global _trello_mod
+    if _trello_mod is not None:
+        return _trello_mod
+    src = BIN_DIR / "jarvis-trello.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-trello.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_trello", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _trello_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: trello module load failed ({e})\n")
+        return None
+
+
+def _load_apple_module():
+    global _apple_mod
+    if _apple_mod is not None:
+        return _apple_mod
+    src = BIN_DIR / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_apple", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _apple_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: apple module load failed ({e})\n")
+        return None
+
+
 def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None]:
     """Run text through jarvis-style.apply_style if the module + profile
     are present. Returns (final_text, style_result) — style_result is None
@@ -1423,6 +1507,220 @@ def _tool_linkedin_search(args: dict, _mem: Memory) -> dict:
     if not query:
         return {"error": "query is required"}
     return mod.linkedin_search(query)
+
+
+# ── Commitment handlers ────────────────────────────────────────────
+def _tool_extract_commitments(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments module not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    return mod.extract_commitments(
+        text,
+        source=args.get("source") or "claude",
+        related_contact=args.get("related_contact"),
+    )
+
+
+def _tool_add_commitment(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments module not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    return mod.add_commitment(
+        text,
+        owner=args.get("owner") or "watson",
+        due=args.get("due"),
+        priority=args.get("priority") or "normal",
+        related_contact=args.get("related_contact"),
+        tags=args.get("tags") or None,
+    )
+
+
+def _tool_list_commitments(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments module not installed"}
+    return mod.list_commitments(
+        status=args.get("status"),
+        owner=args.get("owner"),
+        related_contact=args.get("related_contact"),
+        days_ahead=args.get("days_ahead"),
+        limit=int(args.get("limit") or 50),
+    )
+
+
+def _tool_complete_commitment(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments module not installed"}
+    needle = (args.get("name_or_id") or args.get("text") or args.get("id") or "").strip()
+    if not needle:
+        return {"error": "name_or_id is required"}
+    return mod.complete_commitment(needle)
+
+
+def _tool_commitment_report(_args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments module not installed"}
+    return mod.commitment_report()
+
+
+# ── Trello handlers ────────────────────────────────────────────────
+def _tool_trello_sync(_args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello module not installed"}
+    return mod.trello_sync()
+
+
+def _tool_trello_boards(args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello module not installed"}
+    return mod.trello_boards(
+        board_id=args.get("board_id"),
+        include_cards=bool(args.get("include_cards")),
+    )
+
+
+def _tool_trello_add(args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello module not installed"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.trello_add(
+        name,
+        list_id=args.get("list_id"),
+        list_name=args.get("list_name") or args.get("list"),
+        due=args.get("due"),
+        desc=args.get("desc"),
+    )
+
+
+def _tool_trello_move(args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello module not installed"}
+    card_id = (args.get("card_id") or "").strip()
+    if not card_id:
+        return {"error": "card_id is required"}
+    return mod.trello_move(
+        card_id,
+        list_id=args.get("list_id"),
+        list_name=args.get("list_name") or args.get("list"),
+    )
+
+
+# ── Apple handlers ─────────────────────────────────────────────────
+def _tool_apple_add_reminder(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    return mod.apple_add_reminder(text, due=args.get("due"),
+                                  notes=args.get("notes"))
+
+
+def _tool_apple_list_reminders(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    return mod.apple_list_reminders(
+        include_completed=bool(args.get("include_completed")),
+        limit=int(args.get("limit") or 50),
+    )
+
+
+def _tool_apple_complete_reminder(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    needle = (args.get("name_or_id") or args.get("text") or "").strip()
+    if not needle:
+        return {"error": "name_or_id is required"}
+    return mod.apple_complete_reminder(needle)
+
+
+def _tool_apple_save_note(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    title = (args.get("title") or "").strip()
+    if not title:
+        return {"error": "title is required"}
+    return mod.apple_save_note(
+        title, body=args.get("body") or "",
+        append=bool(args.get("append")),
+    )
+
+
+def _tool_apple_read_note(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    title = (args.get("title") or "").strip()
+    if not title:
+        return {"error": "title is required"}
+    return mod.apple_read_note(title)
+
+
+def _tool_apple_contacts_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    return mod.apple_contacts_search(query, limit=int(args.get("limit") or 8))
+
+
+# ── iMessage handlers ──────────────────────────────────────────────
+def _tool_imessage_check(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    return mod.imessage_check(hours=int(args.get("hours") or 24))
+
+
+def _tool_imessage_read(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    handle = (args.get("handle") or "").strip()
+    if not handle:
+        return {"error": "handle is required"}
+    return mod.imessage_read(handle, limit=int(args.get("limit") or 20))
+
+
+def _tool_imessage_send(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    handle = (args.get("handle") or "").strip()
+    message = (args.get("message") or "").strip()
+    if not handle or not message:
+        return {"error": "handle and message required"}
+    return mod.imessage_send(handle, message, confirm=bool(args.get("confirm")))
+
+
+def _tool_imessage_search_contacts(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple module not installed"}
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required"}
+    return mod.imessage_search_contacts(query, limit=int(args.get("limit") or 12))
 
 
 # Tool registry — name → (handler, schema)
@@ -2588,6 +2886,385 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                         "type": "string",
                         "description": "Free text — company, role, skill, location.",
                     },
+                },
+                "required": ["query"],
+            },
+        },
+    ),
+    "extract_commitments": (
+        _tool_extract_commitments,
+        {
+            "name": "extract_commitments",
+            "description": (
+                "Haiku-extract commitments (concrete to-dos Watson or "
+                "someone else just agreed to) from a block of text. "
+                "Inserts each unique one into the canonical store. Use "
+                "after a meeting transcript, a long email, or when "
+                "Watson dictates plans. Idempotent — re-running on the "
+                "same text won't duplicate."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Block to scan."},
+                    "source": {"type": "string",
+                               "description": "Origin label (claude, email, "
+                                              "imessage, telegram, manual)."},
+                    "related_contact": {"type": "string",
+                                         "description": "Default contact name "
+                                                        "if the text doesn't "
+                                                        "name one."},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "add_commitment": (
+        _tool_add_commitment,
+        {
+            "name": "add_commitment",
+            "description": (
+                "Record one concrete commitment Watson said aloud — "
+                "'remind me to send the term sheet to Corbin tomorrow'. "
+                "Accepts natural-language `due` ('tomorrow', 'next monday', "
+                "'in 2 weeks', 'by Friday') or ISO dates. Use whenever "
+                "Watson asks to track or be reminded of a specific task."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "owner": {"type": "string",
+                              "description": "watson | other (who owes the action)"},
+                    "due": {"type": "string",
+                            "description": "ISO date or natural phrase, optional."},
+                    "priority": {"type": "string",
+                                  "description": "high | normal | low"},
+                    "related_contact": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "list_commitments": (
+        _tool_list_commitments,
+        {
+            "name": "list_commitments",
+            "description": (
+                "List Watson's commitments. Use for 'what's on my plate', "
+                "'what's due today', 'what do I owe Corbin', 'what's "
+                "overdue'. days_ahead=0 → today; days_ahead=7 → this "
+                "week; status='overdue' shows everything past due."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"description": "open|done|overdue|cancelled "
+                                              "or list of those"},
+                    "owner": {"type": "string",
+                              "description": "watson | other"},
+                    "related_contact": {"type": "string"},
+                    "days_ahead": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    ),
+    "complete_commitment": (
+        _tool_complete_commitment,
+        {
+            "name": "complete_commitment",
+            "description": (
+                "Mark a commitment done. Resolves by id, id-prefix, or "
+                "fuzzy substring of text. Returns ambiguity errors when "
+                "more than one open commitment matches — read the "
+                "candidates back to Watson and ask which."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string"},
+                },
+                "required": ["name_or_id"],
+            },
+        },
+    ),
+    "commitment_report": (
+        _tool_commitment_report,
+        {
+            "name": "commitment_report",
+            "description": (
+                "Briefing-shaped summary: overdue, due today, due this "
+                "week, recently completed. Cheap — no API call. Use as "
+                "part of a wrap-up or when Watson asks 'how am I doing "
+                "on my list'."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "trello_sync": (
+        _tool_trello_sync,
+        {
+            "name": "trello_sync",
+            "description": (
+                "Bidirectional sync between the commitment store and the "
+                "configured Trello board. Pushes new commitments as cards, "
+                "pulls completed cards back as done commitments. Run on "
+                "Watson's explicit ask ('sync my Trello') or as part of "
+                "the self-improvement pass."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "trello_boards": (
+        _tool_trello_boards,
+        {
+            "name": "trello_boards",
+            "description": (
+                "List Trello boards (no args) or drill into one board's "
+                "lists with `board_id`. Set include_cards=true to also "
+                "return the cards on each list."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "board_id": {"type": "string"},
+                    "include_cards": {"type": "boolean"},
+                },
+            },
+        },
+    ),
+    "trello_add": (
+        _tool_trello_add,
+        {
+            "name": "trello_add",
+            "description": (
+                "Create a card on a Trello list. Use list_name='todo' / "
+                "'doing' / 'done' to hit the configured role mapping, or "
+                "pass list_id directly. Watson voice path: 'add a card "
+                "for X' goes here."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "list_id": {"type": "string"},
+                    "list_name": {"type": "string"},
+                    "due": {"type": "string"},
+                    "desc": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "trello_move": (
+        _tool_trello_move,
+        {
+            "name": "trello_move",
+            "description": (
+                "Move a Trello card between lists. Useful when Watson "
+                "says 'move that card to doing' / 'mark X done on Trello'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "card_id": {"type": "string"},
+                    "list_id": {"type": "string"},
+                    "list_name": {"type": "string"},
+                },
+                "required": ["card_id"],
+            },
+        },
+    ),
+    "apple_add_reminder": (
+        _tool_apple_add_reminder,
+        {
+            "name": "apple_add_reminder",
+            "description": (
+                "Create a reminder in the 'Jarvis' list in Apple "
+                "Reminders. Use when Watson says 'remind me to X' and "
+                "wants the iOS reminder cascade (lock-screen, watch, "
+                "notification). For a tracked commitment that should "
+                "also feed reports + Trello, use add_commitment instead."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "due": {"type": "string",
+                            "description": "ISO date / datetime, optional."},
+                    "notes": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "apple_list_reminders": (
+        _tool_apple_list_reminders,
+        {
+            "name": "apple_list_reminders",
+            "description": (
+                "List pending reminders in the 'Jarvis' list. Pair with "
+                "list_commitments when Watson asks 'what reminders do I "
+                "have' to cover both surfaces."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "include_completed": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    ),
+    "apple_complete_reminder": (
+        _tool_apple_complete_reminder,
+        {
+            "name": "apple_complete_reminder",
+            "description": (
+                "Mark a reminder in the 'Jarvis' list completed. Fuzzy "
+                "matches by name when an exact id isn't provided."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string"},
+                },
+                "required": ["name_or_id"],
+            },
+        },
+    ),
+    "apple_save_note": (
+        _tool_apple_save_note,
+        {
+            "name": "apple_save_note",
+            "description": (
+                "Create or update a note in the 'Jarvis' folder of Apple "
+                "Notes. Use for 'save this to notes', 'jot this down', "
+                "'add to my notes'. append=true tacks on to an existing "
+                "note instead of replacing."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "append": {"type": "boolean"},
+                },
+                "required": ["title"],
+            },
+        },
+    ),
+    "apple_read_note": (
+        _tool_apple_read_note,
+        {
+            "name": "apple_read_note",
+            "description": (
+                "Read a note from the 'Jarvis' folder by title (case-"
+                "insensitive substring). Returns plain-text body."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                },
+                "required": ["title"],
+            },
+        },
+    ),
+    "apple_contacts_search": (
+        _tool_apple_contacts_search,
+        {
+            "name": "apple_contacts_search",
+            "description": (
+                "Search Apple Contacts for a name fragment. Returns "
+                "phones + emails + organization, useful for backfilling "
+                "a Jarvis contact record before drafting a message."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    ),
+    "imessage_check": (
+        _tool_imessage_check,
+        {
+            "name": "imessage_check",
+            "description": (
+                "Recent inbound iMessages, grouped by handle. Use when "
+                "Watson asks 'check my messages', 'any new texts', "
+                "'anything from Karina on iMessage'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer",
+                              "description": "Lookback window (default 24)."},
+                },
+            },
+        },
+    ),
+    "imessage_read": (
+        _tool_imessage_read,
+        {
+            "name": "imessage_read",
+            "description": (
+                "Read recent message history with one handle (phone OR "
+                "email). Returns oldest→newest so it reads like a "
+                "transcript. Useful before drafting a reply."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["handle"],
+            },
+        },
+    ),
+    "imessage_send": (
+        _tool_imessage_send,
+        {
+            "name": "imessage_send",
+            "description": (
+                "Send an iMessage. Two-stage: confirm=false returns a "
+                "preview Watson reads aloud, confirm=true actually sends. "
+                "Use the same flow as send_email / send_telegram."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string",
+                               "description": "Phone (+15551234567) or email."},
+                    "message": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["handle", "message"],
+            },
+        },
+    ),
+    "imessage_search_contacts": (
+        _tool_imessage_search_contacts,
+        {
+            "name": "imessage_search_contacts",
+            "description": (
+                "Resolve a name fragment to an iMessage handle by "
+                "searching the local chat history. Use when Watson says "
+                "'send Karina an iMessage' and the contact record "
+                "doesn't have a phone on file."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
                 "required": ["query"],
             },

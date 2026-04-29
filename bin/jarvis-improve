@@ -77,7 +77,7 @@ case "$mode" in
         tail -30 "$LOG" 2>/dev/null || echo "(no log yet)"
         echo ""
         echo "=== module status ==="
-        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator style contacts network linkedin reconcile; do
+        for sys in feedback metacog autopsy patterns skills synthesize evolve orchestrator style contacts network linkedin commitments trello apple reconcile; do
             stamp=""
             case "$sys" in
                 feedback)     stamp=$(stat -f %Sm "$ASSISTANT_DIR/feedback/profile.json" 2>/dev/null || echo "(none)") ;;
@@ -108,6 +108,21 @@ case "$mode" in
                                   stamp=$(python3 -c "import json,glob; ps=glob.glob('$ASSISTANT_DIR/linkedin/profiles/*.json'); c=sum(1 for p in ps if json.load(open(p)).get('in_contacts')); print(f'profiles={len(ps)} contacts={c} linkedin_only={len(ps)-c}')" 2>/dev/null || echo "(unreadable)")
                               else
                                   stamp="(none)"
+                              fi ;;
+                commitments)  if [[ -f "$ASSISTANT_DIR/commitments/items.json" ]]; then
+                                  stamp=$(python3 -c "import json; d=json.load(open('$ASSISTANT_DIR/commitments/items.json')); s={}; [s.update({r.get('status'):s.get(r.get('status'),0)+1}) for r in d]; print(f\"total={len(d)} {' '.join(f'{k}={v}' for k,v in s.items())}\")" 2>/dev/null || echo "(unreadable)")
+                              else
+                                  stamp="(none)"
+                              fi ;;
+                trello)       if [[ -f "$ASSISTANT_DIR/trello/config.json" ]]; then
+                                  stamp=$(python3 -c "import json; d=json.load(open('$ASSISTANT_DIR/trello/config.json')); print(f\"board={d.get('board_name','?')} roles={','.join((d.get('list_map') or {}).keys())}\")" 2>/dev/null || echo "(unreadable)")
+                              else
+                                  stamp="(not configured)"
+                              fi ;;
+                apple)        if [[ -f "$ASSISTANT_DIR/apple/state.json" ]]; then
+                                  stamp=$(stat -f %Sm "$ASSISTANT_DIR/apple/state.json" 2>/dev/null || echo "(none)")
+                              else
+                                  stamp="(idle)"
                               fi ;;
                 reconcile)    if [[ -f "$ASSISTANT_DIR/state/capability-reconciliation.json" ]]; then
                                   stamp=$(python3 -c "import json; d=json.load(open('$ASSISTANT_DIR/state/capability-reconciliation.json')); flagged=d.get('flagged',[]); print(f\"caps={len(d.get('capabilities',{}))} flagged={','.join(flagged) if flagged else '(none)'}\")" 2>/dev/null || echo "(unreadable)")
@@ -187,6 +202,93 @@ network_path=$(locate_script "jarvis-network.py")
 # per run so a large connection set spreads across the week.
 linkedin_path=$(locate_script "jarvis-linkedin.py")
 [[ -n "$linkedin_path" ]] && run_step "linkedin" "$PYTHON" "$linkedin_path"
+
+# Commitment refresh — promotes anything past its due date to status
+# 'overdue' so list_commitments + briefing reflect reality. Cheap (file
+# scan, no API). Always runs.
+commitments_path=$(locate_script "jarvis-commitments.py")
+[[ -n "$commitments_path" ]] && run_step "commitments" "$PYTHON" "$commitments_path"
+
+# Trello sync — bidirectional. No-ops without TRELLO_API_KEY +
+# TRELLO_TOKEN configured (and a setup-wizard run). When configured,
+# this is one round-trip per pass to keep the board mirrored.
+trello_path=$(locate_script "jarvis-trello.py")
+[[ -n "$trello_path" ]] && run_step "trello" "$PYTHON" "$trello_path"
+
+# Reminders sync — push every open commitment that isn't already on
+# Apple Reminders to the 'Jarvis' list, so the iPhone fires a real
+# notification. Lightweight wrapper around apple_add_reminder. Skips on
+# non-macOS automatically.
+apple_path=$(locate_script "jarvis-apple.py")
+if [[ -n "$apple_path" && -n "$commitments_path" ]]; then
+    run_step "reminders-sync" "$PYTHON" - <<'PY'
+import importlib.util, json, os, sys
+from pathlib import Path
+bin_dir = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis"))) / "bin"
+def load(name):
+    src = bin_dir / name
+    if not src.exists():
+        src = Path(__file__).resolve().parent / name if False else None
+        # script is invoked via PYTHON; bin dir is the deployed source
+    if not src or not src.exists():
+        # fall back to repo location
+        for cand in (Path.cwd() / "bin" / name,):
+            if cand.exists():
+                src = cand
+                break
+    if not src or not src.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_").replace(".py",""), src)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+ap = load("jarvis-apple.py")
+cm = load("jarvis-commitments.py")
+if ap is None or cm is None:
+    print("reminders-sync: skipped (modules missing)")
+    sys.exit(0)
+gate = ap._apple_gate()
+if gate:
+    print(f"reminders-sync: {gate.get('error')}")
+    sys.exit(0)
+items = cm._load_items()
+pushed = 0
+for rec in items:
+    if rec.get("status") not in ("open", "overdue"):
+        continue
+    if (rec.get("synced_to") or {}).get("reminders_id"):
+        continue
+    res = ap.apple_add_reminder(rec.get("text") or "(untitled)",
+                                due=rec.get("due"))
+    if isinstance(res, dict) and res.get("ok"):
+        rid = (res.get("reminder") or {}).get("id")
+        if rid:
+            rec.setdefault("synced_to", {})["reminders_id"] = rid
+            pushed += 1
+if pushed:
+    cm._save_items(items)
+print(json.dumps({"pushed": pushed}))
+PY
+fi
+
+# Overdue-commitment alerts — push commitments past their due date
+# tied to inner_circle / trusted contacts into the smart-notification
+# bus so they interrupt the next time Watson lights up. Cheap; only
+# fires when there's something to surface.
+notif_path=$(locate_script "jarvis-notifications.py")
+if [[ -n "$notif_path" && -n "$commitments_path" ]]; then
+    run_step "overdue-alerts" "$PYTHON" -c "
+import importlib.util, os
+from pathlib import Path
+bin_dir = Path(os.environ.get('ASSISTANT_DIR', str(Path.home() / '.jarvis'))) / 'bin'
+src = bin_dir / 'jarvis-notifications.py'
+if not src.exists():
+    src = Path.cwd() / 'bin' / 'jarvis-notifications.py'
+spec = importlib.util.spec_from_file_location('jn', src)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.enqueue_overdue_commitments())
+"
+fi
 
 # Tier 2: heavier tasks. Each script's should_run() decides whether to fire
 # (interval / session-count thresholds). --heavy bypasses with --force.

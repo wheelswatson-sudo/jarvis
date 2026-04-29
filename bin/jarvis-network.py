@@ -169,6 +169,13 @@ def _linkedin():
     return _cache["linkedin"]
 
 
+def _apple():
+    if "apple" not in _cache:
+        _cache["apple"] = _load_module("jarvis_apple_for_network",
+                                        "jarvis-apple.py", _BIN_SEARCH)
+    return _cache["apple"]
+
+
 def _emit(action: str, status: str, **ctx) -> None:
     p = _primitive()
     if p is None:
@@ -649,22 +656,93 @@ def enrich_network(force: bool = False) -> dict:
     # call merges skills + industry into the contact record in place.
     li_calls = _linkedin_pass(people, force=force)
 
+    # Apple pass — fold iMessage interaction counts into the strength
+    # signal, and backfill missing phones/emails from Apple Contacts
+    # when a contact doesn't have one yet. No-ops on non-macOS.
+    apple_signals = _apple_pass(people)
+
     _save_people(people)
     elapsed = int((time.monotonic() - started) * 1000)
     _emit("enrich_network", "success" if not errors else "failed",
           enriched=enriched, skipped=skipped, haiku_calls=haiku_calls,
-          linkedin_calls=li_calls, errors_count=len(errors))
+          linkedin_calls=li_calls, apple_signals=apple_signals,
+          errors_count=len(errors))
     _log(f"enrich_network: enriched={enriched} skipped={skipped} "
-         f"haiku={haiku_calls} linkedin={li_calls} errors={len(errors)} "
-         f"({elapsed}ms)")
+         f"haiku={haiku_calls} linkedin={li_calls} apple={apple_signals} "
+         f"errors={len(errors)} ({elapsed}ms)")
     return {
         "ok": True,
         "enriched": enriched,
         "skipped": skipped,
         "haiku_calls": haiku_calls,
         "linkedin_calls": li_calls,
+        "apple_signals": apple_signals,
         "errors": errors,
     }
+
+
+def _apple_pass(people: dict) -> int:
+    """Fold iMessage activity into each contact's interaction signal,
+    and backfill missing phones/emails from Apple Contacts. Skips
+    silently when the apple module isn't available (non-macOS) or the
+    contact has no resolvable handle. Returns the number of contacts
+    that received an Apple-side update."""
+    ap = _apple()
+    if ap is None:
+        return 0
+    try:
+        gate = ap._apple_gate()  # type: ignore[attr-defined]
+    except Exception:
+        gate = {"error": "apple gate not callable"}
+    if gate:
+        return 0
+
+    bumped = 0
+    backfill_cap = int(os.environ.get("JARVIS_NETWORK_APPLE_BACKFILL_CAP", "4"))
+    backfill_used = 0
+    for k, rec in people.items():
+        # 1. iMessage interaction signal — bumps interaction_count and
+        # last_interaction so the strength formula picks up the channel.
+        try:
+            sig = ap.interaction_signal_for_contact(rec, hours=72)  # type: ignore[attr-defined]
+        except Exception:
+            sig = None
+        if isinstance(sig, dict) and (sig.get("count") or 0) > 0:
+            rec["interaction_count"] = (rec.get("interaction_count") or 0) + int(sig["count"])
+            last = sig.get("last_ts")
+            if last and (not rec.get("last_interaction")
+                         or last > rec["last_interaction"]):
+                rec["last_interaction"] = last
+                rec["last_channel"] = "imessage"
+            bumped += 1
+
+        # 2. Apple Contacts backfill — only when the record is missing
+        # both phone and email. Capped per run so we don't pop the
+        # AppleScript dialog more than necessary.
+        if (not rec.get("email")) and (not rec.get("phone")) \
+                and backfill_used < backfill_cap:
+            name = rec.get("name") or ""
+            if not name:
+                continue
+            try:
+                res = ap.apple_contacts_search(name, limit=1)  # type: ignore[attr-defined]
+            except Exception:
+                res = None
+            backfill_used += 1
+            if not isinstance(res, dict) or not res.get("ok"):
+                continue
+            matches = res.get("matches") or []
+            if not matches:
+                continue
+            m = matches[0]
+            if m.get("emails") and not rec.get("email"):
+                rec["email"] = m["emails"][0]
+            if m.get("phones") and not rec.get("phone"):
+                rec["phone"] = m["phones"][0]
+            if m.get("organization") and not rec.get("organization"):
+                rec["organization"] = m["organization"]
+            bumped += 1
+    return bumped
 
 
 def _linkedin_pass(people: dict, force: bool = False) -> int:

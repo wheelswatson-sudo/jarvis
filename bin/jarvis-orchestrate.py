@@ -355,6 +355,97 @@ def _tool_research_topic(args: dict) -> dict:
     return mod.research_topic(topic, depth=depth)
 
 
+_commitments_mod_cached = None
+
+
+def _commitments():
+    global _commitments_mod_cached
+    if _commitments_mod_cached is not None:
+        return _commitments_mod_cached
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_commitments_orch", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _commitments_mod_cached = mod
+        return mod
+    except Exception:
+        return None
+
+
+_apple_mod_cached = None
+
+
+def _apple():
+    global _apple_mod_cached
+    if _apple_mod_cached is not None:
+        return _apple_mod_cached
+    src = BIN_DIR / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_apple_orch", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _apple_mod_cached = mod
+        return mod
+    except Exception:
+        return None
+
+
+def _tool_list_commitments(args: dict) -> dict:
+    mod = _commitments()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    return mod.list_commitments(
+        status=args.get("status"),
+        owner=args.get("owner"),
+        related_contact=args.get("related_contact"),
+        days_ahead=args.get("days_ahead"),
+        limit=int(args.get("limit") or 50),
+    )
+
+
+def _tool_commitment_report(_args: dict) -> dict:
+    mod = _commitments()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    return mod.commitment_report()
+
+
+def _tool_imessage_check(args: dict) -> dict:
+    mod = _apple()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    return mod.imessage_check(hours=int(args.get("hours") or 24))
+
+
+def _tool_imessage_read(args: dict) -> dict:
+    mod = _apple()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    handle = (args.get("handle") or "").strip()
+    if not handle:
+        return {"error": "handle is required"}
+    return mod.imessage_read(handle, limit=int(args.get("limit") or 20))
+
+
+def _tool_apple_list_reminders(args: dict) -> dict:
+    mod = _apple()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    return mod.apple_list_reminders(
+        include_completed=bool(args.get("include_completed")),
+        limit=int(args.get("limit") or 50),
+    )
+
+
 def _tool_synthesize(args: dict) -> dict:
     """Cheap Haiku call that combines prior outputs into a short prose
     block. The planner uses this as the final 'roll up the briefing'
@@ -394,6 +485,11 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "network_search": _tool_network_search,
     "relationship_score": _tool_relationship_score,
     "network_suggest": _tool_network_suggest,
+    "list_commitments": _tool_list_commitments,
+    "commitment_report": _tool_commitment_report,
+    "imessage_check": _tool_imessage_check,
+    "imessage_read": _tool_imessage_read,
+    "apple_list_reminders": _tool_apple_list_reminders,
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
@@ -446,6 +542,11 @@ Tools available:
 - network_search(query, filters?, limit?) — semantic search across Watson's network for skills / expertise / intro paths. Use when the goal needs "who do we know who can do X". Filters: {trust:[...], tag:[...], min_strength:0..1, recent_within_days:N}.
 - relationship_score(name) — deep per-relationship analysis: strength, trajectory, responsiveness, suggested next action with channel + timing. Use over relationship_brief when the goal is "what's the play with X" rather than "who is X".
 - network_suggest(goal) — Sonnet-backed planner for "who should I leverage to do X": picks primary + supporting contacts, suggests intro paths, sequences the approach. Heavier than network_search; use when the goal explicitly asks for a play.
+- list_commitments(status?, owner?, related_contact?, days_ahead?) — Watson's tracked commitments. Use whenever a goal needs "what does Watson owe X", "what's due before the meeting", or "what's overdue".
+- commitment_report() — overdue / due-today / due-this-week summary; cheap, no API call. Lead with this in any "what's on my plate" plan.
+- imessage_check(hours?) — recent inbound iMessages grouped by handle. Use for prep when Watson's about to talk to someone he texts.
+- imessage_read(handle, limit?) — message history with one handle, oldest→newest. Use when context for a reply matters.
+- apple_list_reminders(include_completed?) — pending reminders in the 'Jarvis' list. Pair with list_commitments when the goal touches reminders the iPhone might already hold.
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.

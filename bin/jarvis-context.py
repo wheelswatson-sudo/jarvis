@@ -297,6 +297,54 @@ def _linkedin_hint(user_text: str | None = None) -> str:
         return ""
 
 
+def _commitments_hint(user_text: str | None = None) -> str:
+    """When a contact is named, surface any open commitments tied to
+    them so the model leads with 'you owe X to Karina' instead of
+    asking what to do next."""
+    if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return ""
+    names = _detect_mentioned_names(user_text or "")
+    if not names:
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jarvis_commitments_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint(mentioned_names=names) or ""
+    except Exception:
+        return ""
+
+
+def _imessage_hint(user_text: str | None = None) -> str:
+    """When a contact is named, surface any unread iMessages from them
+    so the model can proactively offer to read or reply."""
+    if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
+        return ""
+    src = ASSISTANT_DIR / "bin" / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return ""
+    names = _detect_mentioned_names(user_text or "")
+    if not names:
+        return ""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_apple_ctx", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.context_hint(mentioned_names=names) or ""
+    except Exception:
+        return ""
+
+
 def _capability_health_hint() -> str:
     """One-line hint when the reconciliation agent has flagged any capability.
     Reads ~/.jarvis/state/capability-reconciliation.json (written nightly by
@@ -410,6 +458,17 @@ class ContextEngine:
         linkedin = _linkedin_hint(self.user_text)
         if linkedin:
             lines.append(linkedin)
+
+        # Commitments hint — open commitments with a mentioned contact.
+        commitments = _commitments_hint(self.user_text)
+        if commitments:
+            lines.append(commitments)
+
+        # iMessage hint — unread inbound messages from a mentioned
+        # contact. Empty when nothing is sitting unread.
+        imessage = _imessage_hint(self.user_text)
+        if imessage:
+            lines.append(imessage)
 
         body = "\n".join(lines).strip()
         if not body:

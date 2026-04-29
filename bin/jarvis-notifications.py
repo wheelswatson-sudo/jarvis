@@ -84,6 +84,8 @@ DEFAULT_SOURCE_WEIGHTS = {
     "telegram": 3,
     "social": 2,
     "linkedin": 2,
+    "imessage": 3,
+    "commitments": 3,
     "email": 2,
     "timer": 4,
     "reminder": 4,
@@ -234,6 +236,65 @@ def _load_linkedin():
     except Exception as e:
         _log(f"linkedin module load failed: {e}")
         return None
+
+
+def _load_commitments():
+    """Lazy-load jarvis-commitments. None if missing."""
+    src = _bin_dir() / "jarvis-commitments.py"
+    if not src.exists():
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "jarvis_commitments_notif", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception as e:
+        _log(f"commitments module load failed: {e}")
+        return None
+
+
+def enqueue_overdue_commitments() -> dict:
+    """Push overdue commitments tied to inner_circle / trusted contacts
+    into the bus as high-priority notifications. Idempotent — keyed off
+    a content prefix so the same overdue isn't enqueued twice in a row.
+
+    Used by jarvis-improve so overdue items from important contacts
+    interrupt rather than batch."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    cmt = _load_commitments()
+    if cmt is None:
+        return {"ok": True, "enqueued": 0, "reason": "no commitments module"}
+    try:
+        items = cmt.overdue_inner_circle_alerts()  # type: ignore[attr-defined]
+    except Exception as e:
+        _log(f"overdue alerts failed: {e}")
+        return {"ok": False, "error": str(e)}
+    if not items:
+        return {"ok": True, "enqueued": 0}
+
+    queue = _load_queue()
+    existing_keys = {(n.get("source"), n.get("content"))
+                     for n in queue if n.get("state") == "pending"}
+    enqueued = 0
+    for it in items:
+        content = (f"OVERDUE: {it.get('text')}"
+                   + (f" (was due {it['due']})" if it.get("due") else "")
+                   + f" — {it.get('related_contact')}")
+        key = ("commitments", content)
+        if key in existing_keys:
+            continue
+        try:
+            enqueue(source="commitments", content=content,
+                    sender=it.get("related_contact"),
+                    time_sensitivity=2)
+            enqueued += 1
+        except Exception as e:
+            _log(f"enqueue overdue {it.get('commitment_id')}: {e}")
+    return {"ok": True, "enqueued": enqueued}
 
 
 def _trust_to_importance(trust: str) -> int | None:

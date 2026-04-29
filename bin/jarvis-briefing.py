@@ -550,6 +550,46 @@ def _linkedin_changes_section() -> str:
         return ""
 
 
+def _commitments_section() -> str:
+    """Pull the 'Commitments' markdown block — overdue, due today, due
+    this week. Empty when nothing pressing."""
+    if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
+        return ""
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "jarvis_commitments_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
+def _imessages_section() -> str:
+    """Pull the 'iMessages' subsection — unread inbound from contacts.
+    Empty when nothing is sitting unread."""
+    if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
+        return ""
+    src = BIN_DIR / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "jarvis_apple_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
 def _format_markdown(payload: dict, briefing_text: str) -> str:
     """The .md file is the canonical record. Header has metadata, body is
     the spoken text, footer has the structured payload for debugging."""
@@ -558,12 +598,18 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
         f"_Generated: {payload['generated_at']}_\n\n"
     )
     spoken = "## Spoken briefing\n\n" + briefing_text.strip() + "\n\n"
+    commitments = _commitments_section()
+    if commitments:
+        spoken += commitments + "\n"
     relationships = _relationship_alerts_section()
     if relationships:
         spoken += relationships + "\n"
     linkedin = _linkedin_changes_section()
     if linkedin:
         spoken += linkedin + "\n"
+    imessages = _imessages_section()
+    if imessages:
+        spoken += imessages + "\n"
     health = _system_health_section()
     if health:
         spoken += health + "\n"
