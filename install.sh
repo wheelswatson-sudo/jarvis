@@ -59,13 +59,18 @@ fi
 echo ""
 
 # ─── Install files ────────────────────────────────────────────────────
-mkdir -p "$ASSISTANT_DIR/bin" "$ASSISTANT_DIR/config" "$ASSISTANT_DIR/cache" "$ASSISTANT_DIR/hooks" "$ASSISTANT_DIR/memory"
+mkdir -p "$ASSISTANT_DIR/bin" "$ASSISTANT_DIR/lib" "$ASSISTANT_DIR/config" \
+         "$ASSISTANT_DIR/cache" "$ASSISTANT_DIR/hooks" "$ASSISTANT_DIR/memory" \
+         "$ASSISTANT_DIR/state"
 
-# If running from cloned repo, copy everything in bin/ — not just jarvis.
+# If running from cloned repo, copy everything in bin/ + lib/ — not just jarvis.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -d "$SCRIPT_DIR/bin" ]]; then
     echo -e "  ${CYAN}Installing from local files...${NC}"
     cp "$SCRIPT_DIR"/bin/* "$ASSISTANT_DIR/bin/"
+    if [[ -d "$SCRIPT_DIR/lib" ]]; then
+        cp "$SCRIPT_DIR"/lib/* "$ASSISTANT_DIR/lib/"
+    fi
     cp -R "$SCRIPT_DIR"/hooks/* "$ASSISTANT_DIR/hooks/" 2>/dev/null || true
     cp "$SCRIPT_DIR/config/personality.md" "$ASSISTANT_DIR/config/personality.md"
 else

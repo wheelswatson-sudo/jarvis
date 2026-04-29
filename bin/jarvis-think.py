@@ -92,6 +92,75 @@ memory_mod = _load_memory_module()
 Memory = memory_mod.Memory
 
 
+# ── outcome ledger: best-effort import; emit() is a no-op when missing ──
+LIB_DIR = ASSISTANT_DIR / "lib"
+
+
+def _load_ledger_module():
+    src = LIB_DIR / "outcome_ledger.py"
+    if not src.exists():
+        # development worktree fallback: repo lib/ is sibling to bin/
+        src = Path(__file__).parent.parent / "lib" / "outcome_ledger.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("outcome_ledger", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_ledger_mod = _load_ledger_module()
+
+
+# Bucketing for the outcome ledger. Tools without an entry get bucketed by
+# their tool name (so e.g. `recall` rolls up under `recall`); the six working
+# capabilities cluster their related tools so reconciliation health is reported
+# per capability, not per tool.
+TOOL_CAPABILITY_MAP: dict[str, str] = {
+    "remember": "memory",
+    "recall": "memory",
+    "read_memory_file": "memory",
+    "search_contacts": "contacts",
+    "lookup_contact": "contacts",
+    "relationship_brief": "contacts",
+    "enrich_contact": "contacts",
+    "check_email": "email",
+    "draft_email": "email",
+    "send_email": "email",
+    "reply_email": "email",
+    "check_calendar": "calendar",
+    "create_event": "calendar",
+    "update_event": "calendar",
+    "delete_event": "calendar",
+    "check_telegram": "telegram",
+    "telegram_digest": "telegram",
+    "telegram_search": "telegram",
+    "send_telegram": "telegram",
+    "check_social": "social",
+    "social_digest": "social",
+    "social_search": "social",
+    "social_post": "social",
+    "social_reply": "social",
+    "web_search": "research",
+    "research_topic": "research",
+    "execute_plan": "orchestrator",
+    "get_briefing": "briefing",
+    "check_notifications": "notifications",
+    "dismiss_notification": "notifications",
+    "notification_preferences": "notifications",
+    "style_apply": "style",
+    "style_status": "style",
+    "set_timer": "timer",
+    "set_reminder": "timer",
+    "run_command": "shell",
+    "get_time": "clock",
+    "get_date": "clock",
+}
+
+
 # ── context module: lazy-loaded, optional. Disabled if file missing. ──
 _context_mod = None
 
@@ -3066,12 +3135,50 @@ def _parallel_think(api_key: str, model: str,
     return ""
 
 
+def _ledger_status_for(result: dict) -> str:
+    """Map a tool result dict to one of the ledger status enum values.
+
+    `error` → failed. `needs_confirmation` → pending_confirm (irreversible
+    tools refusing to fire without user yes). Otherwise → success."""
+    if not isinstance(result, dict):
+        return "success"
+    if result.get("error"):
+        return "failed"
+    if result.get("needs_confirmation"):
+        return "pending_confirm"
+    return "success"
+
+
+def _ledger_context_for(name: str, args: dict, result: dict) -> dict:
+    """Build a small, non-PII context blob for the ledger row. We capture
+    the tool name plus a few well-known identifier fields so the
+    reconciliation agent can group failures by recipient/thread/event."""
+    ctx: dict = {"tool": name}
+    if isinstance(args, dict):
+        for k in ("to", "thread_id", "event_id", "platform", "group_name",
+                  "query", "topic", "name", "draft_id", "item_id"):
+            v = args.get(k)
+            if isinstance(v, (str, int)) and v != "":
+                ctx[k] = v
+    if isinstance(result, dict):
+        for k in ("message_id", "draft_id", "thread_id", "event_id",
+                  "id", "count"):
+            v = result.get(k)
+            if isinstance(v, (str, int)) and v != "":
+                ctx.setdefault(f"r_{k}", v)
+        if result.get("error"):
+            ctx["error"] = str(result["error"])[:200]
+    return ctx
+
+
 def _execute_one_tool(b: dict, mem) -> dict:
     """Execute a single tool_use block and return the matching tool_result
     dict. Pulled into its own function so both the sequential and parallel
-    paths share identical error semantics."""
+    paths share identical error semantics. Wraps each call with timing +
+    outcome-ledger emit so every tool invocation lands in the audit trail."""
     name = b.get("name")
     args = b.get("input") or {}
+    started = time.monotonic()
     handler_pair = TOOLS.get(name)
     if not handler_pair:
         result = {"error": f"unknown tool: {name}"}
@@ -3081,6 +3188,21 @@ def _execute_one_tool(b: dict, mem) -> dict:
             result = handler(args, mem)
         except Exception as e:
             result = {"error": f"tool {name} failed: {e}"}
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if _ledger_mod is not None:
+        try:
+            cap = TOOL_CAPABILITY_MAP.get(name or "", name or "unknown")
+            _ledger_mod.emit(
+                cap=cap,
+                action=name or "unknown",
+                status=_ledger_status_for(result if isinstance(result, dict) else {}),
+                context=_ledger_context_for(name or "", args, result if isinstance(result, dict) else {}),
+                latency_ms=elapsed_ms,
+            )
+        except Exception:
+            pass
+
     return {
         "type": "tool_result",
         "tool_use_id": b.get("id"),

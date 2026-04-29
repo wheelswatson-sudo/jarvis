@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# jarvis-emit — append one structured outcome to ~/.jarvis/state/outcome-ledger.jsonl
+#
+# Usage:
+#   jarvis-emit --cap email-triage --action "drafted reply" --status success
+#   jarvis-emit --cap email-triage --action "drafted reply" --status pending_confirm \
+#               --context '{"thread_id":"abc123"}' --latency-ms 1200
+#
+# Status values: success | failed | pending_confirm | skipped
+# Context must be a JSON object string. --latency-ms is optional.
+#
+# Falls back gracefully when the Python ledger module is missing (so cron and
+# shell scripts can blast emit calls without worrying about a partial install).
+
+set -euo pipefail
+
+ASSISTANT_DIR="${ASSISTANT_DIR:-$HOME/.jarvis}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+# Resolve outcome_ledger.py: deployed lib/ wins, repo lib/ as worktree fallback.
+LEDGER=""
+for candidate in \
+    "$ASSISTANT_DIR/lib/outcome_ledger.py" \
+    "$SCRIPT_DIR/../lib/outcome_ledger.py" \
+    "$SCRIPT_DIR/outcome_ledger.py"; do
+    if [[ -f "$candidate" ]]; then
+        LEDGER="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$LEDGER" ]]; then
+    echo "jarvis-emit: outcome_ledger.py not found" >&2
+    exit 0  # Telemetry is non-fatal — exit 0 so callers don't break.
+fi
+
+PYTHON="${JARVIS_PYTHON:-python3}"
+[[ -x "$ASSISTANT_DIR/venv/bin/python3" ]] && PYTHON="$ASSISTANT_DIR/venv/bin/python3"
+
+exec "$PYTHON" "$LEDGER" emit "$@"

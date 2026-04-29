@@ -59,6 +59,27 @@ ORCH_LOG = LOG_DIR / "orchestrator.log"
 ORCH_DIR = ASSISTANT_DIR / "orchestrator"
 RUNS_DIR = ORCH_DIR / "runs"
 
+LIB_DIR = ASSISTANT_DIR / "lib"
+
+
+def _load_ledger():
+    src = LIB_DIR / "outcome_ledger.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "outcome_ledger.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("outcome_ledger", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_ledger_mod = _load_ledger()
+
+
 PLANNER_MODEL = os.environ.get("JARVIS_ORCH_PLANNER_MODEL", "claude-sonnet-4-6")
 SYNTH_MODEL = os.environ.get("JARVIS_ORCH_SYNTH_MODEL", "claude-sonnet-4-6")
 MAX_TASKS = int(os.environ.get("JARVIS_ORCH_MAX_TASKS", "8"))
@@ -708,7 +729,7 @@ def execute_plan(goal: str) -> dict:
             "duration_s": run.get("timings", {}).get(tid, 0.0),
         })
 
-    return {
+    final = {
         "ok": run.get("ok", False),
         "summary": summary,
         "rationale": plan_obj.get("rationale", ""),
@@ -716,6 +737,32 @@ def execute_plan(goal: str) -> dict:
         "errors": run.get("errors", []),
         "run_path": str(run_path) if run_path else None,
     }
+
+    # Ledger: one record per execute_plan with the full task graph summary so
+    # reconciliation can attribute orchestrator drift to specific sub-tools.
+    if _ledger_mod is not None:
+        try:
+            total_ms = int(sum(
+                float(v) for v in (run.get("timings") or {}).values()
+                if isinstance(v, (int, float))
+            ) * 1000)
+            _ledger_mod.emit(
+                cap="orchestrator",
+                action="execute_plan",
+                status="success" if final["ok"] else "failed",
+                latency_ms=total_ms,
+                context={
+                    "goal": goal[:200],
+                    "task_count": len(task_summary),
+                    "tools": [t["tool"] for t in task_summary],
+                    "failed_task_ids": [t["id"] for t in task_summary if not t["ok"]],
+                    "run_path": final["run_path"],
+                },
+            )
+        except Exception:
+            pass
+
+    return final
 
 
 # ── Stats / metacognition hook for jarvis-improve ───────────────────
