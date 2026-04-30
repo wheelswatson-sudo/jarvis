@@ -25,6 +25,7 @@ Public tools (returned by jarvis-think):
 
   Contacts:
     apple_contacts_search(query)
+    apple_contacts_list_all()        # full-dump for jarvis-contacts sync
 
 Hooks for the rest of the assistant:
 
@@ -919,6 +920,76 @@ def apple_contacts_search(query: str, limit: int = 8) -> dict:
             "matches": matches[:max(1, int(limit))]}
 
 
+# ── PUBLIC: apple_contacts_list_all ───────────────────────────────────
+def apple_contacts_list_all() -> dict:
+    """Dump every person in Contacts.app: name, phones, emails, org.
+    Used by jarvis-contacts sync to make Apple Contacts the source of
+    truth for who exists in Watson's relationship memory.
+
+    Implemented in JXA so output is JSON — survives names/orgs that
+    contain pipes, commas, or newlines, and gracefully handles records
+    with `missing value` on name / phone / email / organization."""
+    gate = _apple_gate()
+    if gate:
+        return gate
+    script = r"""
+        const Contacts = Application('Contacts');
+        // Bulk-fetch each property as a single Apple Event — orders of
+        // magnitude faster than per-person attribute access on stores
+        // with hundreds of contacts. Each `Contacts.people.X()` call
+        // returns an array aligned by index across the four properties.
+        let names = [], orgs = [], phs = [], ems = [];
+        try { names = Contacts.people.name(); } catch (e) {}
+        try { orgs = Contacts.people.organization(); } catch (e) {}
+        try { phs = Contacts.people.phones.value(); } catch (e) {}
+        try { ems = Contacts.people.emails.value(); } catch (e) {}
+        const out = [];
+        const norm = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : '';
+        const flat = (a) => Array.isArray(a)
+            ? a.map(norm).filter(Boolean)
+            : (typeof a === 'string' ? [norm(a)].filter(Boolean) : []);
+        for (let i = 0; i < names.length; i++) {
+            const name = norm(names[i]);
+            if (!name) continue;
+            const org = norm(orgs && orgs[i]);
+            const phones = flat(phs && phs[i]);
+            const emails = flat(ems && ems[i]);
+            out.push({ name, phones, emails, organization: org || null });
+        }
+        JSON.stringify(out);
+    """
+    # Apple Contacts can have thousands of records; allow a generous
+    # timeout (default 2 min) overridable via JARVIS_CONTACTS_LIST_TIMEOUT.
+    # Bulk fetch typically completes in <10s for ~600 contacts.
+    timeout_s = float(os.environ.get("JARVIS_CONTACTS_LIST_TIMEOUT", "120"))
+    rc, out, err = _run_jxa(script, timeout=timeout_s)
+    if rc != 0:
+        return {"error": f"contacts list failed: {err or 'rc=' + str(rc)}"}
+    if not out.strip():
+        return {"ok": True, "count": 0, "contacts": []}
+    try:
+        contacts = json.loads(out)
+    except json.JSONDecodeError as e:
+        return {"error": f"contacts list parse failed: {e}"}
+    if not isinstance(contacts, list):
+        return {"error": "contacts list returned non-list payload"}
+    # Final sanity pass: drop any malformed entries silently.
+    cleaned: list[dict] = []
+    for c in contacts:
+        if not isinstance(c, dict):
+            continue
+        nm = (c.get("name") or "").strip()
+        if not nm:
+            continue
+        cleaned.append({
+            "name": nm,
+            "phones": [p.strip() for p in (c.get("phones") or []) if isinstance(p, str) and p.strip()],
+            "emails": [e.strip() for e in (c.get("emails") or []) if isinstance(e, str) and e.strip()],
+            "organization": (c.get("organization") or None) if isinstance(c.get("organization"), str) and c.get("organization").strip() else None,
+        })
+    return {"ok": True, "count": len(cleaned), "contacts": cleaned}
+
+
 # ── briefing + context + notification + network hooks ─────────────────
 def briefing_section() -> str:
     """Markdown 'iMessages' subsection — unread inbound messages only,
@@ -1095,6 +1166,7 @@ def _cli() -> int:
     # Contacts
     pcs = sub.add_parser("contacts-search")
     pcs.add_argument("query")
+    sub.add_parser("contacts-list-all")
 
     # Hooks (smoke testing)
     sub.add_parser("briefing-section")
@@ -1137,6 +1209,9 @@ def _cli() -> int:
         return 0
     if args.cmd == "contacts-search":
         _dump(apple_contacts_search(args.query))
+        return 0
+    if args.cmd == "contacts-list-all":
+        _dump(apple_contacts_list_all())
         return 0
     if args.cmd == "briefing-section":
         s = briefing_section()

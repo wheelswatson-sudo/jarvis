@@ -28,6 +28,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -201,6 +202,9 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "lookup_contact": "contacts",
     "relationship_brief": "contacts",
     "enrich_contact": "contacts",
+    "contact_sync": "contacts",
+    "apollo_enrich": "contacts",
+    "approve_message": "approval",
     "check_email": "email",
     "draft_email": "email",
     "send_email": "email",
@@ -1429,6 +1433,215 @@ def _tool_enrich_contact(args: dict, _mem: Memory) -> dict:
     if not name:
         return {"error": "name is required"}
     return mod.enrich_contact(name, force=bool(args.get("force")))
+
+
+def _tool_contact_sync(args: dict, _mem: Memory) -> dict:
+    """Sync from Apple Contacts — Apple is the source of truth for who
+    exists in Jarvis's relationship memory."""
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    if not hasattr(mod, "sync_from_apple_contacts"):
+        return {"error": "contacts module is too old; missing sync_from_apple_contacts"}
+    enrich = args.get("enrich")
+    enrich = True if enrich is None else bool(enrich)
+    limit = args.get("limit")
+    limit = int(limit) if limit not in (None, "") else None
+    return mod.sync_from_apple_contacts(enrich=enrich, limit=limit)
+
+
+def _tool_apollo_enrich(args: dict, _mem: Memory) -> dict:
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    if not hasattr(mod, "apollo_enrich"):
+        return {"error": "contacts module is too old; missing apollo_enrich"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.apollo_enrich(name, force=bool(args.get("force")))
+
+
+# ── approve_message: outbound message gate ─────────────────────────────
+APPROVALS_DIR = ASSISTANT_DIR / "approvals"
+APPROVALS_FILE = APPROVALS_DIR / "pending.json"
+APPROVAL_TTL_S = 24 * 3600  # auto-expire pending approvals after 24h
+
+
+def _load_pending_approvals() -> dict:
+    if not APPROVALS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(APPROVALS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # Drop expired entries on read.
+    now = time.time()
+    out = {}
+    for k, v in data.items():
+        try:
+            ts = datetime.fromisoformat(v.get("created_at", "")).timestamp()
+        except Exception:
+            ts = 0
+        if now - ts < APPROVAL_TTL_S:
+            out[k] = v
+    return out
+
+
+def _save_pending_approvals(data: dict) -> None:
+    APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = APPROVALS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, APPROVALS_FILE)
+
+
+def _dispatch_approved_message(rec: dict) -> dict:
+    """When the user approves, fire the underlying channel send tool."""
+    channel = rec.get("channel")
+    recipient = rec.get("recipient") or ""
+    draft = rec.get("draft") or ""
+    subject = rec.get("subject") or ""
+    if channel == "email":
+        mod = _load_email_module()
+        if mod is None:
+            return {"error": "jarvis-email module not installed"}
+        return mod.send_email(to=recipient, subject=subject, body=draft, confirm=True)
+    if channel == "imessage":
+        mod = _load_apple_module()
+        if mod is None:
+            return {"error": "jarvis-apple module not installed"}
+        return mod.imessage_send(recipient, draft, confirm=True)
+    if channel == "telegram":
+        mod = _load_telegram_module()
+        if mod is None:
+            return {"error": "jarvis-telegram module not installed"}
+        return mod.send_telegram(recipient, draft, confirm=True)
+    if channel == "social":
+        # Recipient encodes "platform:item_id" so we can route to the
+        # right cached post (twitter/linkedin/etc.) without a separate
+        # field. Mirrors the social_reply tool signature.
+        mod = _load_social_module()
+        if mod is None:
+            return {"error": "jarvis-social module not installed"}
+        if not hasattr(mod, "social_reply"):
+            return {"error": "jarvis-social is missing social_reply"}
+        platform, _, item_id = recipient.partition(":")
+        if not platform or not item_id:
+            return {"error": "social recipient must be 'platform:item_id' "
+                             "(e.g. 'twitter:abc123')"}
+        return mod.social_reply(platform=platform, item_id=item_id,
+                                message=draft, confirm=True)
+    return {"error": f"approve_message can't dispatch channel {channel!r} yet"}
+
+
+def _tool_approve_message(args: dict, _mem: Memory) -> dict:
+    """Two-phase outbound-message gate.
+
+    Phase 1 — submit a draft for approval:
+        approve_message(channel, recipient, draft, [subject])
+        Persists the draft, returns voice-prompt copy for Jarvis to read
+        aloud, and asks the user to say 'send' / 'change' / 'cancel'.
+
+    Phase 2 — record the user's decision:
+        approve_message(approval_id, decision="approve"|"reject")
+        On 'approve', dispatches via the channel's send tool (with
+        confirm=True) and clears the pending entry.
+        On 'reject', clears the pending entry without sending.
+    """
+    decision = (args.get("decision") or "").strip().lower()
+    approval_id = (args.get("approval_id") or "").strip()
+
+    # Phase 2 — decision on existing approval.
+    if decision or approval_id:
+        if not approval_id:
+            return {"error": "approval_id is required when decision is provided"}
+        if decision not in ("approve", "reject"):
+            return {"error": "decision must be 'approve' or 'reject'"}
+        pending = _load_pending_approvals()
+        rec = pending.get(approval_id)
+        if not rec:
+            return {"error": f"no pending approval with id {approval_id!r} "
+                             f"(may have expired after 24h)"}
+        if decision == "reject":
+            pending.pop(approval_id, None)
+            _save_pending_approvals(pending)
+            return {"ok": True, "decision": "rejected", "approval_id": approval_id}
+        # Approved — dispatch and clear.
+        sent = _dispatch_approved_message(rec)
+        pending.pop(approval_id, None)
+        _save_pending_approvals(pending)
+        return {
+            "ok": bool(sent.get("sent") or sent.get("ok")),
+            "decision": "approved",
+            "approval_id": approval_id,
+            "channel": rec.get("channel"),
+            "recipient": rec.get("recipient"),
+            "send_result": sent,
+        }
+
+    # Phase 1 — new draft submission.
+    channel = (args.get("channel") or "").strip().lower()
+    recipient = (args.get("recipient") or "").strip()
+    draft = (args.get("draft") or "").strip()
+    subject = (args.get("subject") or "").strip()
+    if channel not in ("email", "imessage", "telegram", "social"):
+        return {"error": "channel must be one of: email, imessage, telegram, social"}
+    if not recipient:
+        return {"error": "recipient is required"}
+    if not draft:
+        return {"error": "draft is required"}
+    if channel == "email" and not subject:
+        return {"error": "subject is required for email drafts"}
+    if channel == "social" and ":" not in recipient:
+        return {"error": "for channel='social', recipient must be "
+                         "'platform:item_id' (e.g. 'twitter:abc123' from "
+                         "the cached post that's being replied to)"}
+
+    aid = secrets.token_urlsafe(8)
+    pending = _load_pending_approvals()
+    pending[aid] = {
+        "id": aid,
+        "channel": channel,
+        "recipient": recipient,
+        "subject": subject or None,
+        "draft": draft,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    _save_pending_approvals(pending)
+
+    channel_label = {
+        "email": "an email",
+        "imessage": "an iMessage",
+        "telegram": "a Telegram",
+        "social": "a social reply",
+    }[channel]
+    if channel == "email":
+        prompt = (f"I have {channel_label} for {recipient} — "
+                  f"subject {subject!r}. Should I read the draft, "
+                  f"send it, or change it?")
+    else:
+        preview = draft if len(draft) <= 240 else draft[:237] + "..."
+        prompt = (f"I have {channel_label} for {recipient}: {preview!r}. "
+                  f"Send it, or change it?")
+    return {
+        "ok": True,
+        "awaiting_approval": True,
+        "approval_id": aid,
+        "channel": channel,
+        "recipient": recipient,
+        "subject": subject or None,
+        "draft": draft,
+        "voice_prompt": prompt,
+        "next_action": (
+            "Read the voice_prompt aloud and wait for Watson to respond. "
+            "If he says 'send' / 'yes' / 'approved', call approve_message "
+            f"again with approval_id={aid!r} and decision='approve'. If he "
+            "says 'change' / 'reject' / 'no', call with decision='reject' "
+            "and then redraft."
+        ),
+    }
 
 
 def _tool_style_apply(args: dict, _mem: Memory) -> dict:
@@ -2893,6 +3106,122 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                               "description": "Re-synthesize even if fresh."},
                 },
                 "required": ["name"],
+            },
+        },
+    ),
+    "contact_sync": (
+        _tool_contact_sync,
+        {
+            "name": "contact_sync",
+            "description": (
+                "Sync Apple Contacts → Jarvis. Apple Contacts is the "
+                "source of truth for who exists; LinkedIn-only "
+                "connections are ignored. Adds new records for people "
+                "not yet on file, patches in missing email/phone/org "
+                "for existing records, and (when APOLLO_API_KEY is set) "
+                "auto-enriches each NEW record via Apollo.io. Never "
+                "deletes. Use when Watson says 'sync my contacts', "
+                "'pull from Apple Contacts', or after he adds a batch "
+                "of new contacts on his phone."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "enrich": {
+                        "type": "boolean",
+                        "description": "If true (default), call Apollo on each new record."
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Cap total contacts processed; useful for testing."
+                    },
+                },
+            },
+        },
+    ),
+    "apollo_enrich": (
+        _tool_apollo_enrich,
+        {
+            "name": "apollo_enrich",
+            "description": (
+                "Look up one contact in Apollo.io's People Match API "
+                "and patch in title, seniority, LinkedIn URL, phone, "
+                "and organization. Costs 1 Apollo credit. Use when "
+                "Watson asks to 'enrich X', 'pull X's title', or "
+                "'who does X work for'. Skips silently if APOLLO_API_KEY "
+                "isn't set or the contact was enriched within the last 7 "
+                "days (use force=true to override)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "force": {"type": "boolean",
+                              "description": "Bypass the 7-day freshness check."},
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "approve_message": (
+        _tool_approve_message,
+        {
+            "name": "approve_message",
+            "description": (
+                "Two-phase outbound-message gate. ALWAYS use this BEFORE "
+                "sending any text/email/telegram/social message on Watson's "
+                "behalf — never call send_email / imessage_send / "
+                "send_telegram / social_reply directly without an approval "
+                "round-trip first.\n\n"
+                "Phase 1 (submit a draft): pass `channel`, `recipient`, "
+                "`draft` (and `subject` for email). Returns a voice_prompt "
+                "for Jarvis to read aloud and an `approval_id` token. "
+                "Speak the prompt and WAIT for Watson's reply.\n\n"
+                "Phase 2 (record his decision): pass `approval_id` plus "
+                "`decision`='approve' or 'reject'. On 'approve' the gate "
+                "fires the channel's send_* tool with confirm=true and "
+                "returns the result. On 'reject' the gate just clears "
+                "the pending entry — Watson will dictate the revision next."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "enum": ["email", "imessage", "telegram", "social"],
+                        "description": "Outbound channel. Required for Phase 1."
+                    },
+                    "recipient": {
+                        "type": "string",
+                        "description": (
+                            "Email address, iMessage handle (phone or "
+                            "email), telegram group name, or — for "
+                            "channel='social' — the cached post "
+                            "identifier formatted as 'platform:item_id' "
+                            "(e.g. 'twitter:abc123'). Required for Phase 1."
+                        )
+                    },
+                    "draft": {
+                        "type": "string",
+                        "description": "The message body Jarvis composed. Required for Phase 1."
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Email subject line. Required when channel=email."
+                    },
+                    "approval_id": {
+                        "type": "string",
+                        "description": "Token from Phase 1. Required for Phase 2."
+                    },
+                    "decision": {
+                        "type": "string",
+                        "enum": ["approve", "reject"],
+                        "description": (
+                            "Watson's verdict. 'approve' fires the send. "
+                            "'reject' clears the pending draft."
+                        )
+                    },
+                },
             },
         },
     ),
