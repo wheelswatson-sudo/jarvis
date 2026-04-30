@@ -4777,7 +4777,7 @@ def _load_history() -> dict:
     if not HISTORY_FILE.exists():
         return _empty_data()
     try:
-        with HISTORY_FILE.open() as f:
+        with HISTORY_FILE.open(encoding="utf-8") as f:
             raw = json.load(f)
     except Exception:
         return _empty_data()
@@ -4801,8 +4801,10 @@ def _load_history() -> dict:
 
 def _save_history(data: dict) -> None:
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with HISTORY_FILE.open("w") as f:
+    tmp = HISTORY_FILE.with_suffix(HISTORY_FILE.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, HISTORY_FILE)
 
 
 def _maybe_summarize(data: dict, api_key: str) -> None:
