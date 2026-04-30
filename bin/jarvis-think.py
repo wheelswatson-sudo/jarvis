@@ -1500,6 +1500,21 @@ def _dispatch_approved_message(rec: dict) -> dict:
         if mod is None:
             return {"error": "jarvis-telegram module not installed"}
         return mod.send_telegram(recipient, draft, confirm=True)
+    if channel == "social":
+        # Recipient encodes "platform:item_id" so we can route to the
+        # right cached post (twitter/linkedin/etc.) without a separate
+        # field. Mirrors the social_reply tool signature.
+        mod = _load_social_module()
+        if mod is None:
+            return {"error": "jarvis-social module not installed"}
+        if not hasattr(mod, "social_reply"):
+            return {"error": "jarvis-social is missing social_reply"}
+        platform, _, item_id = recipient.partition(":")
+        if not platform or not item_id:
+            return {"error": "social recipient must be 'platform:item_id' "
+                             "(e.g. 'twitter:abc123')"}
+        return mod.social_reply(platform=platform, item_id=item_id,
+                                message=draft, confirm=True)
     return {"error": f"approve_message can't dispatch channel {channel!r} yet"}
 
 
@@ -1561,6 +1576,10 @@ def _tool_approve_message(args: dict, _mem: Memory) -> dict:
         return {"error": "draft is required"}
     if channel == "email" and not subject:
         return {"error": "subject is required for email drafts"}
+    if channel == "social" and ":" not in recipient:
+        return {"error": "for channel='social', recipient must be "
+                         "'platform:item_id' (e.g. 'twitter:abc123' from "
+                         "the cached post that's being replied to)"}
 
     aid = secrets.token_urlsafe(8)
     pending = _load_pending_approvals()
@@ -3157,9 +3176,11 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "recipient": {
                         "type": "string",
                         "description": (
-                            "Email address, iMessage handle (phone or email), "
-                            "telegram @handle, or social platform target. "
-                            "Required for Phase 1."
+                            "Email address, iMessage handle (phone or "
+                            "email), telegram group name, or — for "
+                            "channel='social' — the cached post "
+                            "identifier formatted as 'platform:item_id' "
+                            "(e.g. 'twitter:abc123'). Required for Phase 1."
                         )
                     },
                     "draft": {
