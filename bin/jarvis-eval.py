@@ -115,9 +115,16 @@ def _local_call(endpoint: str, model_id: str, system: str, user_text: str,
     msg = (resp.get("choices") or [{}])[0].get("message") or {}
     text = msg.get("content") or ""
     # If the server already parsed Hermes tool_calls, surface them.
+    # Local Hermes/Qwen models routinely emit malformed JSON in `arguments`
+    # — fall back to an empty dict so the eval keeps measuring the model
+    # instead of crashing the suite.
     for tc in msg.get("tool_calls") or []:
         f = tc.get("function") or {}
-        text += f"\n<tool_call>{json.dumps({'name': f.get('name'), 'arguments': json.loads(f.get('arguments') or '{}')}, ensure_ascii=False)}</tool_call>"
+        try:
+            args = json.loads(f.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        text += f"\n<tool_call>{json.dumps({'name': f.get('name'), 'arguments': args}, ensure_ascii=False)}</tool_call>"
     return text, resp, latency_ms
 
 
