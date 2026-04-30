@@ -1,17 +1,19 @@
 import { NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '../../../lib/supabase/server'
+import {
+  DEFAULT_MODEL_ID,
+  getModel,
+  streamCompletion,
+  type ChatMessage,
+} from '../../../lib/providers'
 import type { Commitment, Contact, Interaction } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
-const MODEL = 'claude-sonnet-4-6'
 const MAX_TOKENS = 1024
 const MAX_CONTACTS_IN_CONTEXT = 40
 const MAX_COMMITMENTS_IN_CONTEXT = 30
 const MAX_INTERACTIONS_IN_CONTEXT = 20
-
-type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 type RelationshipContext = {
   userName: string
@@ -276,6 +278,37 @@ ${interactionsBlock}
 When ${userName} asks "who should I reach out to", "what's cooling", or "what I owe people", answer from the data above — don't ask them to remind you.`
 }
 
+async function loadModelAndKey(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+): Promise<{ model: ReturnType<typeof getModel>; apiKey: string } | { error: string }> {
+  const [profileRes, keysRes] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('preferred_model')
+      .eq('id', userId)
+      .maybeSingle(),
+    supabase
+      .from('user_api_keys')
+      .select('provider, api_key, is_active')
+      .eq('user_id', userId)
+      .eq('is_active', true),
+  ])
+
+  const model = getModel(profileRes.data?.preferred_model ?? DEFAULT_MODEL_ID)
+
+  const userKey = (keysRes.data ?? []).find((k) => k.provider === model.provider)
+  if (userKey?.api_key) return { model, apiKey: userKey.api_key }
+
+  if (model.provider === 'anthropic' && process.env.ANTHROPIC_API_KEY) {
+    return { model, apiKey: process.env.ANTHROPIC_API_KEY }
+  }
+
+  return {
+    error: `No API key configured for ${model.provider}. Add one in Settings.`,
+  }
+}
+
 export async function POST(request: Request) {
   const supabase = await createClient()
   const {
@@ -283,14 +316,6 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser()
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'ANTHROPIC_API_KEY not configured' },
-      { status: 500 },
-    )
   }
 
   let body: { message?: unknown; messages?: unknown }
@@ -312,6 +337,11 @@ export async function POST(request: Request) {
     messages = [{ role: 'user', content: single }]
   }
 
+  const resolved = await loadModelAndKey(supabase, user.id)
+  if ('error' in resolved) {
+    return NextResponse.json({ error: resolved.error }, { status: 400 })
+  }
+
   const meta = (user.user_metadata ?? {}) as Record<string, unknown>
   const userMetaName =
     typeof meta.full_name === 'string'
@@ -323,25 +353,20 @@ export async function POST(request: Request) {
   const context = await loadContext(supabase, user.email ?? '', userMetaName)
   const systemPrompt = buildSystemPrompt(context)
 
-  const client = new Anthropic({ apiKey })
-  const stream = client.messages.stream({
-    model: MODEL,
-    max_tokens: MAX_TOKENS,
-    system: systemPrompt,
-    messages,
-  })
-
+  const abortController = new AbortController()
   const encoder = new TextEncoder()
   const readable = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        for await (const event of stream) {
-          if (
-            event.type === 'content_block_delta' &&
-            event.delta.type === 'text_delta'
-          ) {
-            controller.enqueue(encoder.encode(event.delta.text))
-          }
+        for await (const chunk of streamCompletion({
+          apiKey: resolved.apiKey,
+          model: resolved.model,
+          system: systemPrompt,
+          messages: messages!,
+          maxTokens: MAX_TOKENS,
+          signal: abortController.signal,
+        })) {
+          controller.enqueue(encoder.encode(chunk))
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Stream error'
@@ -351,7 +376,7 @@ export async function POST(request: Request) {
       }
     },
     cancel() {
-      stream.controller.abort()
+      abortController.abort()
     },
   })
 

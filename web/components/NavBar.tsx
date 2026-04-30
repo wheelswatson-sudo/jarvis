@@ -10,6 +10,7 @@ const NAV = [
   { href: '/', label: 'Dashboard' },
   { href: '/commitments', label: 'Commitments' },
   { href: '/approvals', label: 'Approvals' },
+  { href: '/settings', label: 'Settings' },
 ]
 
 export function NavBar({ email }: { email: string | null }) {
