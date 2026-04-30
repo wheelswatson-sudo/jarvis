@@ -49,6 +49,20 @@ INDEX = ROOT / "index.md"
 
 DB = HOME / ".claude" / "memory-tools" / "memory.db"
 
+
+def _connect_db() -> sqlite3.Connection:
+    """Open the findings DB with WAL + a busy timeout. Findings are written
+    by both interactive (jarvis-think) and cron (improve / evolve / reconcile)
+    paths; the default rollback journal would surface as silent
+    OperationalError("database is locked") on contention."""
+    conn = sqlite3.connect(DB, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass
+    return conn
+
 VALID_TYPES = {"fact", "opinion", "belief", "hypothesis"}
 VALID_STATUSES = {
     "open",
@@ -716,7 +730,7 @@ def purge(fid: str, *, reason: str, session: str | None = None) -> bool:
 
     # Drop from FTS5 so it doesn't surface in queries or hooks.
     if DB.exists():
-        conn = sqlite3.connect(DB)
+        conn = _connect_db()
         try:
             c = conn.cursor()
             try:
@@ -769,7 +783,7 @@ def reindex_one(fid: str) -> None:
     except Exception:
         return
     DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB)
+    conn = _connect_db()
     try:
         c = conn.cursor()
         _ensure_findings_table(c)
@@ -794,7 +808,7 @@ def reindex_one(fid: str) -> None:
 
 def reindex_all() -> int:
     DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB)
+    conn = _connect_db()
     n = 0
     try:
         c = conn.cursor()
@@ -889,7 +903,7 @@ def query(text: str | None = None, *, top: int = 5,
           include_demoted: bool = False) -> list[dict]:
     if not DB.exists():
         return []
-    conn = sqlite3.connect(DB)
+    conn = _connect_db()
     rows: list = []
     try:
         c = conn.cursor()
@@ -1603,7 +1617,7 @@ def status_report() -> dict:
     fts_count = -1
     if DB.exists():
         try:
-            conn = sqlite3.connect(DB)
+            conn = _connect_db()
             try:
                 fts_count = conn.execute(
                     "SELECT COUNT(*) FROM findings_fts").fetchone()[0]
