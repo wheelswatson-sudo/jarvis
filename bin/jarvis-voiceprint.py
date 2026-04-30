@@ -82,6 +82,7 @@ def enroll(audio_path: str | Path | None = None) -> bool:
     if VoiceEncoder is None or np is None:
         return False
 
+    tmp_to_clean: str | None = None
     if audio_path is None:
         try:
             import sounddevice as sd  # type: ignore
@@ -108,26 +109,34 @@ def enroll(audio_path: str | Path | None = None) -> bool:
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(audio.tobytes())
         audio_path = tmp.name
-
-    encoder = _get_encoder()
-    if encoder is None:
-        return False
-    try:
-        wav = preprocess_wav(str(audio_path))
-        emb = encoder.embed_utterance(wav)
-    except Exception as e:
-        sys.stderr.write(f"jarvis-voiceprint: embed failed ({e})\n")
-        return False
+        tmp_to_clean = tmp.name
 
     try:
-        VOICEPRINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        np.save(VOICEPRINT_FILE, emb)
-    except OSError as e:
-        sys.stderr.write(f"jarvis-voiceprint: save failed ({e})\n")
-        return False
+        encoder = _get_encoder()
+        if encoder is None:
+            return False
+        try:
+            wav = preprocess_wav(str(audio_path))
+            emb = encoder.embed_utterance(wav)
+        except Exception as e:
+            sys.stderr.write(f"jarvis-voiceprint: embed failed ({e})\n")
+            return False
 
-    print(f"Voice enrolled. I'll only respond to you now. (file: {VOICEPRINT_FILE})", flush=True)
-    return True
+        try:
+            VOICEPRINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            np.save(VOICEPRINT_FILE, emb)
+        except OSError as e:
+            sys.stderr.write(f"jarvis-voiceprint: save failed ({e})\n")
+            return False
+
+        print(f"Voice enrolled. I'll only respond to you now. (file: {VOICEPRINT_FILE})", flush=True)
+        return True
+    finally:
+        if tmp_to_clean:
+            try:
+                os.unlink(tmp_to_clean)
+            except OSError:
+                pass
 
 
 def verify(audio_path: str | Path) -> float | None:

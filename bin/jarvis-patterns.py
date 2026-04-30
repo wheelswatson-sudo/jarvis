@@ -92,8 +92,11 @@ def _last_session_marker() -> dict:
     if not LAST_SESSION_FILE.exists():
         return {"last_idx": -1}
     try:
-        with LAST_SESSION_FILE.open() as f:
-            return json.load(f)
+        with LAST_SESSION_FILE.open(encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"last_idx": -1}
+        return data
     except (json.JSONDecodeError, OSError):
         return {"last_idx": -1}
 
@@ -101,8 +104,10 @@ def _last_session_marker() -> dict:
 def _save_session_marker(idx: int) -> None:
     try:
         PATTERNS_DIR.mkdir(parents=True, exist_ok=True)
-        with LAST_SESSION_FILE.open("w", encoding="utf-8") as f:
+        tmp = LAST_SESSION_FILE.with_suffix(LAST_SESSION_FILE.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump({"last_idx": idx, "ts": datetime.now().isoformat()}, f)
+        os.replace(tmp, LAST_SESSION_FILE)
     except OSError:
         pass
 

@@ -139,8 +139,11 @@ def _load_checkpoint() -> int:
     if not CHECKPOINT_FILE.exists():
         return -1
     try:
-        with CHECKPOINT_FILE.open() as f:
-            return int(json.load(f).get("last_user_idx", -1))
+        with CHECKPOINT_FILE.open(encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return -1
+        return int(data.get("last_user_idx", -1))
     except (json.JSONDecodeError, OSError, ValueError):
         return -1
 
@@ -148,8 +151,10 @@ def _load_checkpoint() -> int:
 def _save_checkpoint(idx: int) -> None:
     try:
         METACOG_DIR.mkdir(parents=True, exist_ok=True)
-        with CHECKPOINT_FILE.open("w", encoding="utf-8") as f:
+        tmp = CHECKPOINT_FILE.with_suffix(CHECKPOINT_FILE.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump({"last_user_idx": idx, "ts": datetime.now().isoformat()}, f)
+        os.replace(tmp, CHECKPOINT_FILE)
     except OSError:
         pass
 

@@ -194,7 +194,7 @@ def _anthropic_call(api_key: str, model: str, system: str,
             except Exception:
                 err = str(e)
             raise RuntimeError(f"API error {e.code}: {err}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             last_err = e
             if attempt < 2:
                 time.sleep(1 + attempt * 1.5)
@@ -1048,6 +1048,8 @@ def stats(window: int = 50) -> dict:
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        if not isinstance(rec, dict):
             continue
         runs += 1
         if rec.get("ok"):

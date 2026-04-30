@@ -170,8 +170,20 @@ def _ollama_chat(model: str, messages: list[dict], options: dict | None) -> dict
         data=json.dumps(payload).encode(),
         headers={"content-type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:500]
+        except Exception:
+            pass
+        raise RuntimeError(f"ollama chat HTTP {e.code}: {body or e.reason}") from e
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(f"ollama chat unreachable: {e}") from e
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"ollama chat returned non-JSON: {e}") from e
 
 
 def _ollama_health() -> dict:
