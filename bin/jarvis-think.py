@@ -5260,6 +5260,7 @@ def run_turn(user_text: str) -> str:
     # the judge can pick the best answer in an area we've been wrong on.
     parallel_gate = os.environ.get("JARVIS_PARALLEL_THINK", "1") == "1"
     low_conf_trigger = False
+    mc_mod = _load_metacog_module()
     if parallel_gate and mc_mod is not None:
         try:
             low_conf_trigger = mc_mod.domain_confidence(user_text) < 0.7
