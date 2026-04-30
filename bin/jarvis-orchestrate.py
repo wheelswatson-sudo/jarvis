@@ -1049,6 +1049,8 @@ def stats(window: int = 50) -> dict:
             rec = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
+        if not isinstance(rec, dict):
+            continue
         runs += 1
         if rec.get("ok"):
             ok_count += 1

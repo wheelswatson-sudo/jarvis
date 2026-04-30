@@ -1418,6 +1418,8 @@ def briefing_section() -> str:
         data = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return ""
+    if not isinstance(data, dict):
+        return ""
     fading = data.get("fading") or []
     follow_ups = data.get("follow_ups") or []
     intros = data.get("intro_opportunities") or []
@@ -1478,6 +1480,8 @@ def context_hint(mentioned_names: list[str] | None = None) -> str:
             data = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
         except Exception:
             return ""
+        if not isinstance(data, dict):
+            return ""
         fading = data.get("fading") or []
         inner = [f for f in fading if f.get("trust_level") == "inner_circle"]
         if inner:
@@ -1496,6 +1500,8 @@ def fading_inner_circle_priority_boost(sender: str | None) -> int:
     try:
         data = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
     except Exception:
+        return 0
+    if not isinstance(data, dict):
         return 0
     fading = data.get("fading") or []
     s = (sender or "").strip().lower().lstrip("@")
