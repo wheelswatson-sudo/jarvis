@@ -29,6 +29,8 @@ Library usage (from jarvis-think.py):
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import math
 import os
@@ -67,6 +69,18 @@ class Memory:
         self.dir = Path(dir_path) if dir_path else DEFAULT_DIR
         self.dir.mkdir(parents=True, exist_ok=True)
         self.path = self.dir / "memories.jsonl"
+        self.lock_path = self.dir / ".memories.lock"
+
+    @contextlib.contextmanager
+    def _exclusive(self):
+        """Coordinate read-modify-write across cron + interactive callers."""
+        self.lock_path.touch(exist_ok=True)
+        with self.lock_path.open("w") as lf:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
     # ── writes ────────────────────────────────────────────────────────
     def remember(self, text: str, tags: Iterable[str] | None = None,
@@ -82,30 +96,37 @@ class Memory:
         }
         if source:
             rec["source"] = source
-        # Append + fsync. Atomic for lines under PIPE_BUF on POSIX.
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            try:
-                f.flush()
-                os.fsync(f.fileno())
-            except OSError:
-                pass
+        # Append + fsync. Held under the same lock as forget() so a
+        # concurrent rewrite can't drop this record on the floor.
+        with self._exclusive():
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
         return rec
 
     def forget(self, id_prefix: str) -> int:
-        """Remove memories whose id starts with id_prefix. Returns count removed."""
+        """Remove memories whose id starts with id_prefix. Returns count removed.
+
+        Held under an exclusive flock so a concurrent remember() cannot
+        slip a new record in between the read and the rewrite (which
+        would silently drop the new memory)."""
         if not id_prefix:
             return 0
-        records = list(self.iter_records())
-        kept = [r for r in records if not r.get("id", "").startswith(id_prefix)]
-        removed = len(records) - len(kept)
-        if removed:
-            tmp = self.path.with_suffix(".jsonl.tmp")
-            with tmp.open("w", encoding="utf-8") as f:
-                for r in kept:
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            tmp.replace(self.path)
-        return removed
+        with self._exclusive():
+            records = list(self.iter_records())
+            kept = [r for r in records if not r.get("id", "").startswith(id_prefix)]
+            removed = len(records) - len(kept)
+            if removed:
+                tmp = self.path.with_suffix(".jsonl.tmp")
+                with tmp.open("w", encoding="utf-8") as f:
+                    for r in kept:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                tmp.replace(self.path)
+            return removed
 
     # ── reads ─────────────────────────────────────────────────────────
     def iter_records(self) -> Iterable[dict]:

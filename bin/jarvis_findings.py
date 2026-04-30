@@ -286,7 +286,7 @@ def write_finding(meta: dict, body: str | None = None, dest: Path | None = None,
 
 def append_event(event: dict) -> None:
     ensure_dirs()
-    with EVENTS.open("a") as f:
+    with EVENTS.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n")
 
 
@@ -962,7 +962,7 @@ def tail(n: int = 20, since: str | None = None, event: str | None = None) -> lis
         return []
     cutoff = (datetime.now(timezone.utc) - parse_window(since)) if since else None
     out = []
-    with EVENTS.open() as f:
+    with EVENTS.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
