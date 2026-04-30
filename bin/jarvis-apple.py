@@ -25,6 +25,7 @@ Public tools (returned by jarvis-think):
 
   Contacts:
     apple_contacts_search(query)
+    apple_contacts_list_all()        # full-dump for jarvis-contacts sync
 
 Hooks for the rest of the assistant:
 
@@ -919,6 +920,78 @@ def apple_contacts_search(query: str, limit: int = 8) -> dict:
             "matches": matches[:max(1, int(limit))]}
 
 
+# ── PUBLIC: apple_contacts_list_all ───────────────────────────────────
+def apple_contacts_list_all() -> dict:
+    """Dump every person in Contacts.app: name, phones, emails, org.
+    Used by jarvis-contacts sync to make Apple Contacts the source of
+    truth for who exists in Watson's relationship memory."""
+    gate = _apple_gate()
+    if gate:
+        return gate
+    script = """
+        set out to {}
+        tell application "Contacts"
+            set everyone to every person
+            repeat with p in everyone
+                set theName to name of p
+                set thePhones to {}
+                repeat with ph in (phones of p)
+                    set end of thePhones to (value of ph as string)
+                end repeat
+                set theEmails to {}
+                repeat with em in (emails of p)
+                    set end of theEmails to (value of em as string)
+                end repeat
+                set theOrg to ""
+                try
+                    set theOrg to organization of p
+                end try
+                copy {theName, thePhones, theEmails, theOrg} to end of out
+            end repeat
+        end tell
+        set AppleScript's text item delimiters to "|"
+        set lines to {}
+        repeat with rec in out
+            set theName to item 1 of rec
+            set phs to item 2 of rec
+            set ems to item 3 of rec
+            set org to item 4 of rec
+            set AppleScript's text item delimiters to ","
+            set phsJoined to phs as string
+            set emsJoined to ems as string
+            set AppleScript's text item delimiters to "|"
+            set end of lines to theName & "|" & phsJoined & "|" & emsJoined & "|" & org
+        end repeat
+        set AppleScript's text item delimiters to linefeed
+        set output to lines as string
+        set AppleScript's text item delimiters to ""
+        return output
+    """
+    rc, out, err = _run_applescript(script, timeout=60)
+    if rc != 0:
+        return {"error": f"contacts list failed: {err or 'rc=' + str(rc)}"}
+    contacts: list[dict] = []
+    if not out.strip():
+        return {"ok": True, "count": 0, "contacts": []}
+    for line in out.split("\n"):
+        line = line.rstrip("\r")
+        if not line.strip():
+            continue
+        parts = line.split("|", 3)
+        if len(parts) < 4:
+            continue
+        name, phones, emails, org = parts
+        if not name.strip():
+            continue
+        contacts.append({
+            "name": name.strip(),
+            "phones": [p.strip() for p in phones.split(",") if p.strip()],
+            "emails": [e.strip() for e in emails.split(",") if e.strip()],
+            "organization": org.strip() or None,
+        })
+    return {"ok": True, "count": len(contacts), "contacts": contacts}
+
+
 # ── briefing + context + notification + network hooks ─────────────────
 def briefing_section() -> str:
     """Markdown 'iMessages' subsection — unread inbound messages only,
@@ -1095,6 +1168,7 @@ def _cli() -> int:
     # Contacts
     pcs = sub.add_parser("contacts-search")
     pcs.add_argument("query")
+    sub.add_parser("contacts-list-all")
 
     # Hooks (smoke testing)
     sub.add_parser("briefing-section")
@@ -1137,6 +1211,9 @@ def _cli() -> int:
         return 0
     if args.cmd == "contacts-search":
         _dump(apple_contacts_search(args.query))
+        return 0
+    if args.cmd == "contacts-list-all":
+        _dump(apple_contacts_list_all())
         return 0
     if args.cmd == "briefing-section":
         s = briefing_section()

@@ -183,6 +183,8 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "lookup_contact": "contacts",
     "relationship_brief": "contacts",
     "enrich_contact": "contacts",
+    "contact_sync": "contacts",
+    "apollo_enrich": "contacts",
     "check_email": "email",
     "draft_email": "email",
     "send_email": "email",
@@ -1411,6 +1413,33 @@ def _tool_enrich_contact(args: dict, _mem: Memory) -> dict:
     if not name:
         return {"error": "name is required"}
     return mod.enrich_contact(name, force=bool(args.get("force")))
+
+
+def _tool_contact_sync(args: dict, _mem: Memory) -> dict:
+    """Sync from Apple Contacts — Apple is the source of truth for who
+    exists in Jarvis's relationship memory."""
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    if not hasattr(mod, "sync_from_apple_contacts"):
+        return {"error": "contacts module is too old; missing sync_from_apple_contacts"}
+    enrich = args.get("enrich")
+    enrich = True if enrich is None else bool(enrich)
+    limit = args.get("limit")
+    limit = int(limit) if limit not in (None, "") else None
+    return mod.sync_from_apple_contacts(enrich=enrich, limit=limit)
+
+
+def _tool_apollo_enrich(args: dict, _mem: Memory) -> dict:
+    mod = _load_contacts_module()
+    if mod is None:
+        return {"error": "jarvis-contacts module not installed"}
+    if not hasattr(mod, "apollo_enrich"):
+        return {"error": "contacts module is too old; missing apollo_enrich"}
+    name = (args.get("name") or "").strip()
+    if not name:
+        return {"error": "name is required"}
+    return mod.apollo_enrich(name, force=bool(args.get("force")))
 
 
 def _tool_style_apply(args: dict, _mem: Memory) -> dict:
@@ -2873,6 +2902,60 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "name": {"type": "string"},
                     "force": {"type": "boolean",
                               "description": "Re-synthesize even if fresh."},
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "contact_sync": (
+        _tool_contact_sync,
+        {
+            "name": "contact_sync",
+            "description": (
+                "Sync Apple Contacts → Jarvis. Apple Contacts is the "
+                "source of truth for who exists; LinkedIn-only "
+                "connections are ignored. Adds new records for people "
+                "not yet on file, patches in missing email/phone/org "
+                "for existing records, and (when APOLLO_API_KEY is set) "
+                "auto-enriches each NEW record via Apollo.io. Never "
+                "deletes. Use when Watson says 'sync my contacts', "
+                "'pull from Apple Contacts', or after he adds a batch "
+                "of new contacts on his phone."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "enrich": {
+                        "type": "boolean",
+                        "description": "If true (default), call Apollo on each new record."
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Cap total contacts processed; useful for testing."
+                    },
+                },
+            },
+        },
+    ),
+    "apollo_enrich": (
+        _tool_apollo_enrich,
+        {
+            "name": "apollo_enrich",
+            "description": (
+                "Look up one contact in Apollo.io's People Match API "
+                "and patch in title, seniority, LinkedIn URL, phone, "
+                "and organization. Costs 1 Apollo credit. Use when "
+                "Watson asks to 'enrich X', 'pull X's title', or "
+                "'who does X work for'. Skips silently if APOLLO_API_KEY "
+                "isn't set or the contact was enriched within the last 7 "
+                "days (use force=true to override)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "force": {"type": "boolean",
+                              "description": "Bypass the 7-day freshness check."},
                 },
                 "required": ["name"],
             },

@@ -21,6 +21,18 @@ can wire them straight into the tool layer):
         Pull interaction history from email + telegram + memory and
         rebuild the contact's profile via Haiku synthesis.
 
+    apollo_enrich(name, force=False) -> {ok, contact, person_id}
+        On-demand Apollo.io People Match enrichment for a single
+        contact. Patches title, seniority, LinkedIn URL, phone, org.
+        Costs 1 Apollo credit. Stdlib urllib only.
+
+    sync_from_apple_contacts(enrich=True, limit=None) -> {ok, ...}
+        Pull every person from Apple Contacts and reconcile against
+        people.json. Apple Contacts is the source of truth: contacts
+        not on file are created (and Apollo-enriched on creation when
+        APOLLO_API_KEY is set); existing records are patched with any
+        missing email/phone/org. Never deletes.
+
     update_contacts() -> {ok, enriched, skipped}
         Batch enrich every known contact whose profile is stale.
         Used by the weekly jarvis-improve pass.
@@ -33,6 +45,8 @@ CLI:
     bin/jarvis-contacts.py --lookup NAME
     bin/jarvis-contacts.py --brief NAME
     bin/jarvis-contacts.py --enrich NAME [--force]
+    bin/jarvis-contacts.py --apollo NAME [--force]
+    bin/jarvis-contacts.py --sync [--no-enrich] [--limit N]
     bin/jarvis-contacts.py --update-all
     bin/jarvis-contacts.py --add NAME [--email X] [--telegram @Y] [--rel "..."]
     bin/jarvis-contacts.py --status
@@ -117,6 +131,13 @@ def _empty_record(name: str) -> dict:
         "name": name,
         "canonical_key": _canonical(name),
         "email": None,
+        "phone": None,                   # primary phone (E.164 if available)
+        "phones": [],                    # all phones from Apple Contacts
+        "emails": [],                    # all emails from Apple Contacts
+        "organization": None,            # company / org from Apple Contacts
+        "title": None,                   # job title (from Apollo)
+        "seniority": None,               # seniority label (from Apollo)
+        "linkedin_url": None,            # canonical LinkedIn URL (from Apollo)
         "telegram_handle": None,
         "telegram_id": None,
         # Social handles — keyed by platform so future tools (digest,
@@ -137,6 +158,9 @@ def _empty_record(name: str) -> dict:
         "brief": None,                   # synthesized voice-ready summary
         "brief_updated_at": None,
         "enriched_at": None,
+        "apple_synced_at": None,         # last time we pulled from Contacts.app
+        "apollo_enriched_at": None,      # last time we hit Apollo /people/match
+        "source": None,                  # "apple_contacts" | "manual" | "imessage" | etc
     }
 
 
@@ -248,6 +272,123 @@ def _anthropic_call(api_key: str, model: str, system: str,
                 continue
             raise RuntimeError(f"network: {e}") from e
     raise RuntimeError(f"unexpected: {last_err}")
+
+
+# ── Apollo.io enrichment ────────────────────────────────────────────
+APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
+
+
+def _apollo_call(payload: dict, api_key: str, timeout: float = 12.0) -> dict:
+    """POST to Apollo's /people/match. Returns the raw JSON or {error}.
+    Stdlib urllib only — no apollo-io package needed."""
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        APOLLO_MATCH_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "X-Api-Key": api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", "replace")
+        except Exception:
+            err_body = ""
+        return {"error": f"apollo HTTP {e.code}: {err_body[:200]}"}
+    except (urllib.error.URLError, TimeoutError) as e:
+        return {"error": f"apollo network: {e}"}
+    except Exception as e:
+        return {"error": f"apollo: {e}"}
+
+
+def _apollo_enrich_record(rec: dict) -> dict:
+    """Hit Apollo /people/match using whatever identifiers we have,
+    patch missing fields onto the record. Mutates `rec` in place.
+
+    Cost: 1 Apollo credit per call. Skipped if no APOLLO_API_KEY or
+    record already enriched within ENRICH_INTERVAL_S."""
+    api_key = os.environ.get("APOLLO_API_KEY", "").strip()
+    if not api_key:
+        return {"ok": False, "skipped": True, "reason": "no APOLLO_API_KEY"}
+
+    if rec.get("apollo_enriched_at"):
+        try:
+            age = time.time() - datetime.fromisoformat(rec["apollo_enriched_at"]).timestamp()
+            if age < ENRICH_INTERVAL_S:
+                return {"ok": True, "skipped": True, "reason": "fresh"}
+        except Exception:
+            pass
+
+    payload: dict = {"reveal_personal_emails": False}
+    email = (rec.get("email") or "").strip()
+    if email:
+        payload["email"] = email
+    if rec.get("name"):
+        parts = rec["name"].split()
+        if len(parts) >= 1:
+            payload["first_name"] = parts[0]
+        if len(parts) >= 2:
+            payload["last_name"] = " ".join(parts[1:])
+    if rec.get("organization"):
+        payload["organization_name"] = rec["organization"]
+    if not (payload.get("email") or payload.get("first_name")):
+        return {"ok": False, "skipped": True, "reason": "no identifiers"}
+
+    res = _apollo_call(payload, api_key)
+    if res.get("error"):
+        _log(f"apollo enrich {rec.get('name')!r}: {res['error']}")
+        return {"ok": False, "error": res["error"]}
+
+    person = res.get("person") if isinstance(res, dict) else None
+    if not person:
+        return {"ok": False, "skipped": True, "reason": "no match"}
+
+    if not rec.get("title") and person.get("title"):
+        rec["title"] = person["title"]
+    if not rec.get("seniority") and person.get("seniority"):
+        rec["seniority"] = person["seniority"]
+    if not rec.get("linkedin_url") and person.get("linkedin_url"):
+        rec["linkedin_url"] = person["linkedin_url"]
+        rec.setdefault("social_handles", {})["linkedin"] = person["linkedin_url"]
+    org = person.get("organization") or {}
+    if not rec.get("organization") and org.get("name"):
+        rec["organization"] = org["name"]
+    if not rec.get("phone") and person.get("phone_numbers"):
+        first = person["phone_numbers"][0] if person["phone_numbers"] else None
+        if isinstance(first, dict) and first.get("sanitized_number"):
+            rec["phone"] = first["sanitized_number"]
+    rec["apollo_enriched_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    return {"ok": True, "person_id": person.get("id")}
+
+
+def apollo_enrich(name: str, force: bool = False) -> dict:
+    """On-demand Apollo enrichment for a single contact. Looks up by
+    email if we have one, otherwise by name+organization."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    if not name:
+        return {"error": "name is required"}
+    if not os.environ.get("APOLLO_API_KEY"):
+        return {"error": "APOLLO_API_KEY not set"}
+    people = _load_people()
+    hit = _resolve(name, people)
+    if not hit:
+        return {"error": f"no contact matches {name!r} — sync from Apple Contacts first"}
+    key, rec = hit
+    if force:
+        rec["apollo_enriched_at"] = None
+    res = _apollo_enrich_record(rec)
+    people[key] = rec
+    _save_people(people)
+    if res.get("ok"):
+        return {"ok": True, "contact": rec, "person_id": res.get("person_id")}
+    return {"ok": False, "contact": rec, **{k: v for k, v in res.items() if k != "ok"}}
 
 
 # ── History harvesters ──────────────────────────────────────────────
@@ -649,6 +790,151 @@ def update_contacts() -> dict:
     return {"ok": True, "enriched": enriched, "skipped": skipped, "errors": errors}
 
 
+# ── Public: sync_from_apple_contacts ────────────────────────────────
+def _normalize_phone(raw: str) -> str:
+    """Strip everything but digits + leading +. Used for dedupe; the
+    raw value is preserved on the record."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if raw.startswith("+"):
+        return "+" + re.sub(r"\D", "", raw[1:])
+    return re.sub(r"\D", "", raw)
+
+
+def _phone_match(a: str, b: str) -> bool:
+    """Loose phone equality — last 10 digits match, since US contacts
+    sometimes have +1 and sometimes don't."""
+    na = _normalize_phone(a).lstrip("+")
+    nb = _normalize_phone(b).lstrip("+")
+    if not na or not nb:
+        return False
+    return na[-10:] == nb[-10:] if len(na) >= 7 and len(nb) >= 7 else na == nb
+
+
+def _resolve_apple_match(apple_rec: dict, people: dict) -> str | None:
+    """Find an existing record that already represents this Apple contact.
+    Match priority: any email overlap → any phone overlap (last-10) →
+    exact canonical name. Returns the canonical_key, or None."""
+    apple_emails = {(e or "").lower() for e in (apple_rec.get("emails") or []) if e}
+    apple_phones = apple_rec.get("phones") or []
+    canon = _canonical(apple_rec.get("name") or "")
+    for k, rec in people.items():
+        rec_emails = {(rec.get("email") or "").lower()}
+        rec_emails.update((e or "").lower() for e in (rec.get("emails") or []))
+        if apple_emails & {e for e in rec_emails if e}:
+            return k
+        rec_phones = list(rec.get("phones") or [])
+        if rec.get("phone"):
+            rec_phones.append(rec["phone"])
+        for ap in apple_phones:
+            for rp in rec_phones:
+                if _phone_match(ap, rp):
+                    return k
+        if canon and k == canon:
+            return k
+    return None
+
+
+def sync_from_apple_contacts(enrich: bool = True, limit: int | None = None) -> dict:
+    """Pull every contact from Apple Contacts.app and reconcile against
+    ~/.jarvis/contacts/people.json. Apple Contacts is the source of
+    truth for who exists; we never delete from Jarvis on sync, but we
+    do add new records and patch in missing fields (email/phone/org).
+
+    Args:
+        enrich: if True and APOLLO_API_KEY is set, run Apollo enrichment
+            on each newly-created record. Existing records are not
+            re-enriched (use --force-enrich for that).
+        limit: cap on total contacts processed; useful for testing.
+
+    Returns: {ok, scanned, created, updated, enriched, errors}.
+    """
+    gate = _gate_check()
+    if gate:
+        return gate
+    apple_mod = _load_sibling("jarvis-apple.py")
+    if apple_mod is None:
+        return {"error": "jarvis-apple module not available — sync requires macOS"}
+    if not hasattr(apple_mod, "apple_contacts_list_all"):
+        return {"error": "jarvis-apple is too old; missing apple_contacts_list_all"}
+    res = apple_mod.apple_contacts_list_all()
+    if not res.get("ok"):
+        return {"error": res.get("error") or "apple_contacts_list_all failed"}
+
+    apple_contacts = res.get("contacts") or []
+    if limit is not None:
+        apple_contacts = apple_contacts[:int(limit)]
+
+    people = _load_people()
+    created = 0
+    updated = 0
+    enriched = 0
+    errors: list[str] = []
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    for ac in apple_contacts:
+        try:
+            name = (ac.get("name") or "").strip()
+            if not name:
+                continue
+            existing_key = _resolve_apple_match(ac, people)
+            if existing_key is not None:
+                rec = people[existing_key]
+                touched = False
+                if not rec.get("email") and ac.get("emails"):
+                    rec["email"] = ac["emails"][0]
+                    touched = True
+                if not rec.get("phone") and ac.get("phones"):
+                    rec["phone"] = ac["phones"][0]
+                    touched = True
+                if ac.get("emails") and set(ac["emails"]) != set(rec.get("emails") or []):
+                    rec["emails"] = list(dict.fromkeys((rec.get("emails") or []) + ac["emails"]))
+                    touched = True
+                if ac.get("phones") and set(ac["phones"]) != set(rec.get("phones") or []):
+                    rec["phones"] = list(dict.fromkeys((rec.get("phones") or []) + ac["phones"]))
+                    touched = True
+                if not rec.get("organization") and ac.get("organization"):
+                    rec["organization"] = ac["organization"]
+                    touched = True
+                rec["apple_synced_at"] = now_iso
+                if touched:
+                    updated += 1
+                people[existing_key] = rec
+                continue
+            rec = _empty_record(name)
+            rec["emails"] = list(ac.get("emails") or [])
+            rec["phones"] = list(ac.get("phones") or [])
+            rec["email"] = rec["emails"][0] if rec["emails"] else None
+            rec["phone"] = rec["phones"][0] if rec["phones"] else None
+            rec["organization"] = ac.get("organization")
+            rec["first_seen"] = now_iso
+            rec["apple_synced_at"] = now_iso
+            rec["source"] = "apple_contacts"
+            people[rec["canonical_key"]] = rec
+            created += 1
+            if enrich and os.environ.get("APOLLO_API_KEY"):
+                ap_res = _apollo_enrich_record(rec)
+                if ap_res.get("ok"):
+                    enriched += 1
+                elif ap_res.get("error"):
+                    errors.append(f"apollo {name}: {ap_res['error']}")
+        except Exception as e:
+            errors.append(f"{ac.get('name', '?')}: {e}")
+
+    _save_people(people)
+    _log(f"apple sync: scanned={len(apple_contacts)} created={created} "
+         f"updated={updated} enriched={enriched}")
+    return {
+        "ok": True,
+        "scanned": len(apple_contacts),
+        "created": created,
+        "updated": updated,
+        "enriched": enriched,
+        "errors": errors[:20],
+    }
+
+
 # ── Public: note_interaction ────────────────────────────────────────
 def note_interaction(channel: str, handle: str, summary: str = "",
                      ts: int | None = None) -> dict:
@@ -767,11 +1053,22 @@ def add_contact(name: str, email: str | None = None,
         rec.setdefault("notes", []).insert(0,
             f"[{datetime.now().astimezone().date().isoformat()}] {notes[:240]}")
         rec["notes"] = rec["notes"][:30]
+    is_new = not people.get(key)
     if not rec.get("first_seen"):
         rec["first_seen"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    if is_new and not rec.get("source"):
+        rec["source"] = "manual"
+    apollo_status = None
+    if is_new and os.environ.get("APOLLO_API_KEY") and (rec.get("email") or rec.get("name")):
+        ap = _apollo_enrich_record(rec)
+        apollo_status = "enriched" if ap.get("ok") and not ap.get("skipped") else (
+            "skipped" if ap.get("skipped") else "error")
     people[key] = rec
     _save_people(people)
-    return {"ok": True, "key": key, "contact": rec}
+    out = {"ok": True, "key": key, "contact": rec}
+    if apollo_status:
+        out["apollo"] = apollo_status
+    return out
 
 
 # ── Status ──────────────────────────────────────────────────────────
@@ -851,6 +1148,21 @@ def _cli() -> int:
             return 2
         force = "--force" in rest
         print(json.dumps(enrich_contact(rest[0], force=force),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--apollo":
+        if not rest or rest[0].startswith("--"):
+            print("usage: --apollo NAME [--force]", file=sys.stderr)
+            return 2
+        force = "--force" in rest
+        print(json.dumps(apollo_enrich(rest[0], force=force),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--sync":
+        enrich = "--no-enrich" not in rest
+        limit_str = _flag("--limit")
+        limit = int(limit_str) if limit_str else None
+        print(json.dumps(sync_from_apple_contacts(enrich=enrich, limit=limit),
                          indent=2, ensure_ascii=False))
         return 0
     if cmd == "--update-all":
