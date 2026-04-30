@@ -133,6 +133,24 @@ def _load_primitive_module():
 _primitive_mod = _load_primitive_module()
 
 
+def _load_tool_selector_module():
+    src = LIB_DIR / "tool_selector.py"
+    if not src.exists():
+        src = Path(__file__).parent.parent / "lib" / "tool_selector.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("tool_selector", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
+
+
+_tool_selector_mod = _load_tool_selector_module()
+
+
 # ── demo-mode fixtures: optional, gated by JARVIS_DEMO=1 ──────────────
 def _load_demo_module():
     src = LIB_DIR / "demo_data.py"
@@ -5251,6 +5269,52 @@ def run_turn(user_text: str) -> str:
     voice_stream = os.environ.get("JARVIS_VOICE_STREAM") == "1"
     feeder = _TTSFeeder() if voice_stream else None
 
+    # ── Dynamic tool loading ──────────────────────────────────────────
+    # JARVIS_DYNAMIC_TOOLS=1 → keyword-classify the user text into capability
+    # groups and ship only the relevant tool subset. Saves 60-80% of the
+    # ~2.4K tool-definition tokens on simple turns. Self-healing: if the
+    # model whiffs ("I don't have a tool…"), round 0 retries once with the
+    # full toolset (text mode only — voice mode skips the retry because
+    # we've already streamed the wrong answer to the speakers).
+    dynamic_tools = (
+        os.environ.get("JARVIS_DYNAMIC_TOOLS") == "1"
+        and _tool_selector_mod is not None
+    )
+    selector_result = None
+    active_tool_schemas = tool_schemas
+    if dynamic_tools:
+        try:
+            max_tools_env = int(os.environ.get("JARVIS_DYNAMIC_TOOLS_MAX", "20"))
+        except ValueError:
+            max_tools_env = 20
+        try:
+            selector_result = _tool_selector_mod.select_tools(
+                user_text,
+                tool_schemas,
+                history_messages=history.get("messages") or [],
+                max_tools=max_tools_env,
+                ledger_module=_ledger_mod,
+            )
+            if not selector_result.fallback:
+                sel = set(selector_result.selected_names)
+                active_tool_schemas = [
+                    s for s in tool_schemas if s.get("name") in sel
+                ]
+            if os.environ.get("JARVIS_THINK_DEBUG") == "1":
+                sys.stderr.write(
+                    f"jarvis-think: dynamic-tools "
+                    f"{len(active_tool_schemas)}/{len(tool_schemas)} selected, "
+                    f"~{selector_result.tokens_saved} tokens saved "
+                    f"(groups={selector_result.matched_groups}, "
+                    f"fallback={selector_result.fallback})\n"
+                )
+        except Exception as e:
+            sys.stderr.write(
+                f"jarvis-think: tool_selector failed ({e}); using full set\n"
+            )
+            active_tool_schemas = tool_schemas
+            selector_result = None
+
     # Parallel thought streams — for open-ended/analytical queries, fan out
     # 3 calls with different framings, judge, return the winner. No tools
     # in this path; complex analysis usually doesn't need them. Falls back
@@ -5281,53 +5345,95 @@ def run_turn(user_text: str) -> str:
             return parallel_text
 
     final_text = ""
+    retried_full_tools = False
     try:
         for round_idx in range(MAX_TOOL_ROUNDS + 1):
-            round_text = ""
-            blocks: list[dict] = []
-            stop_reason: str | None = None
-            usage: dict = {}
-            try:
-                # JARVIS_LOCAL_MODEL=1 routes the inference call through the
-                # local model server first; on any error we fall through to
-                # the Anthropic path so a missing/unhealthy local model never
-                # breaks the foreground turn. Buffered (non-streaming) for
-                # the local path — TTS feeder still works on the single
-                # text_delta yield.
-                local_events = _try_local_buffered(system, convo, tool_schemas)
-                if local_events is not None:
-                    event_iter: Any = iter(local_events)
-                else:
-                    event_iter = _stream_anthropic(api_key, model, system, convo, tool_schemas)
-                for evt, payload in event_iter:
-                    if evt == "text_delta":
-                        round_text += payload
-                        if feeder:
-                            feeder.feed(payload)
-                    elif evt == "message_stop":
-                        blocks = payload["blocks"]
-                        stop_reason = payload["stop_reason"]
-                        usage = payload["usage"] or {}
-            except RuntimeError as e:
-                err_msg = f"I appear to be having a moment, sir — {e}"
-                if feeder:
-                    feeder.feed(err_msg)
-                return err_msg
+            # Retry budget: round 0 only, text-mode only, dynamic-tools only.
+            # Voice mode can't retry because the first attempt's text already
+            # left the speakers.
+            retries_left = (
+                1 if (round_idx == 0 and dynamic_tools and feeder is None
+                      and selector_result is not None
+                      and not selector_result.fallback)
+                else 0
+            )
+            while True:
+                round_text = ""
+                blocks = []
+                stop_reason = None
+                usage = {}
+                try:
+                    # JARVIS_LOCAL_MODEL=1 routes the inference call through the
+                    # local model server first; on any error we fall through to
+                    # the Anthropic path so a missing/unhealthy local model never
+                    # breaks the foreground turn. Buffered (non-streaming) for
+                    # the local path — TTS feeder still works on the single
+                    # text_delta yield.
+                    local_events = _try_local_buffered(system, convo, active_tool_schemas)
+                    if local_events is not None:
+                        event_iter: Any = iter(local_events)
+                    else:
+                        event_iter = _stream_anthropic(api_key, model, system, convo, active_tool_schemas)
+                    for evt, payload in event_iter:
+                        if evt == "text_delta":
+                            round_text += payload
+                            if feeder:
+                                feeder.feed(payload)
+                        elif evt == "message_stop":
+                            blocks = payload["blocks"]
+                            stop_reason = payload["stop_reason"]
+                            usage = payload["usage"] or {}
+                except RuntimeError as e:
+                    err_msg = f"I appear to be having a moment, sir — {e}"
+                    if feeder:
+                        feeder.feed(err_msg)
+                    return err_msg
 
-            # Optional debug: log cache effectiveness on stderr.
-            if os.environ.get("JARVIS_THINK_DEBUG") == "1" and usage:
-                sys.stderr.write(
-                    f"jarvis-think: in={usage.get('input_tokens')} "
-                    f"cache_read={usage.get('cache_read_input_tokens', 0)} "
-                    f"cache_create={usage.get('cache_creation_input_tokens', 0)} "
-                    f"out={usage.get('output_tokens')} stop={stop_reason}\n"
-                )
+                # Optional debug: log cache effectiveness on stderr.
+                if os.environ.get("JARVIS_THINK_DEBUG") == "1" and usage:
+                    sys.stderr.write(
+                        f"jarvis-think: in={usage.get('input_tokens')} "
+                        f"cache_read={usage.get('cache_read_input_tokens', 0)} "
+                        f"cache_create={usage.get('cache_creation_input_tokens', 0)} "
+                        f"out={usage.get('output_tokens')} stop={stop_reason}\n"
+                    )
 
-            text_parts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
-            raw_text = "\n".join(t for t in text_parts if t).strip() or round_text.strip()
-            final_text, think_blocks = _strip_thinking(raw_text)
-            if think_blocks:
-                _log_thinking(think_blocks)
+                text_parts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+                raw_text = "\n".join(t for t in text_parts if t).strip() or round_text.strip()
+                final_text, think_blocks = _strip_thinking(raw_text)
+                if think_blocks:
+                    _log_thinking(think_blocks)
+
+                # Self-heal: model said "I don't have a tool" → reload all
+                # tools and re-do round 0. Costs one extra call; keeps the
+                # selector safe to enable.
+                if (retries_left > 0
+                        and stop_reason != "tool_use"
+                        and _tool_selector_mod is not None
+                        and _tool_selector_mod.looks_like_tool_miss(final_text)):
+                    retries_left -= 1
+                    retried_full_tools = True
+                    active_tool_schemas = tool_schemas
+                    sys.stderr.write(
+                        "jarvis-think: tool miss detected; retrying with full toolset\n"
+                    )
+                    if _ledger_mod is not None:
+                        try:
+                            _ledger_mod.emit(
+                                cap="tool_selector",
+                                action="retry_full_tools",
+                                status="success",
+                                context={
+                                    "groups": (selector_result.matched_groups
+                                               if selector_result else []),
+                                    "selected_count": (len(selector_result.selected_names)
+                                                       if selector_result else 0),
+                                },
+                            )
+                        except Exception:
+                            pass
+                    continue
+                break
 
             if stop_reason != "tool_use":
                 break
@@ -5359,6 +5465,29 @@ def run_turn(user_text: str) -> str:
     finally:
         if feeder:
             feeder.close()
+
+    # Selector telemetry — one row per turn so cumulative savings are
+    # queryable via `outcome_ledger query --cap tool_selector`. Emitted only
+    # when the selector ran (gate on, module present).
+    if _ledger_mod is not None and selector_result is not None:
+        try:
+            _ledger_mod.emit(
+                cap="tool_selector",
+                action="select",
+                status="success",
+                context={
+                    "selected": len(active_tool_schemas),
+                    "total": len(tool_schemas),
+                    "tokens_full": selector_result.tokens_full,
+                    "tokens_selected": selector_result.tokens_selected,
+                    "tokens_saved": selector_result.tokens_saved,
+                    "groups": selector_result.matched_groups,
+                    "fallback": selector_result.fallback,
+                    "retried_full": retried_full_tools,
+                },
+            )
+        except Exception:
+            pass
 
     # Persist only the user/assistant text exchange — tool round-trip stays
     # ephemeral so conversation.json remains human-readable. History stores
