@@ -822,15 +822,21 @@ def commitment_report(week_window: int = 7) -> dict:
     due_week.sort(key=lambda r: r.get("due") or "")
     recently_done.sort(key=lambda r: r.get("completed_at") or "", reverse=True)
 
-    def short(items_: list[dict]) -> list[dict]:
-        return [{
-            "id": r["id"],
-            "text": r.get("text"),
-            "due": r.get("due"),
-            "priority": r.get("priority"),
-            "owner": r.get("owner"),
-            "related_contact": r.get("related_contact"),
-        } for r in items_]
+    def short(items_: list[dict], with_nudge: bool = False) -> list[dict]:
+        out: list[dict] = []
+        for r in items_:
+            entry = {
+                "id": r["id"],
+                "text": r.get("text"),
+                "due": r.get("due"),
+                "priority": r.get("priority"),
+                "owner": r.get("owner"),
+                "related_contact": r.get("related_contact"),
+            }
+            if with_nudge:
+                entry["nudge"] = _nudge_text(r)
+            out.append(entry)
+        return out
 
     return {
         "ok": True,
@@ -841,17 +847,46 @@ def commitment_report(week_window: int = 7) -> dict:
             "due_week": len(due_week),
             "recently_done": len(recently_done),
         },
-        "overdue": short(overdue),
-        "due_today": short(due_today),
+        "overdue": short(overdue, with_nudge=True),
+        "due_today": short(due_today, with_nudge=True),
         "due_this_week": short(due_week),
         "recently_done": short(recently_done[:8]),
     }
 
 
 # ── briefing + context + notification hooks ───────────────────────────
+def _days_overdue(due: str | None) -> int:
+    if not due:
+        return 0
+    try:
+        return (date.today() - date.fromisoformat(due)).days
+    except ValueError:
+        return 0
+
+
+def _nudge_text(rec: dict) -> str:
+    """Short, voice-ready accountability prompt for an overdue commitment.
+    Reads naturally when Jarvis speaks the briefing aloud."""
+    text = (rec.get("text") or "").strip().rstrip(".")
+    # Lowercase only the first letter so it reads as a clause inside our
+    # sentence, but preserve proper nouns later in the text.
+    if text:
+        text = text[0].lower() + text[1:]
+    who = rec.get("related_contact")
+    # Skip the "with X" suffix when the name is already in the commitment text.
+    name_already_in_text = bool(who and who.lower() in text.lower())
+    suffix = "" if (not who or name_already_in_text) else f" with {who}"
+    days = _days_overdue(rec.get("due"))
+    if days <= 0:
+        return f"You said you'd {text}{suffix} today — want to knock it out now?"
+    age = "yesterday" if days == 1 else f"{days} days ago"
+    closer = "Want me to draft a message now?" if who else "Want me to handle it?"
+    return f"You said you'd {text}{suffix} — that was due {age}. {closer}"
+
+
 def briefing_section() -> str:
-    """Markdown 'Commitments' block — overdue first, due today, due this
-    week. Empty when there's nothing on the plate."""
+    """Markdown 'Commitments' block — overdue first (with nudge text), due
+    today, due this week. Empty when there's nothing on the plate."""
     rep = commitment_report()
     if not rep.get("ok"):
         return ""
@@ -865,6 +900,7 @@ def briefing_section() -> str:
         for r in rep["overdue"][:6]:
             who = f" (with {r['related_contact']})" if r.get("related_contact") else ""
             lines.append(f"- {r['text']} — was due {r.get('due')}{who}")
+            lines.append(f"  - _Nudge:_ {_nudge_text(r)}")
         lines.append("")
     if counts.get("due_today"):
         lines.append(f"**Due today ({counts['due_today']}):**")
