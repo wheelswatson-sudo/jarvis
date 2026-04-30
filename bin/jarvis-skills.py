@@ -214,8 +214,11 @@ def _load_checkpoint() -> int:
     if not LAST_PROCESSED.exists():
         return -1
     try:
-        with LAST_PROCESSED.open() as f:
-            return int(json.load(f).get("idx", -1))
+        with LAST_PROCESSED.open(encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return -1
+        return int(data.get("idx", -1))
     except (json.JSONDecodeError, OSError, ValueError):
         return -1
 
@@ -223,8 +226,10 @@ def _load_checkpoint() -> int:
 def _save_checkpoint(idx: int) -> None:
     try:
         SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-        with LAST_PROCESSED.open("w", encoding="utf-8") as f:
+        tmp = LAST_PROCESSED.with_suffix(LAST_PROCESSED.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump({"idx": idx, "ts": datetime.now().isoformat()}, f)
+        os.replace(tmp, LAST_PROCESSED)
     except OSError:
         pass
 
@@ -323,14 +328,18 @@ def record_use(slug: str, confirmed: bool = False) -> None:
     confirmed. Caller invokes this after the skill has actually run."""
     path = SKILLS_DIR / f"{slug}.json"
     try:
-        with path.open() as f:
+        with path.open(encoding="utf-8") as f:
             s = json.load(f)
+        if not isinstance(s, dict):
+            return
         s["uses"] = int(s.get("uses", 0)) + 1
         if confirmed:
             s["confirmed_first_use"] = True
         s["last_used"] = datetime.now().isoformat(timespec="seconds")
-        with path.open("w", encoding="utf-8") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump(s, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
     except (json.JSONDecodeError, OSError):
         pass
 

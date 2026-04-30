@@ -73,7 +73,7 @@ def _load_memories(limit: int = MAX_MEMORIES) -> list[dict]:
         return []
     out: list[dict] = []
     try:
-        with MEMORY_FILE.open() as f:
+        with MEMORY_FILE.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -92,7 +92,7 @@ def _load_history() -> dict:
     if not HISTORY_FILE.exists():
         return {"summary": "", "messages": []}
     try:
-        with HISTORY_FILE.open() as f:
+        with HISTORY_FILE.open(encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {"summary": "", "messages": []}
@@ -105,8 +105,11 @@ def _load_last_run() -> dict:
     if not LAST_RUN_FILE.exists():
         return {"ts": 0.0, "sessions_at_run": 0}
     try:
-        with LAST_RUN_FILE.open() as f:
-            return json.load(f)
+        with LAST_RUN_FILE.open(encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"ts": 0.0, "sessions_at_run": 0}
+        return data
     except (json.JSONDecodeError, OSError):
         return {"ts": 0.0, "sessions_at_run": 0}
 
@@ -114,8 +117,10 @@ def _load_last_run() -> dict:
 def _save_last_run(sessions: int) -> None:
     try:
         SYNTH_DIR.mkdir(parents=True, exist_ok=True)
-        with LAST_RUN_FILE.open("w", encoding="utf-8") as f:
+        tmp = LAST_RUN_FILE.with_suffix(LAST_RUN_FILE.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump({"ts": time.time(), "sessions_at_run": sessions}, f)
+        os.replace(tmp, LAST_RUN_FILE)
     except OSError:
         pass
 
@@ -275,8 +280,10 @@ def run(force: bool = False) -> dict | None:
     }
     try:
         SYNTH_DIR.mkdir(parents=True, exist_ok=True)
-        with PROFILE_FILE.open("w", encoding="utf-8") as f:
+        tmp = PROFILE_FILE.with_suffix(PROFILE_FILE.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump(profile, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, PROFILE_FILE)
     except OSError as e:
         sys.stderr.write(f"jarvis-synthesize: write failed ({e})\n")
         return None
