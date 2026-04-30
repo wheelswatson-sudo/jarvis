@@ -169,18 +169,23 @@ def analyze(messages: list[dict]) -> dict:
     verbosity_score = max(-1.0, min(1.0, raw / bound))
 
     repair_attempts = max(1, reasks)
-    # Treat a positive signal within 2 turns of a re-ask as a repair success
+    # Treat a positive signal within 2 turns of a re-ask as a repair success.
+    # prior_user is the FULL list of user contents collected above, so we
+    # need a separate user-turn counter to slice it correctly — using the
+    # window index `i` would include the current (and later) user turn,
+    # which always self-matches and would silently count every user turn
+    # as a re-ask.
     repair_successes = 0
+    user_idx = 0
     for i, m in enumerate(window):
         if m.get("role") != "user":
             continue
-        if not any(_word_overlap(m.get("content", ""), p) >= REASK_OVERLAP for p in prior_user[:i]):
-            continue
-        # Look ahead 2 turns for positive feedback
-        for j in range(i + 1, min(i + 3, len(window))):
-            if window[j].get("role") == "user" and POS_RE.search(window[j].get("content", "")):
-                repair_successes += 1
-                break
+        if any(_word_overlap(m.get("content", ""), p) >= REASK_OVERLAP for p in prior_user[:user_idx]):
+            for j in range(i + 1, min(i + 3, len(window))):
+                if window[j].get("role") == "user" and POS_RE.search(window[j].get("content", "")):
+                    repair_successes += 1
+                    break
+        user_idx += 1
     repair_rate = repair_successes / repair_attempts if reasks else 1.0
 
     return {
