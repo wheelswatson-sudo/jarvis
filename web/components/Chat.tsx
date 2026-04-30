@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-type Message = { role: 'user' | 'jarvis'; text: string }
+type Role = 'user' | 'assistant'
+type Message = { role: Role; content: string }
 
 export function Chat() {
   const [open, setOpen] = useState(false)
@@ -18,25 +19,58 @@ export function Chat() {
   async function send() {
     const text = draft.trim()
     if (!text || sending) return
-    setMessages((m) => [...m, { role: 'user', text }])
+    const next: Message[] = [...messages, { role: 'user', content: text }]
+    setMessages(next)
     setDraft('')
     setSending(true)
+
+    setMessages((m) => [...m, { role: 'assistant', content: '' }])
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ messages: next }),
       })
-      const data = (await res.json()) as { reply?: string; error?: string }
-      setMessages((m) => [
-        ...m,
-        { role: 'jarvis', text: data.reply ?? data.error ?? 'No reply.' },
-      ])
+
+      if (!res.ok || !res.body) {
+        let errMsg = `Failed (${res.status})`
+        try {
+          const j = (await res.json()) as { error?: string }
+          if (j.error) errMsg = j.error
+        } catch {
+          // ignore
+        }
+        setMessages((m) => {
+          const copy = [...m]
+          copy[copy.length - 1] = { role: 'assistant', content: errMsg }
+          return copy
+        })
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let acc = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        acc += decoder.decode(value, { stream: true })
+        setMessages((m) => {
+          const copy = [...m]
+          copy[copy.length - 1] = { role: 'assistant', content: acc }
+          return copy
+        })
+      }
     } catch {
-      setMessages((m) => [
-        ...m,
-        { role: 'jarvis', text: 'Failed to reach Jarvis.' },
-      ])
+      setMessages((m) => {
+        const copy = [...m]
+        copy[copy.length - 1] = {
+          role: 'assistant',
+          content: 'Failed to reach Jarvis.',
+        }
+        return copy
+      })
     } finally {
       setSending(false)
     }
@@ -72,13 +106,14 @@ export function Chat() {
                   }`}
                 >
                   <div
-                    className={`inline-block max-w-[85%] rounded-lg px-3 py-2 ${
+                    className={`inline-block max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 ${
                       m.role === 'user'
                         ? 'bg-zinc-900 text-white'
                         : 'bg-zinc-100 text-zinc-900'
                     }`}
                   >
-                    {m.text}
+                    {m.content ||
+                      (sending && i === messages.length - 1 ? '…' : '')}
                   </div>
                 </div>
               ))}
