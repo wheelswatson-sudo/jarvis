@@ -924,72 +924,70 @@ def apple_contacts_search(query: str, limit: int = 8) -> dict:
 def apple_contacts_list_all() -> dict:
     """Dump every person in Contacts.app: name, phones, emails, org.
     Used by jarvis-contacts sync to make Apple Contacts the source of
-    truth for who exists in Watson's relationship memory."""
+    truth for who exists in Watson's relationship memory.
+
+    Implemented in JXA so output is JSON — survives names/orgs that
+    contain pipes, commas, or newlines, and gracefully handles records
+    with `missing value` on name / phone / email / organization."""
     gate = _apple_gate()
     if gate:
         return gate
-    script = """
-        set out to {}
-        tell application "Contacts"
-            set everyone to every person
-            repeat with p in everyone
-                set theName to name of p
-                set thePhones to {}
-                repeat with ph in (phones of p)
-                    set end of thePhones to (value of ph as string)
-                end repeat
-                set theEmails to {}
-                repeat with em in (emails of p)
-                    set end of theEmails to (value of em as string)
-                end repeat
-                set theOrg to ""
-                try
-                    set theOrg to organization of p
-                end try
-                copy {theName, thePhones, theEmails, theOrg} to end of out
-            end repeat
-        end tell
-        set AppleScript's text item delimiters to "|"
-        set lines to {}
-        repeat with rec in out
-            set theName to item 1 of rec
-            set phs to item 2 of rec
-            set ems to item 3 of rec
-            set org to item 4 of rec
-            set AppleScript's text item delimiters to ","
-            set phsJoined to phs as string
-            set emsJoined to ems as string
-            set AppleScript's text item delimiters to "|"
-            set end of lines to theName & "|" & phsJoined & "|" & emsJoined & "|" & org
-        end repeat
-        set AppleScript's text item delimiters to linefeed
-        set output to lines as string
-        set AppleScript's text item delimiters to ""
-        return output
+    script = r"""
+        const Contacts = Application('Contacts');
+        // Bulk-fetch each property as a single Apple Event — orders of
+        // magnitude faster than per-person attribute access on stores
+        // with hundreds of contacts. Each `Contacts.people.X()` call
+        // returns an array aligned by index across the four properties.
+        let names = [], orgs = [], phs = [], ems = [];
+        try { names = Contacts.people.name(); } catch (e) {}
+        try { orgs = Contacts.people.organization(); } catch (e) {}
+        try { phs = Contacts.people.phones.value(); } catch (e) {}
+        try { ems = Contacts.people.emails.value(); } catch (e) {}
+        const out = [];
+        const norm = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : '';
+        const flat = (a) => Array.isArray(a)
+            ? a.map(norm).filter(Boolean)
+            : (typeof a === 'string' ? [norm(a)].filter(Boolean) : []);
+        for (let i = 0; i < names.length; i++) {
+            const name = norm(names[i]);
+            if (!name) continue;
+            const org = norm(orgs && orgs[i]);
+            const phones = flat(phs && phs[i]);
+            const emails = flat(ems && ems[i]);
+            out.push({ name, phones, emails, organization: org || null });
+        }
+        JSON.stringify(out);
     """
-    rc, out, err = _run_applescript(script, timeout=60)
+    # Apple Contacts can have thousands of records; allow a generous
+    # timeout (default 2 min) overridable via JARVIS_CONTACTS_LIST_TIMEOUT.
+    # Bulk fetch typically completes in <10s for ~600 contacts.
+    timeout_s = float(os.environ.get("JARVIS_CONTACTS_LIST_TIMEOUT", "120"))
+    rc, out, err = _run_jxa(script, timeout=timeout_s)
     if rc != 0:
         return {"error": f"contacts list failed: {err or 'rc=' + str(rc)}"}
-    contacts: list[dict] = []
     if not out.strip():
         return {"ok": True, "count": 0, "contacts": []}
-    for line in out.split("\n"):
-        line = line.rstrip("\r")
-        if not line.strip():
+    try:
+        contacts = json.loads(out)
+    except json.JSONDecodeError as e:
+        return {"error": f"contacts list parse failed: {e}"}
+    if not isinstance(contacts, list):
+        return {"error": "contacts list returned non-list payload"}
+    # Final sanity pass: drop any malformed entries silently.
+    cleaned: list[dict] = []
+    for c in contacts:
+        if not isinstance(c, dict):
             continue
-        parts = line.split("|", 3)
-        if len(parts) < 4:
+        nm = (c.get("name") or "").strip()
+        if not nm:
             continue
-        name, phones, emails, org = parts
-        if not name.strip():
-            continue
-        contacts.append({
-            "name": name.strip(),
-            "phones": [p.strip() for p in phones.split(",") if p.strip()],
-            "emails": [e.strip() for e in emails.split(",") if e.strip()],
-            "organization": org.strip() or None,
+        cleaned.append({
+            "name": nm,
+            "phones": [p.strip() for p in (c.get("phones") or []) if isinstance(p, str) and p.strip()],
+            "emails": [e.strip() for e in (c.get("emails") or []) if isinstance(e, str) and e.strip()],
+            "organization": (c.get("organization") or None) if isinstance(c.get("organization"), str) and c.get("organization").strip() else None,
         })
-    return {"ok": True, "count": len(contacts), "contacts": contacts}
+    return {"ok": True, "count": len(cleaned), "contacts": cleaned}
 
 
 # ── briefing + context + notification + network hooks ─────────────────
