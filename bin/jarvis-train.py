@@ -68,7 +68,8 @@ def _latest_dataset(cfg: dict) -> tuple[Path, Path]:
     # Sanity: minimum size
     minimum = int(ds.get("min_examples", 0))
     if minimum:
-        n = sum(1 for _ in train.open("r", encoding="utf-8"))
+        with train.open("r", encoding="utf-8") as fh:
+            n = sum(1 for _ in fh)
         if n < minimum:
             sys.stderr.write(
                 f"jarvis-train: train set {train} has {n} rows < min_examples={minimum}.\n"
@@ -96,8 +97,13 @@ def _detect_backend(cfg: dict) -> str:
     return (cfg.get("hardware") or {}).get("fallback_backend", "transformers")
 
 
+SUPPORTED_BACKENDS = ("mlx", "unsloth", "transformers")
+
+
 def _check_backend_installed(backend: str) -> tuple[bool, str]:
-    pkg = {"mlx": "mlx_lm", "unsloth": "unsloth", "transformers": "transformers"}[backend]
+    pkg = {"mlx": "mlx_lm", "unsloth": "unsloth", "transformers": "transformers"}.get(backend)
+    if not pkg:
+        return False, f"unknown backend {backend!r}"
     try:
         __import__(pkg)
         return True, ""
@@ -394,6 +400,12 @@ def main(argv: list[str]) -> int:
     _log(f"tier={tier_key} train={train_path.name} eval={eval_path.name}")
 
     backend = opts["backend"] or _detect_backend(cfg)
+    if backend not in SUPPORTED_BACKENDS:
+        sys.stderr.write(
+            f"jarvis-train: unsupported backend '{backend}'. "
+            f"Choose one of: {', '.join(SUPPORTED_BACKENDS)}.\n"
+        )
+        return 2
     _log(f"backend={backend}")
 
     if not opts["eval_only"]:
