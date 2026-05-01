@@ -22,7 +22,15 @@ export function IntelligencePanel() {
         fetch('/api/intelligence/insights', { cache: 'no-store' }),
         fetch('/api/intelligence/health', { cache: 'no-store' }),
       ])
-      if (!insightsRes.ok) throw new Error(`insights ${insightsRes.status}`)
+      if (!insightsRes.ok) {
+        const detail = await insightsRes
+          .json()
+          .then((j: { error?: string; code?: string }) =>
+            j.error ? `${insightsRes.status} ${j.code ?? ''} ${j.error}`.trim() : `${insightsRes.status}`,
+          )
+          .catch(() => `${insightsRes.status}`)
+        throw new Error(`insights ${detail}`)
+      }
       const insightsJson = (await insightsRes.json()) as {
         insights: IntelligenceInsight[]
       }
