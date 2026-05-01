@@ -293,24 +293,32 @@ function CsvImport() {
   function handleFile(file: File) {
     setParseError(null)
     setResult(null)
+    setHeaders([])
+    setRows([])
+    setMapping([])
     setFilename(file.name)
     const reader = new FileReader()
     reader.onerror = () => setParseError('Failed to read file.')
     reader.onload = () => {
-      const text = String(reader.result ?? '')
-      const parsed = parseCsv(text)
-      if (parsed.length === 0) {
-        setParseError('CSV is empty.')
-        setHeaders([])
-        setRows([])
-        setMapping([])
-        return
+      try {
+        const text = String(reader.result ?? '')
+        const parsed = parseCsv(text)
+        if (parsed.length === 0) {
+          setParseError('CSV is empty.')
+          return
+        }
+        const rawHeaders = parsed[0].map((h) => h.trim())
+        const dataRows = parsed.slice(1)
+        setHeaders(rawHeaders)
+        setRows(dataRows)
+        setMapping(rawHeaders.map(autoMapColumn))
+      } catch (err) {
+        setParseError(
+          err instanceof Error
+            ? `Could not parse CSV: ${err.message}`
+            : 'Could not parse CSV.',
+        )
       }
-      const rawHeaders = parsed[0].map((h) => h.trim())
-      const dataRows = parsed.slice(1)
-      setHeaders(rawHeaders)
-      setRows(dataRows)
-      setMapping(rawHeaders.map(autoMapColumn))
     }
     reader.readAsText(file)
   }
@@ -350,9 +358,25 @@ function CsvImport() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contacts }),
       })
-      const data = (await res.json()) as ImportResult
-      setResult(data)
-      if (res.ok && data.inserted > 0) {
+      let raw: Partial<ImportResult> = {}
+      try {
+        raw = (await res.json()) as Partial<ImportResult>
+      } catch {
+        // server returned a non-JSON body (e.g. HTML error page)
+      }
+      const fallbackError = !res.ok
+        ? res.status === 401
+          ? 'Your session expired. Refresh the page and sign in again.'
+          : `Import failed (HTTP ${res.status}).`
+        : undefined
+      const normalized: ImportResult = {
+        inserted: typeof raw.inserted === 'number' ? raw.inserted : 0,
+        skipped: typeof raw.skipped === 'number' ? raw.skipped : 0,
+        errors: Array.isArray(raw.errors) ? raw.errors : [],
+        error: raw.error ?? fallbackError,
+      }
+      setResult(normalized)
+      if (res.ok && normalized.inserted > 0) {
         router.refresh()
       }
     } catch (err) {
@@ -403,8 +427,24 @@ function CsvImport() {
       )}
 
       {parseError && (
-        <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-          {parseError}
+        <div className="mt-4 space-y-3">
+          <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {parseError}
+          </div>
+          <button
+            type="button"
+            onClick={reset}
+            className="text-xs text-zinc-400 hover:text-zinc-200"
+          >
+            Try a different file
+          </button>
+        </div>
+      )}
+
+      {filename && !result && !parseError && headers.length === 0 && (
+        <div className="flex items-center justify-center gap-3 rounded-xl border border-white/5 bg-zinc-950/40 px-6 py-12 text-sm text-zinc-400">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-600 border-t-violet-400" />
+          Reading {filename}…
         </div>
       )}
 
@@ -566,6 +606,7 @@ function ResultPanel({
   onReset: () => void
 }) {
   const ok = !result.error && result.inserted > 0
+  const errors = Array.isArray(result.errors) ? result.errors : []
   return (
     <div className="space-y-5">
       <div
@@ -598,21 +639,21 @@ function ResultPanel({
         </div>
       </div>
 
-      {result.errors.length > 0 && (
+      {errors.length > 0 && (
         <div className="rounded-xl border border-white/5 bg-zinc-950/40 p-4">
           <div className="text-xs font-medium uppercase tracking-wider text-zinc-500">
             Skipped rows
           </div>
           <ul className="mt-2 space-y-1 text-sm text-zinc-300">
-            {result.errors.slice(0, 20).map((e, i) => (
+            {errors.slice(0, 20).map((e, i) => (
               <li key={i} className="flex justify-between gap-4">
                 <span className="text-zinc-500">Row {e.row}</span>
                 <span className="text-right text-zinc-300">{e.error}</span>
               </li>
             ))}
-            {result.errors.length > 20 && (
+            {errors.length > 20 && (
               <li className="text-xs text-zinc-500">
-                and {result.errors.length - 20} more…
+                and {errors.length - 20} more…
               </li>
             )}
           </ul>
@@ -678,9 +719,20 @@ function ManualAdd() {
           ],
         }),
       })
-      const data = (await res.json()) as ImportResult
-      if (!res.ok || data.inserted === 0) {
-        setError(data.error || 'Could not save contact.')
+      let data: Partial<ImportResult> = {}
+      try {
+        data = (await res.json()) as Partial<ImportResult>
+      } catch {
+        // non-JSON response
+      }
+      if (!res.ok || (data.inserted ?? 0) === 0) {
+        const fallback =
+          res.status === 401
+            ? 'Your session expired. Refresh the page and sign in again.'
+            : !res.ok
+              ? `Could not save contact (HTTP ${res.status}).`
+              : 'Could not save contact.'
+        setError(data.error || fallback)
         return
       }
       setSuccess(true)
