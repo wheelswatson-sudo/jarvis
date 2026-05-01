@@ -1,7 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
-const PUBLIC_PATHS = ['/login', '/auth']
+const PUBLIC_PATHS = ['/login', '/auth', '/api/health']
 const ONBOARDING_ALLOWED = ['/onboarding', '/api/onboarding', '/auth']
 
 export async function updateSession(request: NextRequest) {
@@ -28,9 +28,17 @@ export async function updateSession(request: NextRequest) {
     },
   )
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  let user: Awaited<ReturnType<typeof supabase.auth.getUser>>['data']['user'] =
+    null
+  try {
+    const result = await supabase.auth.getUser()
+    user = result.data.user
+  } catch {
+    // Malformed/garbage auth cookies can make getUser() throw. Treat as
+    // unauthenticated so the request flows to the /login redirect below
+    // instead of bubbling up as a 500.
+    user = null
+  }
 
   const { pathname } = request.nextUrl
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p))
