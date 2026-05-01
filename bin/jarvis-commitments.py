@@ -369,11 +369,24 @@ def _haiku_extract(api_key: str, text: str, today_iso: str,
         if not m:
             return []
         try:
-            parsed = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return []
-    candidates = parsed.get("commitments")
-    return candidates if isinstance(candidates, list) else []
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read())
+            blocks = data.get("content") or []
+            return "\n".join(b.get("text", "")
+                             for b in blocks if b.get("type") == "text").strip()
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(1 + attempt * 1.5)
+                continue
+            raise RuntimeError(f"API error {e.code}: {e}") from e
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1 + attempt * 1.5)
+                continue
+            raise RuntimeError(f"network: {e}") from e
+    raise RuntimeError(f"unexpected: {last_err}")
 
 
 def extract_commitments(text: str, source_type: str = "conversation",
