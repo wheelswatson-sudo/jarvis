@@ -1,7 +1,14 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
-const PUBLIC_PATHS = ['/login', '/auth', '/api/health']
+const PUBLIC_PATHS = [
+  '/login',
+  '/auth',
+  '/api/health',
+  // Cron-callable: route handler enforces auth via x-cron-secret OR user
+  // session, so the proxy redirect would just block legitimate cron calls.
+  '/api/intelligence/analyze',
+]
 const ONBOARDING_ALLOWED = ['/onboarding', '/api/onboarding', '/auth']
 
 export async function updateSession(request: NextRequest) {

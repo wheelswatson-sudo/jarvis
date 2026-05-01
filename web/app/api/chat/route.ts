@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/nextjs'
 import { createClient } from '../../../lib/supabase/server'
 import { apiError } from '../../../lib/api-errors'
+import { trackChatQuery } from '../../../lib/events'
 import {
   DEFAULT_MODEL_ID,
   getModel,
@@ -360,6 +361,13 @@ export async function POST(request: Request) {
 
   const context = await loadContext(supabase, user.email ?? '', userMetaName)
   const systemPrompt = buildSystemPrompt(context)
+
+  // Fire-and-forget: log the chat query for the intelligence engine.
+  void trackChatQuery(user.id, {
+    last_message_chars: messages[messages.length - 1]!.content.length,
+    turn_count: messages.length,
+    model: resolved.model.id,
+  })
 
   const abortController = new AbortController()
   const encoder = new TextEncoder()

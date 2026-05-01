@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { createClient } from '../../lib/supabase/server'
 import { Card, MetricCard, SectionHeader } from '../../components/cards'
 import { HalfLifeGauge, SentimentSlope } from '../../components/Gauge'
+import { IntelligencePanel } from '../../components/IntelligencePanel'
 import {
   formatCurrency,
   formatPercent,
@@ -131,6 +132,9 @@ export default async function DashboardPage() {
           value={formatCurrency(metrics.totalLtv)}
         />
       </div>
+
+      {/* Intelligence — self-improving insights */}
+      <IntelligencePanel />
 
       {/* Needs attention */}
       <section>

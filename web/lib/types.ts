@@ -92,3 +92,85 @@ export type RelationshipSnapshot = {
   sentiment: number | null
   captured_at: string
 }
+
+// ---------- Intelligence system ----------
+
+export type EventType =
+  | 'contact_viewed'
+  | 'contact_updated'
+  | 'outreach_sent'
+  | 'commitment_created'
+  | 'commitment_completed'
+  | 'commitment_missed'
+  | 'import_completed'
+  | 'chat_query'
+  | 'insight_dismissed'
+  | 'insight_acted_on'
+
+export type EventRow = {
+  id: string
+  user_id: string
+  event_type: EventType
+  contact_id: string | null
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export type PatternType =
+  | 'timing_preference'
+  | 'engagement_pattern'
+  | 'relationship_decay'
+  | 'outreach_effectiveness'
+  | 'contact_priority'
+
+export type CapsuleStatus = 'emerging' | 'confirmed' | 'deployed' | 'stale'
+
+export type ExperienceCapsule = {
+  id: string
+  user_id: string
+  pattern_type: PatternType
+  pattern_key: string
+  pattern_data: Record<string, unknown>
+  confidence_score: number
+  sample_size: number
+  status: CapsuleStatus
+  first_observed_at: string
+  last_confirmed_at: string
+  updated_at: string
+}
+
+export type InsightStatus = 'pending' | 'acted_on' | 'dismissed' | 'expired'
+
+export type IntelligenceInsight = {
+  id: string
+  user_id: string
+  capsule_id: string | null
+  insight_type: string
+  insight_key: string
+  title: string
+  description: string
+  priority: number
+  status: InsightStatus
+  metadata: Record<string, unknown>
+  created_at: string
+  acted_on_at: string | null
+  expires_at: string | null
+}
+
+export type SystemHealthEventType =
+  | 'analysis_run'
+  | 'degradation_detected'
+  | 'parameter_tuned'
+  | 'rollback_triggered'
+  | 'insight_generated'
+  | 'capsule_promoted'
+  | 'capsule_staled'
+  | 'low_acceptance_rate'
+
+export type SystemHealthEntry = {
+  id: string
+  event_type: SystemHealthEventType
+  user_id: string | null
+  details: Record<string, unknown>
+  created_at: string
+}

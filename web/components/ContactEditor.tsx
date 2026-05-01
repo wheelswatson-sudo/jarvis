@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '../lib/supabase/client'
+import { trackEventClient } from '../lib/events-client'
 import { tierColor } from '../lib/format'
 import type { Contact } from '../lib/types'
 
@@ -19,6 +20,11 @@ export function TierSelector({ contact }: { contact: Contact }) {
         .from('contacts')
         .update({ tier: next })
         .eq('id', contact.id)
+      trackEventClient({
+        eventType: 'contact_updated',
+        contactId: contact.id,
+        metadata: { field: 'tier', from: contact.tier, to: next },
+      })
       router.refresh()
     })
   }
@@ -54,6 +60,11 @@ export function TagEditor({ contact }: { contact: Contact }) {
     start(async () => {
       const supabase = createClient()
       await supabase.from('contacts').update({ tags: next }).eq('id', contact.id)
+      trackEventClient({
+        eventType: 'contact_updated',
+        contactId: contact.id,
+        metadata: { field: 'tags', count: next.length },
+      })
       router.refresh()
     })
   }
