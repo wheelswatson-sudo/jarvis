@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
+import { apiError } from '../../../../lib/api-errors'
 
 export const dynamic = 'force-dynamic'
 
@@ -70,33 +71,39 @@ export async function POST(req: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   let body: unknown
   try {
     body = await req.json()
   } catch {
-    return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
+    return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
   }
 
   const rawContacts = (body as { contacts?: unknown })?.contacts
   if (!Array.isArray(rawContacts)) {
-    return NextResponse.json(
-      { error: 'contacts_must_be_array' },
-      { status: 400 },
+    return apiError(
+      400,
+      'contacts must be an array',
+      undefined,
+      'contacts_must_be_array',
     )
   }
   if (rawContacts.length === 0) {
-    return NextResponse.json(
-      { error: 'no_contacts_provided' },
-      { status: 400 },
+    return apiError(
+      400,
+      'No contacts provided',
+      undefined,
+      'no_contacts_provided',
     )
   }
   if (rawContacts.length > MAX_BATCH) {
-    return NextResponse.json(
-      { error: 'too_many_contacts', max: MAX_BATCH },
-      { status: 400 },
+    return apiError(
+      400,
+      `Too many contacts (max ${MAX_BATCH})`,
+      { max: MAX_BATCH },
+      'too_many_contacts',
     )
   }
 
@@ -155,14 +162,11 @@ export async function POST(req: Request) {
     .select('id')
 
   if (error) {
-    return NextResponse.json(
-      {
-        inserted: 0,
-        skipped: skipped.length,
-        errors: skipped,
-        error: error.message,
-      },
-      { status: 400 },
+    return apiError(
+      400,
+      error.message,
+      { inserted: 0, skipped: skipped.length, errors: skipped },
+      'insert_failed',
     )
   }
 

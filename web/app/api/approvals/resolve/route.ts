@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
+import { apiError } from '../../../../lib/api-errors'
 import type { PendingChange } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -24,14 +25,14 @@ export async function POST(request: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   let body: ResolveBody
   try {
     body = (await request.json()) as ResolveBody
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+    return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
   }
 
   const ids = Array.isArray(body.ids)
@@ -39,12 +40,14 @@ export async function POST(request: Request) {
     : []
   const action = body.action
   if (ids.length === 0) {
-    return NextResponse.json({ error: 'ids array required' }, { status: 400 })
+    return apiError(400, 'ids array required', undefined, 'missing_ids')
   }
   if (action !== 'approve' && action !== 'reject') {
-    return NextResponse.json(
-      { error: "action must be 'approve' or 'reject'" },
-      { status: 400 },
+    return apiError(
+      400,
+      "action must be 'approve' or 'reject'",
+      undefined,
+      'invalid_action',
     )
   }
 
@@ -56,7 +59,7 @@ export async function POST(request: Request) {
     .eq('status', 'pending')
 
   if (fetchErr) {
-    return NextResponse.json({ error: fetchErr.message }, { status: 500 })
+    return apiError(500, fetchErr.message, undefined, 'db_error')
   }
   const pending = (changes ?? []) as PendingChange[]
   if (pending.length === 0) {
@@ -86,7 +89,7 @@ export async function POST(request: Request) {
         .eq('id', contactId)
         .eq('user_id', user.id)
       if (upErr) {
-        return NextResponse.json({ error: upErr.message }, { status: 500 })
+        return apiError(500, upErr.message, undefined, 'db_error')
       }
       applied += list.length
     }
@@ -103,7 +106,7 @@ export async function POST(request: Request) {
     .eq('user_id', user.id)
 
   if (resolveErr) {
-    return NextResponse.json({ error: resolveErr.message }, { status: 500 })
+    return apiError(500, resolveErr.message, undefined, 'db_error')
   }
 
   return NextResponse.json({ resolved: pending.length, applied })

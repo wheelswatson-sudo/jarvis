@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
+import { apiError } from '../../../lib/api-errors'
 import type { PendingChange, PendingChangeStatus } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -12,7 +13,7 @@ export async function GET(request: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   const url = new URL(request.url)
@@ -31,7 +32,7 @@ export async function GET(request: Request) {
     .order('created_at', { ascending: false })
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return apiError(500, error.message, undefined, 'db_error')
   }
 
   return NextResponse.json({ changes: (data ?? []) as PendingChange[] })
@@ -60,14 +61,14 @@ export async function POST(request: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   let body: CreateBody
   try {
     body = (await request.json()) as CreateBody
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+    return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
   }
 
   const contactId = typeof body.contact_id === 'string' ? body.contact_id : ''
@@ -83,15 +84,19 @@ export async function POST(request: Request) {
       : null
 
   if (!contactId || !source || !fieldName) {
-    return NextResponse.json(
-      { error: 'contact_id, source, and field_name are required' },
-      { status: 400 },
+    return apiError(
+      400,
+      'contact_id, source, and field_name are required',
+      undefined,
+      'missing_fields',
     )
   }
   if (!ALLOWED_FIELDS.has(fieldName)) {
-    return NextResponse.json(
-      { error: `field_name must be one of: ${[...ALLOWED_FIELDS].join(', ')}` },
-      { status: 400 },
+    return apiError(
+      400,
+      `field_name must be one of: ${[...ALLOWED_FIELDS].join(', ')}`,
+      { allowed: [...ALLOWED_FIELDS] },
+      'invalid_field_name',
     )
   }
 
@@ -102,7 +107,7 @@ export async function POST(request: Request) {
     .eq('user_id', user.id)
     .maybeSingle()
   if (contactErr || !contact) {
-    return NextResponse.json({ error: 'Contact not found' }, { status: 404 })
+    return apiError(404, 'Contact not found', undefined, 'contact_not_found')
   }
 
   const { data, error } = await supabase
@@ -120,7 +125,7 @@ export async function POST(request: Request) {
     .single()
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return apiError(500, error.message, undefined, 'db_error')
   }
 
   return NextResponse.json({ change: data as PendingChange }, { status: 201 })
@@ -132,13 +137,13 @@ export async function DELETE(request: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   const url = new URL(request.url)
   const id = url.searchParams.get('id')
   if (!id) {
-    return NextResponse.json({ error: 'id required' }, { status: 400 })
+    return apiError(400, 'id required', undefined, 'missing_id')
   }
 
   const { error } = await supabase
@@ -148,7 +153,7 @@ export async function DELETE(request: Request) {
     .eq('user_id', user.id)
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return apiError(500, error.message, undefined, 'db_error')
   }
   return NextResponse.json({ ok: true })
 }
