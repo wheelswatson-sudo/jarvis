@@ -21,6 +21,12 @@ export type ModelInfo = {
 
 export const MODELS: ModelInfo[] = [
   {
+    id: 'groq-llama-4-maverick',
+    label: 'Llama 4 Maverick (Groq)',
+    provider: 'groq',
+    apiModel: 'meta-llama/llama-4-maverick-17b-128e-instruct',
+  },
+  {
     id: 'claude-sonnet-4-6',
     label: 'Claude Sonnet 4.6',
     provider: 'anthropic',
@@ -51,12 +57,6 @@ export const MODELS: ModelInfo[] = [
     apiModel: 'gemini-2.5-pro',
   },
   {
-    id: 'groq-llama-4-maverick',
-    label: 'Llama 4 Maverick (Groq)',
-    provider: 'groq',
-    apiModel: 'meta-llama/llama-4-maverick-17b-128e-instruct',
-  },
-  {
     id: 'mistral-large',
     label: 'Mistral Large',
     provider: 'mistral',
@@ -64,10 +64,26 @@ export const MODELS: ModelInfo[] = [
   },
 ]
 
-export const DEFAULT_MODEL_ID = 'claude-sonnet-4-6'
+export const DEFAULT_MODEL_ID = 'groq-llama-4-maverick'
 
 export function getModel(id: string | null | undefined): ModelInfo {
-  return MODELS.find((m) => m.id === id) ?? MODELS[0]!
+  return (
+    MODELS.find((m) => m.id === id) ??
+    MODELS.find((m) => m.id === DEFAULT_MODEL_ID) ??
+    MODELS[0]!
+  )
+}
+
+const PROVIDER_ENV_KEY: Record<Provider, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_API_KEY',
+  groq: 'GROQ_API_KEY',
+  mistral: 'MISTRAL_API_KEY',
+}
+
+export function getProviderEnvKey(provider: Provider): string | undefined {
+  return process.env[PROVIDER_ENV_KEY[provider]]
 }
 
 export const PROVIDERS: Array<{ id: Provider; label: string }> = [
