@@ -61,7 +61,31 @@ export async function POST(request: Request) {
       ? body.contact_id
       : null
 
+  if (contactId) {
+    const { data: owned, error: ownerErr } = await supabase
+      .from('contacts')
+      .select('id')
+      .eq('id', contactId)
+      .eq('user_id', user.id)
+      .maybeSingle()
+    if (ownerErr) {
+      return apiError(500, ownerErr.message, undefined, 'contact_lookup_failed')
+    }
+    if (!owned) {
+      return apiError(403, 'Contact does not belong to user', undefined, 'forbidden_contact')
+    }
+  }
+
   const metadata = isPlainObject(body.metadata) ? body.metadata : {}
+
+  if (JSON.stringify(metadata).length > 4096) {
+    return apiError(
+      400,
+      'metadata exceeds 4096-byte limit',
+      undefined,
+      'metadata_too_large',
+    )
+  }
 
   const { error } = await supabase.from('events').insert({
     user_id: user.id,

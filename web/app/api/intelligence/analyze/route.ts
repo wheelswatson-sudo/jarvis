@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { timingSafeEqual } from 'crypto'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import { createClient } from '../../../../lib/supabase/server'
 import { apiError } from '../../../../lib/api-errors'
@@ -32,6 +33,13 @@ function getCronSecret(): string | null {
   return typeof s === 'string' && s.length > 0 ? s : null
 }
 
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  if (bufA.length !== bufB.length) return false
+  return timingSafeEqual(bufA, bufB)
+}
+
 function getServiceClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -52,7 +60,7 @@ export async function POST(request: Request) {
   const cronHeader = request.headers.get('x-cron-secret')
   const cronSecret = getCronSecret()
   const isCron =
-    cronSecret != null && cronHeader != null && cronHeader === cronSecret
+    cronSecret != null && cronHeader != null && safeEqual(cronHeader, cronSecret)
 
   // -- Cron path ---------------------------------------------------------
   if (isCron) {

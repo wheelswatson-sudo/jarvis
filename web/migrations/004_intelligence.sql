@@ -93,16 +93,8 @@ create policy "capsules_select_own"
   on public.experience_capsules for select
   using (auth.uid() = user_id);
 
-drop policy if exists "capsules_insert_own" on public.experience_capsules;
-create policy "capsules_insert_own"
-  on public.experience_capsules for insert
-  with check (auth.uid() = user_id);
-
-drop policy if exists "capsules_update_own" on public.experience_capsules;
-create policy "capsules_update_own"
-  on public.experience_capsules for update
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+-- Writes happen via the service role from the engine; service role bypasses
+-- RLS, so no user-side INSERT/UPDATE policies are needed.
 
 -- ---------------------------------------------------------------------------
 -- intelligence_insights — surfaced recommendations
@@ -139,19 +131,11 @@ create policy "insights_select_own"
   on public.intelligence_insights for select
   using (auth.uid() = user_id);
 
-drop policy if exists "insights_insert_own" on public.intelligence_insights;
-create policy "insights_insert_own"
-  on public.intelligence_insights for insert
-  with check (auth.uid() = user_id);
-
-drop policy if exists "insights_update_own" on public.intelligence_insights;
-create policy "insights_update_own"
-  on public.intelligence_insights for update
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+-- Writes happen via the service role from the engine; service role bypasses
+-- RLS, so no user-side INSERT/UPDATE policies are needed.
 
 -- ---------------------------------------------------------------------------
--- system_health_log — internal self-monitoring (no RLS, no user FK)
+-- system_health_log — internal self-monitoring
 -- ---------------------------------------------------------------------------
 create table if not exists public.system_health_log (
   id uuid primary key default gen_random_uuid(),
@@ -176,5 +160,11 @@ create index if not exists system_health_log_created_idx
 create index if not exists system_health_log_type_idx
   on public.system_health_log (event_type, created_at desc);
 
--- system_health_log is internal — no RLS. Reads happen via the service role
--- key from the /api/intelligence/health endpoint, which scopes by user_id.
+-- RLS: users may read their own health rows; writes are service-role only.
+alter table public.system_health_log enable row level security;
+
+drop policy if exists "Users can read own health logs" on public.system_health_log;
+create policy "Users can read own health logs"
+  on public.system_health_log for select
+  using (auth.uid() = user_id);
+
