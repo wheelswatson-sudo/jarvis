@@ -3,12 +3,15 @@ import { createClient } from '../../../lib/supabase/server'
 import {
   DEFAULT_MODEL_ID,
   getModel,
+  getProviderEnvKey,
   streamCompletion,
   type ChatMessage,
 } from '../../../lib/providers'
 import type { Commitment, Contact, Interaction } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
+
+const FALLBACK_MODEL_ID = 'groq-llama-4-maverick'
 
 const MAX_TOKENS = 1024
 const MAX_CONTACTS_IN_CONTEXT = 40
@@ -295,17 +298,19 @@ async function loadModelAndKey(
       .eq('is_active', true),
   ])
 
-  const model = getModel(profileRes.data?.preferred_model ?? DEFAULT_MODEL_ID)
+  const requested = getModel(profileRes.data?.preferred_model ?? DEFAULT_MODEL_ID)
 
-  const userKey = (keysRes.data ?? []).find((k) => k.provider === model.provider)
-  if (userKey?.api_key) return { model, apiKey: userKey.api_key }
+  const userKey = (keysRes.data ?? []).find((k) => k.provider === requested.provider)
+  if (userKey?.api_key) return { model: requested, apiKey: userKey.api_key }
 
-  if (model.provider === 'anthropic' && process.env.ANTHROPIC_API_KEY) {
-    return { model, apiKey: process.env.ANTHROPIC_API_KEY }
-  }
+  const envKey = getProviderEnvKey(requested.provider)
+  if (envKey) return { model: requested, apiKey: envKey }
+
+  const groqKey = process.env.GROQ_API_KEY
+  if (groqKey) return { model: getModel(FALLBACK_MODEL_ID), apiKey: groqKey }
 
   return {
-    error: `No API key configured for ${model.provider}. Add one in Settings.`,
+    error: `No API key configured for ${requested.provider} and no GROQ_API_KEY fallback set.`,
   }
 }
 
