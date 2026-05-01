@@ -60,6 +60,29 @@ export type Approval = {
   decided_at: string | null
 }
 
+export type PendingChangeStatus = 'pending' | 'approved' | 'rejected'
+
+export type PendingChangeField =
+  | 'name'
+  | 'email'
+  | 'phone'
+  | 'company'
+  | 'title'
+  | 'linkedin'
+
+export type PendingChange = {
+  id: string
+  user_id: string
+  contact_id: string
+  source: string
+  field_name: string
+  old_value: string | null
+  new_value: string | null
+  status: PendingChangeStatus
+  created_at: string
+  resolved_at: string | null
+}
+
 export type RelationshipSnapshot = {
   id: string
   user_id: string
