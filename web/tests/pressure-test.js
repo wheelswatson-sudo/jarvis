@@ -20,7 +20,7 @@ const { spawn } = require('node:child_process')
 const { setTimeout: sleep } = require('node:timers/promises')
 
 const PORT = Number(process.env.PORT || 3000)
-const BASE = `http://127.0.0.1:${PORT}`
+const BASE = process.env.PRESSURE_TARGET || `http://127.0.0.1:${PORT}`
 const ITERATIONS = Number(process.env.PRESSURE_ITER || 25)
 const READY_TIMEOUT_MS = 90_000
 
