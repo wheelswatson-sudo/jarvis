@@ -208,6 +208,7 @@ function buildDraft(c: ExperienceCapsule): InsightDraft | null {
         threshold_days?: number
         cadence_days?: number | null
         tier?: number
+        last_topic?: string | null
       }
       if (!data.contact_id || !data.contact_name) return null
       const days = data.days_since ?? 0
@@ -216,12 +217,16 @@ function buildDraft(c: ExperienceCapsule): InsightDraft | null {
       const cadenceText = cadence
         ? `${days}d since you last connected — that's ${(days / cadence).toFixed(1)}x your usual ${cadence}d cadence`
         : `${days}d of silence with a Tier ${tier} contact`
+      const topicTail =
+        data.last_topic && data.last_topic.trim().length > 0
+          ? ` Last discussed: ${truncate(data.last_topic, 80)}.`
+          : ''
       return {
         capsule_id: c.id,
         insight_type: 'relationship_decay',
         insight_key: `decay:${data.contact_id}`,
-        title: `Reach out to ${data.contact_name}`,
-        description: `${cadenceText}. A short check-in now keeps the relationship warm.`,
+        title: `Haven't spoken to ${data.contact_name} in ${days}d`,
+        description: `${cadenceText}.${topicTail} A short check-in now keeps the relationship warm.`,
         priority: tier === 1 ? 1 : 2,
         metadata: { ...data, confidence: c.confidence_score },
       }
@@ -297,6 +302,10 @@ function buildDraft(c: ExperienceCapsule): InsightDraft | null {
 // Acceptance rate over the lookback window. Used to throttle generation.
 // "Accepted" = acted_on. Dismissed and expired count as not-accepted.
 // ---------------------------------------------------------------------------
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s
+}
 
 async function measureAcceptanceRate(
   supabase: SupabaseClient,

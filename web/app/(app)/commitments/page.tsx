@@ -1,7 +1,9 @@
 import { createClient } from '../../../lib/supabase/server'
-import { Card, SectionHeader } from '../../../components/cards'
-import { CommitmentRow } from '../../../components/CommitmentRow'
 import { AddCommitmentForm } from '../../../components/AddCommitmentForm'
+import {
+  CommitmentTracker,
+  type EnrichedCommitment,
+} from '../../../components/CommitmentTracker'
 import type { Commitment, Contact } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -23,91 +25,27 @@ export default async function CommitmentsPage() {
   const contacts = (contactsData ?? []) as Pick<Contact, 'id' | 'name'>[]
   const nameById = new Map(contacts.map((c) => [c.id, c.name]))
 
-  const enriched = commitments.map((c) => ({
+  const enriched: EnrichedCommitment[] = commitments.map((c) => ({
     ...c,
     contact_name: c.contact_id ? (nameById.get(c.contact_id) ?? null) : null,
   }))
 
-  const now = new Date()
-  const startOfTomorrow = new Date(now)
-  startOfTomorrow.setHours(24, 0, 0, 0)
-
-  const overdue = enriched.filter(
-    (c) =>
-      c.status === 'open' &&
-      c.due_at != null &&
-      new Date(c.due_at) < now,
-  )
-  const dueToday = enriched.filter(
-    (c) =>
-      c.status === 'open' &&
-      c.due_at != null &&
-      new Date(c.due_at) >= now &&
-      new Date(c.due_at) < startOfTomorrow,
-  )
-  const upcoming = enriched.filter(
-    (c) =>
-      c.status === 'open' &&
-      (c.due_at == null || new Date(c.due_at) >= startOfTomorrow),
-  )
-  const completed = enriched.filter((c) => c.status !== 'open')
-
   return (
-    <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-medium tracking-tight">Commitments</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Promises you&apos;ve made. Keep the loop closed.
-        </p>
-      </header>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
+        <header>
+          <h1 className="bg-gradient-to-r from-indigo-300 via-violet-300 to-fuchsia-300 bg-clip-text text-3xl font-medium tracking-tight text-transparent">
+            Commitments
+          </h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Promises you&apos;ve made. Keep the loop closed.
+          </p>
+        </header>
 
-      <AddCommitmentForm contacts={contacts} />
+        <AddCommitmentForm contacts={contacts} />
 
-      <Group title="Overdue" tone="red" items={overdue} />
-      <Group title="Due today" tone="amber" items={dueToday} />
-      <Group title="Upcoming" tone="zinc" items={upcoming} />
-      <Group title="Completed" tone="zinc" items={completed} />
+        <CommitmentTracker commitments={enriched} showFilter />
+      </div>
     </div>
-  )
-}
-
-function Group({
-  title,
-  tone,
-  items,
-}: {
-  title: string
-  tone: 'red' | 'amber' | 'zinc'
-  items: (Commitment & { contact_name: string | null })[]
-}) {
-  const dot =
-    tone === 'red'
-      ? 'bg-red-500'
-      : tone === 'amber'
-        ? 'bg-amber-500'
-        : 'bg-zinc-300'
-  return (
-    <section>
-      <SectionHeader
-        title={
-          <span className="flex items-center gap-2">
-            <span className={`h-2 w-2 rounded-full ${dot}`} />
-            {title}
-            <span className="text-zinc-400">({items.length})</span>
-          </span>
-        }
-      />
-      <Card>
-        {items.length === 0 ? (
-          <p className="text-sm text-zinc-400">Nothing here.</p>
-        ) : (
-          <ul className="divide-y divide-zinc-100">
-            {items.map((c) => (
-              <CommitmentRow key={c.id} commitment={c} />
-            ))}
-          </ul>
-        )}
-      </Card>
-    </section>
   )
 }

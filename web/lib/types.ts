@@ -1,5 +1,16 @@
 export type Tier = 1 | 2 | 3
 
+export type PersonalDetails = {
+  spouse?: string | null
+  kids?: string[] | null
+  family_notes?: string | null
+  interests?: string[] | null
+  hobbies?: string[] | null
+  career_history?: { role: string; company: string; years?: string | null }[] | null
+  life_events?: { date?: string | null; event: string }[] | null
+  notes?: string | null
+}
+
 export type Contact = {
   id: string
   user_id: string
@@ -15,8 +26,26 @@ export type Contact = {
   half_life_days: number | null
   sentiment_slope: number | null
   last_interaction_at: string | null
+  personal_details: PersonalDetails | null
+  relationship_score: number | null
+  next_follow_up: string | null
   created_at: string
   updated_at: string
+}
+
+export type InteractionType =
+  | 'call'
+  | 'meeting'
+  | 'email'
+  | 'text'
+  | 'in-person'
+  | 'other'
+
+export type ActionItem = {
+  description: string
+  owner: 'me' | 'them'
+  due_date?: string | null
+  completed?: boolean
 }
 
 export type Interaction = {
@@ -25,24 +54,43 @@ export type Interaction = {
   contact_id: string
   channel: string | null
   direction: 'inbound' | 'outbound' | null
+  type: InteractionType | null
   summary: string | null
   body: string | null
   sentiment: number | null
+  key_points: string[]
+  action_items: ActionItem[]
+  follow_up_date: string | null
+  transcript_data: Record<string, unknown> | null
+  source: string | null
   occurred_at: string
   created_at: string
 }
 
 export type CommitmentStatus = 'open' | 'done' | 'snoozed' | 'cancelled'
 
+export type CommitmentOwner = 'me' | 'them'
+
 export type Commitment = {
   id: string
   user_id: string
   contact_id: string | null
+  interaction_id?: string | null
   description: string
+  notes?: string | null
+  owner: CommitmentOwner
   due_at: string | null
   status: CommitmentStatus
   completed_at: string | null
   created_at: string
+}
+
+export type MeetingBrief = {
+  who_they_are: string
+  recent_context: string
+  open_items: string[]
+  suggested_talking_points: string[]
+  relationship_health: string
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected'

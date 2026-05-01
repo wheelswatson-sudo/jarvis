@@ -1,23 +1,17 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { createClient } from '../../../../lib/supabase/server'
-import { Card, SectionHeader } from '../../../../components/cards'
-import {
-  TagEditor,
-  TierSelector,
-} from '../../../../components/ContactEditor'
-import { HealthChart } from '../../../../components/HealthChart'
 import { PageViewTracker } from '../../../../components/PageViewTracker'
-import {
-  formatDate,
-  formatRelative,
-  healthColor,
-} from '../../../../lib/format'
+import { PersonalDetailsEditor } from '../../../../components/PersonalDetailsEditor'
+import { QuickAddInteraction } from '../../../../components/QuickAddInteraction'
+import { InteractionTimeline } from '../../../../components/InteractionTimeline'
+import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
+import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
+import { formatRelative } from '../../../../lib/format'
 import type {
   Commitment,
   Contact,
   Interaction,
-  RelationshipSnapshot,
 } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -30,188 +24,222 @@ export default async function ContactDetailPage({
   const { id } = await params
   const supabase = await createClient()
 
-  const [{ data: contactData }, interactions, commitments, snapshots] =
-    await Promise.all([
-      supabase.from('contacts').select('*').eq('id', id).maybeSingle(),
-      supabase
-        .from('interactions')
-        .select('*')
-        .eq('contact_id', id)
-        .order('occurred_at', { ascending: false })
-        .limit(50),
-      supabase
-        .from('commitments')
-        .select('*')
-        .eq('contact_id', id)
-        .eq('status', 'open')
-        .order('due_at', { ascending: true, nullsFirst: false }),
-      supabase
-        .from('relationship_snapshots')
-        .select('*')
-        .eq('contact_id', id)
-        .order('captured_at', { ascending: true })
-        .limit(50),
-    ])
+  const [{ data: contactData }, ixRes, comRes] = await Promise.all([
+    supabase.from('contacts').select('*').eq('id', id).maybeSingle(),
+    supabase
+      .from('interactions')
+      .select('*')
+      .eq('contact_id', id)
+      .order('occurred_at', { ascending: false })
+      .limit(50),
+    supabase
+      .from('commitments')
+      .select('*')
+      .eq('contact_id', id)
+      .order('due_at', { ascending: true, nullsFirst: false }),
+  ])
 
   const contact = contactData as Contact | null
   if (!contact) notFound()
 
-  const ix = (interactions.data ?? []) as Interaction[]
-  const cs = (commitments.data ?? []) as Commitment[]
-  const snaps = (snapshots.data ?? []) as RelationshipSnapshot[]
-  const latestHealth = snaps.length
-    ? snaps[snaps.length - 1].health_score
+  const interactions = (ixRes.data ?? []) as Interaction[]
+  const commitments = (comRes.data ?? []) as Commitment[]
+  const openCommitments = commitments.filter((c) => c.status === 'open')
+
+  const followUp = contact.next_follow_up
+    ? new Date(contact.next_follow_up)
+    : null
+  const followUpDays = followUp
+    ? Math.ceil((followUp.getTime() - Date.now()) / (24 * 60 * 60 * 1000))
     : null
 
   return (
-    <div className="space-y-8">
-      <PageViewTracker eventType="contact_viewed" contactId={contact.id} />
-      <Link
-        href="/"
-        className="inline-block text-sm text-zinc-500 hover:text-zinc-900"
-      >
-        ← Back
-      </Link>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
+        <PageViewTracker eventType="contact_viewed" contactId={contact.id} />
+        <Link
+          href="/"
+          className="inline-block text-sm text-zinc-500 hover:text-zinc-200"
+        >
+          ← Back
+        </Link>
 
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-medium tracking-tight">
-            {contact.name}
-          </h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            {[contact.title, contact.company].filter(Boolean).join(' · ') ||
-              '—'}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <span
-            className={`text-sm font-medium ${healthColor(latestHealth)}`}
-          >
-            {latestHealth != null
-              ? `health ${(latestHealth * 100).toFixed(0)}%`
-              : 'no health data'}
-          </span>
-        </div>
-      </header>
-
-      <div className="grid gap-6 md:grid-cols-3">
-        <Card className="md:col-span-1">
-          <h2 className="mb-3 text-sm font-medium">Contact info</h2>
-          <dl className="space-y-2 text-sm">
-            <Field label="Email" value={contact.email} mono />
-            <Field label="Phone" value={contact.phone} mono />
-            <Field label="Company" value={contact.company} />
-            <Field label="Title" value={contact.title} />
-            <Field
-              label="LinkedIn"
-              value={
-                contact.linkedin ? (
-                  <a
-                    href={contact.linkedin}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-zinc-700 underline hover:text-zinc-900"
-                  >
-                    Profile
-                  </a>
-                ) : null
-              }
-            />
-            <Field
-              label="Last seen"
-              value={
-                contact.last_interaction_at
-                  ? formatRelative(contact.last_interaction_at)
-                  : null
-              }
-            />
-          </dl>
-        </Card>
-
-        <div className="space-y-6 md:col-span-2">
-          <Card>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-medium">Tier</h2>
-            </div>
-            <TierSelector contact={contact} />
-          </Card>
-
-          <Card>
-            <h2 className="mb-3 text-sm font-medium">Tags</h2>
-            <TagEditor contact={contact} />
-          </Card>
-
-          <Card>
-            <h2 className="mb-3 text-sm font-medium">Relationship health</h2>
-            <HealthChart snapshots={snaps} />
-          </Card>
-        </div>
-      </div>
-
-      <section>
-        <SectionHeader
-          title="Open commitments"
-          subtitle={`${cs.length} open`}
-        />
-        <Card>
-          {cs.length === 0 ? (
-            <p className="text-sm text-zinc-400">
-              No open commitments for this contact.
+        <header className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="bg-gradient-to-r from-indigo-300 via-violet-300 to-fuchsia-300 bg-clip-text text-3xl font-medium tracking-tight text-transparent">
+              {contact.name}
+            </h1>
+            <p className="mt-1 text-sm text-zinc-400">
+              {[contact.title, contact.company].filter(Boolean).join(' · ') ||
+                '—'}
             </p>
-          ) : (
-            <ul className="divide-y divide-zinc-100">
-              {cs.map((c) => (
-                <li
-                  key={c.id}
-                  className="flex items-center justify-between py-3 text-sm"
-                >
-                  <span>{c.description}</span>
-                  <span className="text-xs text-zinc-500">
-                    due {formatDate(c.due_at)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </section>
+          </div>
+          <QuickAddInteraction
+            contactId={contact.id}
+            contactName={contact.name}
+          />
+        </header>
 
-      <section>
-        <SectionHeader
-          title="Interaction timeline"
-          subtitle={`${ix.length} interactions`}
-        />
-        <Card>
-          {ix.length === 0 ? (
-            <p className="text-sm text-zinc-400">No interactions logged.</p>
-          ) : (
-            <ul className="space-y-4">
-              {ix.map((it) => (
-                <li
-                  key={it.id}
-                  className="border-l-2 border-zinc-200 pl-4"
-                >
-                  <div className="flex items-center justify-between text-xs text-zinc-500">
-                    <span>
-                      {it.channel ?? 'unknown'}
-                      {it.direction ? ` · ${it.direction}` : ''}
-                    </span>
-                    <span>{formatRelative(it.occurred_at)}</span>
-                  </div>
-                  {it.summary && (
-                    <p className="mt-1 text-sm">{it.summary}</p>
-                  )}
-                  {!it.summary && it.body && (
-                    <p className="mt-1 line-clamp-3 text-sm text-zinc-600">
-                      {it.body}
-                    </p>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </section>
+        {followUp && (
+          <div className="rounded-xl border border-violet-500/40 bg-violet-500/10 p-4">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-violet-300">
+              Next follow-up
+            </div>
+            <div className="mt-1 text-base text-zinc-100">
+              {followUp.toLocaleDateString(undefined, {
+                weekday: 'long',
+                month: 'long',
+                day: 'numeric',
+              })}
+              {followUpDays != null && (
+                <span className="ml-2 text-sm text-zinc-400">
+                  {followUpDays === 0
+                    ? '(today)'
+                    : followUpDays > 0
+                      ? `(in ${followUpDays}d)`
+                      : `(${Math.abs(followUpDays)}d overdue)`}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="grid gap-6 md:grid-cols-3">
+          <DarkCard className="md:col-span-1">
+            <h2 className="mb-3 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+              Contact info
+            </h2>
+            <dl className="space-y-2 text-sm">
+              <Field label="Email" value={contact.email} mono />
+              <Field label="Phone" value={contact.phone} mono />
+              <Field label="Company" value={contact.company} />
+              <Field label="Title" value={contact.title} />
+              <Field
+                label="LinkedIn"
+                value={
+                  contact.linkedin ? (
+                    <a
+                      href={contact.linkedin}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-violet-400 hover:underline"
+                    >
+                      Profile
+                    </a>
+                  ) : null
+                }
+              />
+              <Field
+                label="Last seen"
+                value={
+                  contact.last_interaction_at
+                    ? formatRelative(contact.last_interaction_at)
+                    : null
+                }
+              />
+              <Field
+                label="Tier"
+                value={contact.tier ? `T${contact.tier}` : null}
+              />
+            </dl>
+          </DarkCard>
+
+          <div className="space-y-6 md:col-span-2">
+            <DarkCard>
+              <h2 className="mb-3 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                Relationship health
+              </h2>
+              <RelationshipHealthBar
+                contact={contact}
+                interactions={interactions}
+                commitments={commitments}
+              />
+            </DarkCard>
+
+            <MeetingPrepBrief contactId={contact.id} />
+          </div>
+        </div>
+
+        <section>
+          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+            Personal details
+          </h2>
+          <DarkCard>
+            <PersonalDetailsEditor
+              contactId={contact.id}
+              initial={contact.personal_details}
+            />
+          </DarkCard>
+        </section>
+
+        <section>
+          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+            Open commitments{' '}
+            <span className="text-zinc-600">({openCommitments.length})</span>
+          </h2>
+          <DarkCard>
+            {openCommitments.length === 0 ? (
+              <p className="text-sm text-zinc-500">
+                No open commitments for {contact.name}.
+              </p>
+            ) : (
+              <ul className="divide-y divide-zinc-800">
+                {openCommitments.map((c) => {
+                  const overdue =
+                    c.due_at != null && new Date(c.due_at) < new Date()
+                  return (
+                    <li
+                      key={c.id}
+                      className="flex items-center justify-between gap-3 py-3 text-sm"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-zinc-100">
+                          {c.description}
+                        </div>
+                        <div className="mt-0.5 text-xs text-zinc-500">
+                          {c.owner === 'them' ? 'they owe' : 'you owe'}
+                          {c.due_at && (
+                            <span className={overdue ? ' text-red-400' : ''}>
+                              {' · '}due{' '}
+                              {new Date(c.due_at).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </DarkCard>
+        </section>
+
+        <section>
+          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+            Interaction timeline{' '}
+            <span className="text-zinc-600">({interactions.length})</span>
+          </h2>
+          <DarkCard>
+            <InteractionTimeline interactions={interactions} />
+          </DarkCard>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function DarkCard({
+  children,
+  className = '',
+}: {
+  children: React.ReactNode
+  className?: string
+}) {
+  return (
+    <div
+      className={`rounded-xl border border-zinc-800 bg-zinc-900 p-5 ${className}`}
+    >
+      {children}
     </div>
   )
 }
@@ -229,9 +257,9 @@ function Field({
     <div className="flex justify-between gap-4">
       <dt className="shrink-0 text-zinc-500">{label}</dt>
       <dd
-        className={`min-w-0 truncate text-right ${mono ? 'font-mono text-xs' : ''}`}
+        className={`min-w-0 truncate text-right text-zinc-200 ${mono ? 'font-mono text-xs' : ''}`}
       >
-        {value || <span className="text-zinc-400">—</span>}
+        {value || <span className="text-zinc-600">—</span>}
       </dd>
     </div>
   )

@@ -58,7 +58,7 @@ type EngineDataset = {
   contacts: Pick<Contact, 'id' | 'name' | 'tier' | 'last_interaction_at'>[]
   interactions: Pick<
     Interaction,
-    'id' | 'contact_id' | 'channel' | 'direction' | 'occurred_at'
+    'id' | 'contact_id' | 'channel' | 'direction' | 'occurred_at' | 'summary'
   >[]
   commitments: Pick<
     Commitment,
@@ -147,7 +147,7 @@ async function loadDataset(
         .limit(2000),
       supabase
         .from('interactions')
-        .select('id, contact_id, channel, direction, occurred_at')
+        .select('id, contact_id, channel, direction, occurred_at, summary')
         .eq('user_id', userId)
         .gte('occurred_at', longCutoff)
         .order('occurred_at', { ascending: false })
@@ -261,11 +261,17 @@ function detectTimingPatterns(d: EngineDataset): DetectorOutput[] {
 // ---------------------------------------------------------------------------
 
 function detectRelationshipDecay(d: EngineDataset): DetectorOutput[] {
-  const ixByContact = new Map<string, number[]>()
+  const ixByContact = new Map<
+    string,
+    { time: number; summary: string | null }[]
+  >()
   for (const ix of d.interactions) {
     if (!ix.contact_id) continue
     const list = ixByContact.get(ix.contact_id) ?? []
-    list.push(new Date(ix.occurred_at).getTime())
+    list.push({
+      time: new Date(ix.occurred_at).getTime(),
+      summary: ix.summary ?? null,
+    })
     ixByContact.set(ix.contact_id, list)
   }
 
@@ -276,7 +282,10 @@ function detectRelationshipDecay(d: EngineDataset): DetectorOutput[] {
     const tier = c.tier ?? 3
     if (tier > 2) continue
 
-    const times = (ixByContact.get(c.id) ?? []).sort((a, b) => a - b)
+    const events = (ixByContact.get(c.id) ?? []).sort(
+      (a, b) => a.time - b.time,
+    )
+    const times = events.map((e) => e.time)
     const lastSeen = c.last_interaction_at
       ? new Date(c.last_interaction_at).getTime()
       : times.length > 0
@@ -309,6 +318,10 @@ function detectRelationshipDecay(d: EngineDataset): DetectorOutput[] {
     const overshoot = daysSince / threshold
     const confidence = clamp01((overshoot - 1) * 0.5 + 0.4)
 
+    const lastSummary = events.length
+      ? (events[events.length - 1]!.summary ?? null)
+      : null
+
     out.push({
       pattern_type: 'relationship_decay',
       pattern_key: `decay_${c.id}`,
@@ -320,6 +333,7 @@ function detectRelationshipDecay(d: EngineDataset): DetectorOutput[] {
         cadence_days: cadenceDays != null ? Math.round(cadenceDays) : null,
         threshold_days: Math.round(threshold),
         overshoot: Number(overshoot.toFixed(2)),
+        last_topic: lastSummary,
       },
       confidence,
       sample_size: Math.max(times.length, 1),
