@@ -81,6 +81,7 @@ MAX_QUEUE_SIZE = 200  # truncate oldest delivered/dismissed beyond this
 DEFAULT_SOURCE_WEIGHTS = {
     "calendar": 5,
     "orchestrator": 4,
+    "network": 3,
     "telegram": 3,
     "social": 2,
     "linkedin": 2,

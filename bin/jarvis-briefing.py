@@ -105,6 +105,7 @@ _memory_mod = None
 _orch_mod = None
 _telegram_mod = None
 _social_mod = None
+_network_mod = None
 
 
 def _calendar():
@@ -147,6 +148,13 @@ def _social():
     if _social_mod is None:
         _social_mod = _load_sibling("jarvis-social")
     return _social_mod
+
+
+def _network():
+    global _network_mod
+    if _network_mod is None:
+        _network_mod = _load_sibling("jarvis-network")
+    return _network_mod
 
 
 # ── Anthropic call (single-shot, blocking) ──────────────────────────
@@ -285,6 +293,22 @@ def _pull_social(hours: int = 12) -> dict:
     if isinstance(rec, dict) and rec.get("error"):
         return {"platforms": [], "soft_error": rec["error"]}
     return rec or {"platforms": []}
+
+
+def _pull_network_alerts() -> list[dict]:
+    """Surface actionable relationship alerts for the briefing — fading
+    inner_circle, pending follow-ups, intro opportunities. Returns [] when
+    the network module is missing or nothing is actionable; soft-fail."""
+    mod = _network()
+    if mod is None:
+        return []
+    try:
+        rec = mod.network_alerts(refresh=False)
+    except Exception:
+        return []
+    items = (rec or {}).get("alerts") or []
+    # Drop low-priority items from the briefing — keep it focused.
+    return [a for a in items if a.get("priority") in ("high", "normal")][:5]
 
 
 def _pull_weather() -> dict:
@@ -437,6 +461,15 @@ def _build_synth_prompt(payload: dict) -> str:
             f"- {n.get('message', '')}" for n in pending[:6]
         ))
 
+    net_alerts = payload.get("network_alerts") or []
+    if net_alerts:
+        lines = []
+        for a in net_alerts[:5]:
+            tag = (a.get("kind") or "").replace("_", " ")
+            prio = a.get("priority") or "normal"
+            lines.append(f"- [{prio}] {tag}: {a.get('message', '')}")
+        parts.append("RELATIONSHIP ALERTS:\n" + "\n".join(lines))
+
     mem = payload.get("memory_recent") or []
     if mem:
         parts.append("RECENT MEMORY (Watson said in the last few days):\n" + "\n".join(
@@ -517,6 +550,20 @@ def _fallback_synth(payload: dict) -> str:
         )
     if pending_count:
         lines.append(f"There are {pending_count} pending notifications queued.")
+    net_alerts = payload.get("network_alerts") or []
+    if net_alerts:
+        high = [a for a in net_alerts if a.get("priority") == "high"]
+        if high:
+            names = ", ".join(a.get("name") or "" for a in high[:2])
+            lines.append(
+                f"On the relationship side: {len(high)} high-priority "
+                f"alert{'s' if len(high) != 1 else ''} ({names})."
+            )
+        else:
+            lines.append(
+                f"On the relationship side: {len(net_alerts)} item"
+                f"{'s' if len(net_alerts) != 1 else ''} to handle."
+            )
     tg_groups = [g for g in ((payload.get("telegram") or {}).get("groups") or [])
                  if (g.get("message_count") or 0) > 0]
     if tg_groups:
@@ -572,177 +619,13 @@ def _system_health_section() -> str:
         return ""
 
 
-def _relationship_alerts_section() -> str:
-    """Pull the 'Relationship Alerts' markdown block from jarvis-network
-    when there are fading contacts, stale follow-ups, or pending intros.
-    Empty otherwise."""
-    if _is_demo():
-        return ""
-    if os.environ.get("JARVIS_NETWORK", "1") != "1":
-        return ""
-    src = BIN_DIR / "jarvis-network.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-network.py"
-    if not src.exists():
+def _network_alerts_section() -> str:
+    """Markdown block from jarvis-network — empty when nothing actionable."""
+    mod = _network()
+    if mod is None:
         return ""
     try:
-        spec = importlib.util.spec_from_file_location("jarvis_network_brief", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod.briefing_section() or ""
-    except Exception:
-        return ""
-
-
-def _linkedin_changes_section() -> str:
-    """Contact-tier LinkedIn changes from the last 24h. Empty when
-    nothing landed so the briefing doesn't pad on quiet days."""
-    if _is_demo():
-        return ""
-    src = BIN_DIR / "jarvis-linkedin.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-linkedin.py"
-    if not src.exists():
-        return ""
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_linkedin_brief", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod.briefing_section(days=1) or ""
-    except Exception:
-        return ""
-
-
-def _meeting_prep_status_map() -> dict[str, str]:
-    """Return event_id → 'prepped' for events on the prepped state file.
-    Used in the synth prompt so the briefing announces which upcoming
-    meetings already have prep notes saved."""
-    if os.environ.get("JARVIS_MEETING_PREP", "1") != "1":
-        return {}
-    state_file = ASSISTANT_DIR / "state" / "meeting_prep.json"
-    if not state_file.exists():
-        return {}
-    try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        prepped = data.get("prepped") or {}
-    except Exception:
-        return {}
-    return {k: "prepped" for k in prepped.keys()}
-
-
-def _workflows_section() -> str:
-    """Pull the 'Scheduled Workflows' markdown block — what ran
-    overnight, what's coming today, any failures. Empty when nothing
-    relevant."""
-    if _is_demo():
-        return ""
-    if os.environ.get("JARVIS_WORKFLOWS", "1") != "1":
-        return ""
-    src = BIN_DIR / "jarvis-workflows.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-workflows.py"
-    if not src.exists():
-        return ""
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_workflows_brief", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod.briefing_section() or ""
-    except Exception:
-        return ""
-
-
-def _stripe_section() -> str:
-    """Pull the 'Revenue' markdown block from jarvis-stripe. Empty when
-    Stripe isn't configured or there's nothing material to surface."""
-    if _is_demo():
-        # Render a minimal markdown block from fixture data so the
-        # demo briefing has a Revenue section without hitting Stripe.
-        d = _demo_mod.mock_briefing_stripe()
-        return (
-            "## Revenue\n\n"
-            f"- MRR ${d['mrr_dollars']:,.0f} ({d['active_subscriptions']} active subs)\n"
-            f"- {d['new_subscribers_7d']} new subscribers this week\n"
-            f"- 30d trend: {'↑' if d['revenue_trend_pct'] >= 0 else '↓'}{abs(d['revenue_trend_pct'])}%\n"
-        )
-    if os.environ.get("JARVIS_STRIPE", "1") == "0":
-        return ""
-    src = BIN_DIR / "jarvis-stripe.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-stripe.py"
-    if not src.exists():
-        return ""
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_stripe_brief", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod.briefing_section() or ""
-    except Exception:
-        return ""
-
-
-def _commitments_section() -> str:
-    """Pull the 'Commitments' markdown block — overdue, due today, due
-    this week. Empty when nothing pressing."""
-    if _is_demo():
-        rep = _demo_mod.mock_commitment_report()
-        lines = ["## Commitments\n"]
-        if rep.get("due_today"):
-            lines.append("**Due today:**")
-            for c in rep["due_today"]:
-                lines.append(f"- {c['summary']}")
-        if rep.get("due_this_week"):
-            lines.append("\n**Due this week:**")
-            for c in rep["due_this_week"]:
-                lines.append(f"- {c['summary']}")
-        return "\n".join(lines) + "\n"
-    if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
-        return ""
-    src = BIN_DIR / "jarvis-commitments.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-commitments.py"
-    if not src.exists():
-        return ""
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "jarvis_commitments_brief", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod.briefing_section() or ""
-    except Exception:
-        return ""
-
-
-def _imessages_section() -> str:
-    """Pull the 'iMessages' subsection — unread inbound from contacts.
-    Empty when nothing is sitting unread."""
-    if _is_demo():
-        # Lightweight demo block — the iMessage DB read is gated off so we
-        # don't leak Watson's real unread thread into a prospect-facing demo.
-        rec = _demo_mod.mock_imessage_check({})
-        by_handle = rec.get("by_handle") or {}
-        if not by_handle:
-            return ""
-        lines = ["## iMessages\n"]
-        for handle, msgs in list(by_handle.items())[:5]:
-            if not msgs:
-                continue
-            preview = (msgs[0].get("text") or "")[:120]
-            lines.append(f"- **{handle}** ({len(msgs)} unread): {preview}")
-        return "\n".join(lines) + "\n"
-    if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
-        return ""
-    src = BIN_DIR / "jarvis-apple.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-apple.py"
-    if not src.exists():
-        return ""
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "jarvis_apple_brief", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        return mod.briefing_section() or ""
+        return mod.relationship_alerts_section() or ""
     except Exception:
         return ""
 
@@ -776,6 +659,9 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
     health = _system_health_section()
     if health:
         spoken += health + "\n"
+    net_section = _network_alerts_section()
+    if net_section:
+        spoken += net_section + "\n"
     raw = (
         "## Source data\n\n"
         "```json\n"
@@ -849,7 +735,7 @@ def generate_today(force: bool = False) -> dict:
     payload["social"] = _pull_social()
     payload["pending_notifications"] = _pull_pending_notifications()
     payload["memory_recent"] = _pull_memory_recent()
-    payload["stripe"] = _pull_stripe()
+    payload["network_alerts"] = _pull_network_alerts()
     payload["weather"] = _pull_weather()
 
     events = (payload["calendar"] or {}).get("events") or []

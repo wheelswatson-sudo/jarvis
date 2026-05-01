@@ -295,26 +295,27 @@ def _tool_relationship_brief(args: dict) -> dict:
     return mod.relationship_brief(name)
 
 
-_network_mod_cached = None
-
-
 def _network():
-    global _network_mod_cached
-    if _network_mod_cached is not None:
-        return _network_mod_cached
+    """Lazy-load jarvis-network.py the same way _contacts() does."""
+    global _network_mod_cached  # type: ignore[name-defined]
+    try:
+        return _network_mod_cached  # type: ignore[name-defined]
+    except NameError:
+        pass
     src = BIN_DIR / "jarvis-network.py"
     if not src.exists():
         src = Path(__file__).parent / "jarvis-network.py"
     if not src.exists():
+        _network_mod_cached = None  # type: ignore[name-defined]
         return None
     try:
-        spec = importlib.util.spec_from_file_location("jarvis_network_orch", src)
+        spec = importlib.util.spec_from_file_location("jarvis_network", src)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _network_mod_cached = mod
+        _network_mod_cached = mod  # type: ignore[name-defined]
         return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-orchestrate: network module load failed ({e})\n")
+    except Exception:
+        _network_mod_cached = None  # type: ignore[name-defined]
         return None
 
 
@@ -322,14 +323,11 @@ def _tool_network_search(args: dict) -> dict:
     mod = _network()
     if mod is None:
         return {"error": "jarvis-network not installed"}
-    query = (args.get("query") or "").strip()
-    if not query:
-        return {"error": "query is required"}
-    filters = args.get("filters") or {}
-    if not isinstance(filters, dict):
-        filters = {}
-    return mod.network_search(query, filters=filters,
-                              limit=int(args.get("limit") or 8))
+    return mod.network_search(
+        query=args.get("query") or "",
+        filters=args.get("filters") or {},
+        limit=int(args.get("limit") or 10),
+    )
 
 
 def _tool_relationship_score(args: dict) -> dict:
@@ -340,16 +338,6 @@ def _tool_relationship_score(args: dict) -> dict:
     if not name:
         return {"error": "name is required"}
     return mod.relationship_score(name)
-
-
-def _tool_network_suggest(args: dict) -> dict:
-    mod = _network()
-    if mod is None:
-        return {"error": "jarvis-network not installed"}
-    goal = (args.get("goal") or "").strip()
-    if not goal:
-        return {"error": "goal is required"}
-    return mod.network_suggest(goal)
 
 
 def _tool_web_search(args: dict) -> dict:
@@ -541,14 +529,6 @@ TOOLS: dict[str, Callable[[dict], dict]] = {
     "relationship_brief": _tool_relationship_brief,
     "network_search": _tool_network_search,
     "relationship_score": _tool_relationship_score,
-    "network_suggest": _tool_network_suggest,
-    "list_commitments": _tool_list_commitments,
-    "commitment_report": _tool_commitment_report,
-    "imessage_check": _tool_imessage_check,
-    "imessage_read": _tool_imessage_read,
-    "apple_list_reminders": _tool_apple_list_reminders,
-    "stripe_dashboard": _tool_stripe_dashboard,
-    "stripe_customer": _tool_stripe_customer,
     "web_search": _tool_web_search,
     "research_topic": _tool_research_topic,
     "synthesize": _tool_synthesize,
@@ -598,16 +578,8 @@ Tools available:
 - recall(query, limit?) — search Watson's memory store.
 - search_contacts(query) — look up a person (Apple Contacts + Messages).
 - relationship_brief(name) — Watson's curated relationship memory: brief, last interaction, talking points, open threads. Use when a meeting attendee is named — strictly better than search_contacts for prep.
-- network_search(query, filters?, limit?) — semantic search across Watson's network for skills / expertise / intro paths. Use when the goal needs "who do we know who can do X". Filters: {trust:[...], tag:[...], min_strength:0..1, recent_within_days:N}.
-- relationship_score(name) — deep per-relationship analysis: strength, trajectory, responsiveness, suggested next action with channel + timing. Use over relationship_brief when the goal is "what's the play with X" rather than "who is X".
-- network_suggest(goal) — Sonnet-backed planner for "who should I leverage to do X": picks primary + supporting contacts, suggests intro paths, sequences the approach. Heavier than network_search; use when the goal explicitly asks for a play.
-- list_commitments(status?, owner?, related_contact?, days_ahead?) — Watson's tracked commitments. Use whenever a goal needs "what does Watson owe X", "what's due before the meeting", or "what's overdue".
-- commitment_report() — overdue / due-today / due-this-week summary; cheap, no API call. Lead with this in any "what's on my plate" plan.
-- imessage_check(hours?) — recent inbound iMessages grouped by handle. Use for prep when Watson's about to talk to someone he texts.
-- imessage_read(handle, limit?) — message history with one handle, oldest→newest. Use when context for a reply matters.
-- apple_list_reminders(include_completed?) — pending reminders in the 'Jarvis' list. Pair with list_commitments when the goal touches reminders the iPhone might already hold.
-- stripe_dashboard() — MRR / new subs / 30d trend / churn / outstanding invoices. Reach for this in any "close the deal", "wrap up the day on revenue", or "prep for X customer" plan.
-- stripe_customer(name_or_email) — single-customer deep dive: subscriptions, payments, refunds, lifetime value, reliability. Pair with relationship_brief when prepping for a meeting with a paying customer.
+- network_search(query, filters?, limit?) — semantic search across the whole network: matches skills, expertise, intro targets, tags, topics. Use when the goal names a capability or domain ("fundraising", "React dev") rather than a specific person. Filters: trust_level, min_strength, channel, recency_days.
+- relationship_score(name) — analytical snapshot of one relationship: strength (0-1), trajectory (growing/stable/fading), days since contact, suggested next action. Strictly better than relationship_brief when the goal asks "should I reach out" or "how strong is this tie".
 - web_search(query) — single search query, summarized.
 - research_topic(topic, depth?) — multi-query deep research. depth: "quick"|"thorough".
 - synthesize(instruction, inputs) — Haiku-summarize the prior outputs into prose.

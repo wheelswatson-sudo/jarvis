@@ -202,9 +202,12 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "lookup_contact": "contacts",
     "relationship_brief": "contacts",
     "enrich_contact": "contacts",
-    "contact_sync": "contacts",
-    "apollo_enrich": "contacts",
-    "approve_message": "approval",
+    "network_search": "network",
+    "network_map": "network",
+    "relationship_score": "network",
+    "network_suggest": "network",
+    "enrich_network": "network",
+    "network_alerts": "network",
     "check_email": "email",
     "draft_email": "email",
     "send_email": "email",
@@ -727,6 +730,7 @@ _style_mod = None
 _contacts_mod = None
 _notif_mod = None
 _social_mod = None
+_network_mod = None
 
 
 def _load_email_module():
@@ -923,6 +927,24 @@ def _load_social_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: social module load failed ({e})\n")
+        return None
+
+
+def _load_network_module():
+    global _network_mod
+    if _network_mod is not None:
+        return _network_mod
+    src = BIN_DIR / "jarvis-network.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_network", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _network_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: network module load failed ({e})\n")
         return None
 
 
@@ -1654,21 +1676,26 @@ def _tool_network_search(args: dict, _mem: Memory) -> dict:
     if mod is None:
         return {"error": "jarvis-network module not installed"}
     query = (args.get("query") or "").strip()
-    if not query:
-        return {"error": "query is required"}
+    if not query and not args.get("filters"):
+        return {"error": "query or filters required"}
     filters = args.get("filters") or {}
     if not isinstance(filters, dict):
-        filters = {}
-    return mod.network_search(query, filters=filters,
-                              limit=int(args.get("limit") or 8))
+        return {"error": "filters must be an object"}
+    return mod.network_search(
+        query=query,
+        filters=filters,
+        limit=int(args.get("limit") or 10),
+    )
 
 
 def _tool_network_map(args: dict, _mem: Memory) -> dict:
     mod = _load_network_module()
     if mod is None:
         return {"error": "jarvis-network module not installed"}
-    focus = args.get("focus")
-    return mod.network_map(focus=focus or None)
+    return mod.network_map(
+        focus=args.get("focus"),
+        limit=int(args.get("limit") or 20),
+    )
 
 
 def _tool_relationship_score(args: dict, _mem: Memory) -> dict:
@@ -1695,648 +1722,17 @@ def _tool_enrich_network(args: dict, _mem: Memory) -> dict:
     mod = _load_network_module()
     if mod is None:
         return {"error": "jarvis-network module not installed"}
-    return mod.enrich_network(force=bool(args.get("force")))
+    return mod.enrich_network(
+        force=bool(args.get("force")),
+        cap=int(args["cap"]) if args.get("cap") else None,
+    )
 
 
-def _tool_network_alerts(_args: dict, _mem: Memory) -> dict:
+def _tool_network_alerts(args: dict, _mem: Memory) -> dict:
     mod = _load_network_module()
     if mod is None:
         return {"error": "jarvis-network module not installed"}
-    return mod.network_alerts()
-
-
-# ── LinkedIn handlers ──────────────────────────────────────────────
-def _tool_linkedin_enrich(args: dict, _mem: Memory) -> dict:
-    mod = _load_linkedin_module()
-    if mod is None:
-        return {"error": "jarvis-linkedin module not installed"}
-    target = (args.get("name_or_url") or args.get("name") or "").strip()
-    if not target:
-        return {"error": "name_or_url is required"}
-    return mod.linkedin_enrich(target, force=bool(args.get("force")))
-
-
-def _tool_linkedin_sync(args: dict, _mem: Memory) -> dict:
-    mod = _load_linkedin_module()
-    if mod is None:
-        return {"error": "jarvis-linkedin module not installed"}
-    return mod.linkedin_sync(limit=args.get("limit"))
-
-
-def _tool_linkedin_monitor(_args: dict, _mem: Memory) -> dict:
-    mod = _load_linkedin_module()
-    if mod is None:
-        return {"error": "jarvis-linkedin module not installed"}
-    return mod.linkedin_monitor()
-
-
-def _tool_linkedin_changes(args: dict, _mem: Memory) -> dict:
-    mod = _load_linkedin_module()
-    if mod is None:
-        return {"error": "jarvis-linkedin module not installed"}
-    days = int(args.get("days") or 7)
-    contacts_only = args.get("contacts_only")
-    if contacts_only is None:
-        contacts_only = True
-    return mod.linkedin_changes(days=days, contacts_only=bool(contacts_only))
-
-
-def _tool_linkedin_search(args: dict, _mem: Memory) -> dict:
-    mod = _load_linkedin_module()
-    if mod is None:
-        return {"error": "jarvis-linkedin module not installed"}
-    query = (args.get("query") or "").strip()
-    if not query:
-        return {"error": "query is required"}
-    return mod.linkedin_search(query)
-
-
-# ── Commitment handlers ────────────────────────────────────────────
-def _tool_extract_commitments(args: dict, _mem: Memory) -> dict:
-    mod = _load_commitments_module()
-    if mod is None:
-        return {"error": "jarvis-commitments module not installed"}
-    text = (args.get("text") or "").strip()
-    if not text:
-        return {"error": "text is required"}
-    return mod.extract_commitments(
-        text,
-        source=args.get("source") or "claude",
-        related_contact=args.get("related_contact"),
-    )
-
-
-def _tool_add_commitment(args: dict, _mem: Memory) -> dict:
-    mod = _load_commitments_module()
-    if mod is None:
-        return {"error": "jarvis-commitments module not installed"}
-    text = (args.get("text") or "").strip()
-    if not text:
-        return {"error": "text is required"}
-    return mod.add_commitment(
-        text,
-        owner=args.get("owner") or "watson",
-        due=args.get("due"),
-        priority=args.get("priority") or "normal",
-        related_contact=args.get("related_contact"),
-        tags=args.get("tags") or None,
-    )
-
-
-def _tool_list_commitments(args: dict, _mem: Memory) -> dict:
-    mod = _load_commitments_module()
-    if mod is None:
-        return {"error": "jarvis-commitments module not installed"}
-    return mod.list_commitments(
-        status=args.get("status"),
-        owner=args.get("owner"),
-        related_contact=args.get("related_contact"),
-        days_ahead=args.get("days_ahead"),
-        limit=int(args.get("limit") or 50),
-    )
-
-
-def _tool_complete_commitment(args: dict, _mem: Memory) -> dict:
-    mod = _load_commitments_module()
-    if mod is None:
-        return {"error": "jarvis-commitments module not installed"}
-    needle = (args.get("name_or_id") or args.get("text") or args.get("id") or "").strip()
-    if not needle:
-        return {"error": "name_or_id is required"}
-    return mod.complete_commitment(needle)
-
-
-def _tool_commitment_report(_args: dict, _mem: Memory) -> dict:
-    mod = _load_commitments_module()
-    if mod is None:
-        return {"error": "jarvis-commitments module not installed"}
-    return mod.commitment_report()
-
-
-# ── Trello handlers ────────────────────────────────────────────────
-def _tool_trello_sync(_args: dict, _mem: Memory) -> dict:
-    mod = _load_trello_module()
-    if mod is None:
-        return {"error": "jarvis-trello module not installed"}
-    return mod.trello_sync()
-
-
-def _tool_trello_boards(args: dict, _mem: Memory) -> dict:
-    mod = _load_trello_module()
-    if mod is None:
-        return {"error": "jarvis-trello module not installed"}
-    return mod.trello_boards(
-        board_id=args.get("board_id"),
-        include_cards=bool(args.get("include_cards")),
-    )
-
-
-def _tool_trello_add(args: dict, _mem: Memory) -> dict:
-    mod = _load_trello_module()
-    if mod is None:
-        return {"error": "jarvis-trello module not installed"}
-    name = (args.get("name") or "").strip()
-    if not name:
-        return {"error": "name is required"}
-    return mod.trello_add(
-        name,
-        list_id=args.get("list_id"),
-        list_name=args.get("list_name") or args.get("list"),
-        due=args.get("due"),
-        desc=args.get("desc"),
-    )
-
-
-def _tool_trello_move(args: dict, _mem: Memory) -> dict:
-    mod = _load_trello_module()
-    if mod is None:
-        return {"error": "jarvis-trello module not installed"}
-    card_id = (args.get("card_id") or "").strip()
-    if not card_id:
-        return {"error": "card_id is required"}
-    return mod.trello_move(
-        card_id,
-        list_id=args.get("list_id"),
-        list_name=args.get("list_name") or args.get("list"),
-    )
-
-
-# ── Apple handlers ─────────────────────────────────────────────────
-def _tool_apple_add_reminder(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    text = (args.get("text") or "").strip()
-    if not text:
-        return {"error": "text is required"}
-    return mod.apple_add_reminder(text, due=args.get("due"),
-                                  notes=args.get("notes"))
-
-
-def _tool_apple_list_reminders(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    return mod.apple_list_reminders(
-        include_completed=bool(args.get("include_completed")),
-        limit=int(args.get("limit") or 50),
-    )
-
-
-def _tool_apple_complete_reminder(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    needle = (args.get("name_or_id") or args.get("text") or "").strip()
-    if not needle:
-        return {"error": "name_or_id is required"}
-    return mod.apple_complete_reminder(needle)
-
-
-def _tool_apple_save_note(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    title = (args.get("title") or "").strip()
-    if not title:
-        return {"error": "title is required"}
-    return mod.apple_save_note(
-        title, body=args.get("body") or "",
-        append=bool(args.get("append")),
-    )
-
-
-def _tool_apple_read_note(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    title = (args.get("title") or "").strip()
-    if not title:
-        return {"error": "title is required"}
-    return mod.apple_read_note(title)
-
-
-def _tool_apple_contacts_search(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    query = (args.get("query") or "").strip()
-    if not query:
-        return {"error": "query is required"}
-    return mod.apple_contacts_search(query, limit=int(args.get("limit") or 8))
-
-
-# ── iMessage handlers ──────────────────────────────────────────────
-def _tool_imessage_check(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    return mod.imessage_check(hours=int(args.get("hours") or 24))
-
-
-def _tool_imessage_read(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    handle = (args.get("handle") or "").strip()
-    if not handle:
-        return {"error": "handle is required"}
-    return mod.imessage_read(handle, limit=int(args.get("limit") or 20))
-
-
-def _tool_imessage_send(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    handle = (args.get("handle") or "").strip()
-    message = (args.get("message") or "").strip()
-    if not handle or not message:
-        return {"error": "handle and message required"}
-    return mod.imessage_send(handle, message, confirm=bool(args.get("confirm")))
-
-
-def _tool_imessage_search_contacts(args: dict, _mem: Memory) -> dict:
-    mod = _load_apple_module()
-    if mod is None:
-        return {"error": "jarvis-apple module not installed"}
-    query = (args.get("query") or "").strip()
-    if not query:
-        return {"error": "query is required"}
-    return mod.imessage_search_contacts(query, limit=int(args.get("limit") or 12))
-
-
-# ── Stripe handlers ────────────────────────────────────────────────
-def _tool_stripe_dashboard(_args: dict, _mem: Memory) -> dict:
-    mod = _load_stripe_module()
-    if mod is None:
-        return {"error": "jarvis-stripe module not installed"}
-    return mod.stripe_dashboard()
-
-
-def _tool_stripe_customers(args: dict, _mem: Memory) -> dict:
-    mod = _load_stripe_module()
-    if mod is None:
-        return {"error": "jarvis-stripe module not installed"}
-    return mod.stripe_customers(
-        status=args.get("status") or "active",
-        limit=int(args.get("limit") or 20),
-    )
-
-
-def _tool_stripe_customer(args: dict, _mem: Memory) -> dict:
-    mod = _load_stripe_module()
-    if mod is None:
-        return {"error": "jarvis-stripe module not installed"}
-    needle = (args.get("name_or_email") or args.get("query") or "").strip()
-    if not needle:
-        return {"error": "name_or_email is required"}
-    return mod.stripe_customer(needle)
-
-
-def _tool_stripe_revenue(args: dict, _mem: Memory) -> dict:
-    mod = _load_stripe_module()
-    if mod is None:
-        return {"error": "jarvis-stripe module not installed"}
-    return mod.stripe_revenue(period=args.get("period") or "month")
-
-
-def _tool_stripe_alerts(_args: dict, _mem: Memory) -> dict:
-    mod = _load_stripe_module()
-    if mod is None:
-        return {"error": "jarvis-stripe module not installed"}
-    return mod.stripe_alerts()
-
-
-# ── Meeting prep handlers ──────────────────────────────────────────
-def _tool_meeting_prep(args: dict, _mem: Memory) -> dict:
-    mod = _load_meeting_prep_module()
-    if mod is None:
-        return {"error": "jarvis-meeting-prep module not installed"}
-    target = args.get("event_id_or_time") or args.get("event_id") or args.get("when")
-    return mod.meeting_prep(target)
-
-
-def _tool_meeting_prep_settings(args: dict, _mem: Memory) -> dict:
-    mod = _load_meeting_prep_module()
-    if mod is None:
-        return {"error": "jarvis-meeting-prep module not installed"}
-    lt = args.get("lead_time_minutes")
-    if lt is not None:
-        try:
-            lt = int(lt)
-        except Exception:
-            return {"error": "lead_time_minutes must be an integer"}
-    auto = args.get("auto")
-    if auto is not None:
-        auto = bool(auto)
-    return mod.meeting_prep_settings(lead_time_minutes=lt, auto=auto)
-
-
-# ── Workflow handlers ──────────────────────────────────────────────
-def _tool_create_workflow(args: dict, _mem: Memory) -> dict:
-    mod = _load_workflows_module()
-    if mod is None:
-        return {"error": "jarvis-workflows module not installed"}
-    name = (args.get("name") or "").strip()
-    goal = (args.get("goal") or "").strip()
-    schedule = (args.get("schedule") or "").strip()
-    if not name or not goal or not schedule:
-        return {"error": "name, goal, and schedule are required"}
-    notify = args.get("notify_on_complete")
-    if notify is None:
-        notify = args.get("notify", True)
-    return mod.create_workflow(name=name, goal=goal, schedule=schedule,
-                               notify_on_complete=bool(notify))
-
-
-def _tool_list_workflows(args: dict, _mem: Memory) -> dict:
-    mod = _load_workflows_module()
-    if mod is None:
-        return {"error": "jarvis-workflows module not installed"}
-    return mod.list_workflows(status=args.get("status"))
-
-
-def _tool_run_workflow(args: dict, _mem: Memory) -> dict:
-    mod = _load_workflows_module()
-    if mod is None:
-        return {"error": "jarvis-workflows module not installed"}
-    needle = (args.get("name_or_id") or args.get("name")
-              or args.get("id") or "").strip()
-    if not needle:
-        return {"error": "name_or_id is required"}
-    return mod.run_workflow(needle)
-
-
-def _tool_update_workflow(args: dict, _mem: Memory) -> dict:
-    mod = _load_workflows_module()
-    if mod is None:
-        return {"error": "jarvis-workflows module not installed"}
-    needle = (args.get("name_or_id") or args.get("name")
-              or args.get("id") or "").strip()
-    if not needle:
-        return {"error": "name_or_id is required"}
-    enabled = args.get("enabled")
-    if enabled is not None:
-        enabled = bool(enabled)
-    notify = args.get("notify_on_complete")
-    if notify is not None:
-        notify = bool(notify)
-    return mod.update_workflow(
-        needle, enabled=enabled,
-        schedule=args.get("schedule"),
-        goal=args.get("goal"),
-        notify_on_complete=notify,
-    )
-
-
-def _tool_delete_workflow(args: dict, _mem: Memory) -> dict:
-    mod = _load_workflows_module()
-    if mod is None:
-        return {"error": "jarvis-workflows module not installed"}
-    needle = (args.get("name_or_id") or args.get("name")
-              or args.get("id") or "").strip()
-    if not needle:
-        return {"error": "name_or_id is required"}
-    return mod.delete_workflow(needle, confirm=bool(args.get("confirm")))
-
-
-# ── local-model status/stats handlers ─────────────────────────────────
-def _tool_model_status(_args: dict, _mem: Memory) -> dict:
-    """Probe the local inference server's /healthz and report whether
-    Tier 1 + Tier 2 are reachable. When the router lib is missing or
-    JARVIS_LOCAL_MODEL is off, return the configured-but-disabled state."""
-    if _router_mod is None:
-        return {"error": "model_router not installed",
-                "local_model_enabled": False}
-    enabled = os.environ.get("JARVIS_LOCAL_MODEL") == "1"
-    endpoint = _router_mod.local_endpoint()
-    health_url = endpoint.rsplit("/v1/", 1)[0].rstrip("/") + "/healthz"
-    try:
-        with urllib.request.urlopen(health_url, timeout=3) as r:
-            health = json.loads(r.read())
-    except Exception as e:
-        return {
-            "local_model_enabled": enabled,
-            "endpoint": endpoint,
-            "reachable": False,
-            "error": str(e),
-        }
-    return {
-        "local_model_enabled": enabled,
-        "endpoint": endpoint,
-        "reachable": True,
-        "health": health,
-    }
-
-
-def _tool_model_stats(args: dict, _mem: Memory) -> dict:
-    """Roll up routing decisions over the last `hours` (default 24).
-    Reads the outcome ledger via model_router.routing_stats()."""
-    if _router_mod is None:
-        return {"error": "model_router not installed"}
-    try:
-        hours = float(args.get("hours") or 24.0)
-    except (TypeError, ValueError):
-        hours = 24.0
-    try:
-        return _router_mod.routing_stats(hours=hours)
-    except Exception as e:
-        return {"error": f"routing_stats failed: {e}"}
-
-
-# ── OpenAI-format translators (for the local model path) ──────────────
-# The local serve.py speaks OpenAI Chat Completions; everything inside this
-# module speaks Anthropic. These two translators bridge the formats so the
-# user never sees the difference. Anthropic system blocks → OpenAI system
-# message. Anthropic tool_use/tool_result blocks → OpenAI tool_calls / tool
-# role messages. Tools array → function-spec array.
-def _to_openai_system(system_field) -> str:
-    if isinstance(system_field, str):
-        return system_field
-    if isinstance(system_field, list):
-        out: list[str] = []
-        for blk in system_field:
-            if isinstance(blk, dict) and blk.get("type") == "text":
-                out.append(blk.get("text") or "")
-        return "\n\n".join(s for s in out if s)
-    return ""
-
-
-def _to_openai_messages(messages: list[dict]) -> list[dict]:
-    out: list[dict] = []
-    for m in messages:
-        role = m.get("role")
-        content = m.get("content")
-        if isinstance(content, str):
-            out.append({"role": role, "content": content})
-            continue
-        if not isinstance(content, list):
-            out.append({"role": role, "content": ""})
-            continue
-        # block-list form: split into the matching OpenAI shape
-        if role == "user":
-            text_parts: list[str] = []
-            for blk in content:
-                if not isinstance(blk, dict):
-                    continue
-                if blk.get("type") == "text":
-                    text_parts.append(blk.get("text") or "")
-                elif blk.get("type") == "tool_result":
-                    raw = blk.get("content")
-                    if isinstance(raw, list):
-                        # nested text blocks inside the tool_result
-                        raw = "".join(b.get("text", "") for b in raw
-                                      if isinstance(b, dict))
-                    out.append({
-                        "role": "tool",
-                        "tool_call_id": blk.get("tool_use_id") or "",
-                        "name": blk.get("name") or "tool",
-                        "content": raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False),
-                    })
-            if text_parts:
-                out.append({"role": "user", "content": "\n".join(text_parts)})
-        elif role == "assistant":
-            text_parts = []
-            tool_calls: list[dict] = []
-            for blk in content:
-                if not isinstance(blk, dict):
-                    continue
-                if blk.get("type") == "text":
-                    text_parts.append(blk.get("text") or "")
-                elif blk.get("type") == "tool_use":
-                    tool_calls.append({
-                        "id": blk.get("id") or "",
-                        "type": "function",
-                        "function": {
-                            "name": blk.get("name") or "",
-                            "arguments": json.dumps(blk.get("input") or {}, ensure_ascii=False),
-                        },
-                    })
-            entry: dict = {"role": "assistant", "content": "\n".join(text_parts) or None}
-            if tool_calls:
-                entry["tool_calls"] = tool_calls
-            out.append(entry)
-        else:
-            out.append({"role": role, "content": str(content)})
-    return out
-
-
-def _to_openai_tools(tools: list[dict]) -> list[dict]:
-    return [{
-        "type": "function",
-        "function": {
-            "name": s.get("name"),
-            "description": (s.get("description") or "").strip(),
-            "parameters": s.get("input_schema") or {"type": "object", "properties": {}},
-        },
-    } for s in (tools or [])]
-
-
-def _stream_local_model(model_id: str, system, messages: list[dict],
-                        tools: list[dict]):
-    """Buffered local-model call that yields the same event shape as
-    `_stream_anthropic`. Raises on any error so the caller can fall back
-    to the Anthropic path. We don't actually stream — we drain the local
-    response in one go and replay it as a single ('text_delta', ...) +
-    one ('block_stop', ...) per block + a terminal ('message_stop', ...)."""
-    if _router_mod is None:
-        raise RuntimeError("model_router not loaded")
-    Backend = _router_mod.ModelBackend
-    backend = _router_mod.route("complex_conversation", context=None)
-    if backend == Backend.API_FALLBACK:
-        raise RuntimeError("router selected API fallback")
-
-    served_model = _router_mod.model_name_for(backend)
-    endpoint = _router_mod.local_endpoint()
-
-    payload = {
-        "model": served_model,
-        "messages": [
-            {"role": "system", "content": _to_openai_system(system)},
-            *_to_openai_messages(messages),
-        ],
-        "tools": _to_openai_tools(tools),
-        "max_tokens": MAX_TOKENS,
-        "stream": False,
-    }
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"content-type": "application/json"},
-    )
-    t0 = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            resp = json.loads(r.read())
-    except Exception as e:
-        # Surface failure to the caller; record_decision logs the bounce.
-        try:
-            _router_mod.record_decision(
-                "complex_conversation", backend,
-                latency_ms=int((time.monotonic() - t0) * 1000),
-                accepted=False, extra={"error": str(e)[:200]},
-            )
-        except Exception:
-            pass
-        raise
-
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    choice = (resp.get("choices") or [{}])[0]
-    msg = choice.get("message") or {}
-    finish = choice.get("finish_reason") or "stop"
-    content = msg.get("content") or ""
-    tool_calls = msg.get("tool_calls") or []
-
-    blocks: list[dict] = []
-    if content:
-        text_block = {"type": "text", "text": content}
-        blocks.append(text_block)
-        yield ("text_delta", content)
-        yield ("block_stop", text_block)
-    for tc in tool_calls:
-        f = tc.get("function") or {}
-        try:
-            args = json.loads(f.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
-        block = {
-            "type": "tool_use",
-            "id": tc.get("id") or f"toolu_local_{int(time.time() * 1000)}",
-            "name": f.get("name") or "",
-            "input": args,
-        }
-        blocks.append(block)
-        yield ("block_stop", block)
-
-    stop_map = {"stop": "end_turn", "tool_calls": "tool_use",
-                "length": "max_tokens", "function_call": "tool_use"}
-    yield ("message_stop", {
-        "stop_reason": stop_map.get(finish, "end_turn"),
-        "blocks": blocks,
-        "usage": resp.get("usage") or {},
-    })
-
-    try:
-        _router_mod.record_decision(
-            "complex_conversation", backend,
-            latency_ms=elapsed_ms, accepted=True,
-            extra={"served_model": served_model,
-                   "tool_calls": len(tool_calls)},
-        )
-    except Exception:
-        pass
-
-
-def _try_local_buffered(system, messages: list[dict], tools: list[dict]):
-    """Return the full event list from the local model, or None on any
-    failure (so run_turn can fall through to the Anthropic path)."""
-    if os.environ.get("JARVIS_LOCAL_MODEL") != "1":
-        return None
-    try:
-        return list(_stream_local_model("local", system, messages, tools))
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: local model bounce → API ({e})\n")
-        return None
+    return mod.network_alerts(refresh=bool(args.get("refresh")))
 
 
 # Tool registry — name → (handler, schema)
@@ -3323,35 +2719,189 @@ TOOLS: dict[str, tuple[Any, dict]] = {
             },
         },
     ),
-    "social_post": (
-        _tool_social_post,
+    "network_search": (
+        _tool_network_search,
         {
-            "name": "social_post",
+            "name": "network_search",
             "description": (
-                "Publish a new top-level post (tweet / LinkedIn share / "
-                "etc.). Same confirm=true safety as social_reply: preview "
-                "first, send only after Watson's clear yes. RSS is read-"
-                "only. Note: Twitter posting needs TWITTER_OAUTH_USER_TOKEN "
-                "(bearer-only is read-only); LinkedIn posting via the "
-                "Voyager cookie path is intentionally refused (TOS); "
-                "Instagram doesn't support text-only posts."
+                "Semantic search across Watson's professional network — "
+                "matches the query against skills, expertise areas, "
+                "intro targets, tags, topics, brief, and notes for every "
+                "tracked contact. Returns ranked candidates with the "
+                "match reasoning attached. Use when Watson asks 'who in "
+                "my network knows X', 'who can help with Y', 'who do I "
+                "know in the Z space'. Filter by `trust_level` "
+                "(inner_circle | trusted | professional | acquaintance | "
+                "cold), `tags`, `min_strength` (0..1), `channel`, and "
+                "`recency_days`. Pass an empty query plus filters to "
+                "list contacts in a tier or above a strength floor."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "platform": {
+                    "query": {
                         "type": "string",
-                        "enum": ["twitter", "linkedin", "instagram"],
+                        "description": "What you're looking for (skill, "
+                                       "topic, capability).",
                     },
-                    "message": {
-                        "type": "string",
+                    "filters": {
+                        "type": "object",
+                        "description": "Optional filters: trust_level "
+                                       "(string or list), tags (list), "
+                                       "min_strength (number), channel, "
+                                       "recency_days (number).",
                     },
-                    "confirm": {
-                        "type": "boolean",
-                        "description": "Must be true to actually send.",
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 10).",
                     },
                 },
-                "required": ["platform", "message"],
+            },
+        },
+    ),
+    "network_map": (
+        _tool_network_map,
+        {
+            "name": "network_map",
+            "description": (
+                "Generate a structured overview of Watson's network. With "
+                "no `focus`, returns top contacts grouped by trust tier "
+                "(inner_circle, trusted, professional, acquaintance, "
+                "cold) — 'the lay of my network'. With `focus` (e.g. "
+                "'fundraising', 'engineering hires'), returns who's "
+                "relevant plus the suggested approach order ranked by "
+                "match × strength. Use when Watson asks 'give me the "
+                "lay of my network', 'who's in my inner circle', or "
+                "'show me my fundraising contacts'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "focus": {
+                        "type": "string",
+                        "description": "Optional topic to focus the map on.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max contacts per tier or per "
+                                       "focus block (default 20).",
+                    },
+                },
+            },
+        },
+    ),
+    "relationship_score": (
+        _tool_relationship_score,
+        {
+            "name": "relationship_score",
+            "description": (
+                "Deep one-person snapshot: relationship strength (0..1), "
+                "trajectory (growing | stable | fading), days since last "
+                "interaction, score components (frequency, recency, "
+                "depth, reciprocity), open threads, talking points, and "
+                "a concrete next-action suggestion (action, channel, "
+                "urgency). Pulls fresh email + Telegram + memory history "
+                "before scoring. Use when Watson asks 'how's my "
+                "relationship with X', 'what's my standing with Y', "
+                "'should I reach out to Z'. Stronger than "
+                "`relationship_brief` for analytical questions; "
+                "`relationship_brief` is still better for the voice-ready "
+                "summary."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name, email, or @telegram handle "
+                                       "(fuzzy).",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    ),
+    "network_suggest": (
+        _tool_network_suggest,
+        {
+            "name": "network_suggest",
+            "description": (
+                "Given a goal, propose who in Watson's network to "
+                "leverage and in what order. Sonnet plans a strategy "
+                "grounded in the network slice (only real contacts — "
+                "never invented). Returns a strategy paragraph, ordered "
+                "approach list (each entry: name, reason, channel, "
+                "first_move), a fallback if the primary path stalls, and "
+                "watch-outs. Use when Watson asks 'who should I talk to "
+                "about X', 'how do I close the Y deal', 'I need an intro "
+                "to Z'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "What Watson wants to accomplish.",
+                    },
+                },
+                "required": ["goal"],
+            },
+        },
+    ),
+    "enrich_network": (
+        _tool_enrich_network,
+        {
+            "name": "enrich_network",
+            "description": (
+                "Batch-refresh the network layer: recompute relationship "
+                "strength + trust tiers for every contact, rebuild the "
+                "mutual-contacts graph, and run Haiku skill / expertise "
+                "extraction on stale records. Caps the Haiku passes per "
+                "run via JARVIS_NETWORK_BATCH_CAP (default 12). Normally "
+                "runs weekly via jarvis-improve — only call manually "
+                "when Watson asks to 'refresh the network' or after "
+                "loading a batch of new contacts. Pass `force=true` to "
+                "re-run the Haiku pass on already-enriched records."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Re-run Haiku enrichment even on "
+                                       "fresh records.",
+                    },
+                    "cap": {
+                        "type": "integer",
+                        "description": "Override the per-run Haiku cap.",
+                    },
+                },
+            },
+        },
+    ),
+    "network_alerts": (
+        _tool_network_alerts,
+        {
+            "name": "network_alerts",
+            "description": (
+                "Return current network alerts: fading relationships "
+                "(inner_circle past 30 days, trusted past 60), pending "
+                "follow-ups from open threads, and intro opportunities "
+                "Watson's contacts have surfaced. Each alert has a "
+                "priority (high | normal | low) and the contact name. "
+                "Use when Watson asks 'who am I neglecting', 'what "
+                "follow-ups do I owe', 'any relationship alerts'. Pass "
+                "`refresh=true` to recompute from people.json instead "
+                "of the cached file."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "Recompute from people.json.",
+                    },
+                },
             },
         },
     ),

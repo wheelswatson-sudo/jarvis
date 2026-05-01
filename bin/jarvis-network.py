@@ -1,54 +1,73 @@
 #!/usr/bin/env python3
-"""Network intelligence — Watson's professional graph as a queryable system.
+"""Network Intelligence — Watson's professional network as a queryable graph.
 
-jarvis-contacts answers "what do I know about this person." This module
-answers everything one rung up: who can do what, how strong is the bond,
-who is the right ally for this goal, who knows whom, and what is going
-quiet that should not be.
+Where jarvis-contacts.py stores per-person relationship memory (brief,
+talking points, last interaction), jarvis-network.py turns that store
+into a graph: who can do what, who is strongly connected to whom, who
+to call on for which goal, where the relationships are fading.
 
-It augments — it does not replace — `~/.jarvis/contacts/people.json`.
-Every contact record gets a set of network-only fields filled in lazily:
+The two modules share the same backing file (~/.jarvis/contacts/people.json).
+Network simply augments each record with computed fields (relationship
+strength, trust level, mutual contacts) and adds graph-level operations
+on top. Existing tools (lookup_contact, relationship_brief) keep working
+and now read the richer record.
 
-    skills                  list[str] — extracted from chat history
-    expertise_areas         list[str] — broader domains
-    can_intro_to            list[{name, context}] — who they could intro to
-    relationship_strength   float in [0,1] — composite signal (see below)
-    trust_level             "inner_circle" | "trusted" | "professional"
-                            | "acquaintance" | "cold"
-    interaction_history     {email, telegram, social} → {count, topics,
-                            sentiment, avg_chars}
-    network_position        {mutual_contacts, groups_shared, connector_score}
-    tags                    list[str] — user-applied or Haiku-derived
-    network_notes           list[str] — network-only notes (separate from
-                            the existing per-contact notes field so this
-                            module doesn't churn the human-curated list)
+Public surface:
 
-Strength formula (configurable via env):
+    network_search(query, filters=None, limit=10) -> dict
+        Semantic search across the network. Matches against skills,
+        expertise, topics, brief, notes, relationship label. Filters:
+        trust_level, tags, min_strength, channel, recency_days.
 
-    strength = 0.4·frequency + 0.3·recency + 0.2·depth + 0.1·reciprocity
+    network_map(focus=None, limit=20) -> dict
+        Network overview. No focus → top contacts grouped by trust tier.
+        With focus → who's relevant + how they connect + suggested order.
 
-  frequency   log-scaled normalized interaction count
-  recency     exp decay over the last_interaction (30-day half-life)
-  depth       message-length & topic-diversity blend
-  reciprocity balance of Watson-out vs other-in messages, penalty if lopsided
+    relationship_score(name) -> dict
+        Deep one-person analysis: strength, trajectory, channels,
+        responsiveness, suggested next action and channel.
 
-Six public tools (all return JSON-serializable dicts so jarvis-think.py can
-register them as Anthropic tools):
+    network_suggest(goal) -> dict
+        Given a goal ("close the Forge deal", "find a React dev"), Sonnet
+        proposes who to leverage and in what order, grounded in the network.
 
-    network_search(query, filters=None, limit=8)
-    network_map(focus=None)
-    relationship_score(name)
-    network_suggest(goal)
-    enrich_network(force=False)
-    network_alerts()
+    enrich_network(force=False, cap=None) -> dict
+        Batch pass: bumps relationship_strength, infers skills/expertise
+        via Haiku, computes mutual contacts and shared groups, populates
+        trust_level, refreshes alerts. Run weekly via jarvis-improve.
 
-CLI mirrors the public API. See `jarvis-network --help`.
+    network_alerts() -> dict
+        Proactive list: fading inner_circle, pending follow-ups, intro
+        opportunities, milestones.
 
-Gate: JARVIS_NETWORK=1 (default).
+Helpers consumed elsewhere:
+
+    relationship_alerts_section() -> str
+        Markdown block for jarvis-briefing.py (only when actionable).
+    push_alerts_to_notifications() -> dict
+        Enqueue actionable alerts onto the smart notification bus.
+    context_hint() -> str
+        One-line hint for jarvis-context.py when high-priority alerts pend.
+
+CLI:
+    bin/jarvis-network.py --search "fundraising"
+    bin/jarvis-network.py --map [--focus "investors"]
+    bin/jarvis-network.py --score Corbin
+    bin/jarvis-network.py --suggest "close the Forge deal"
+    bin/jarvis-network.py --enrich-all [--force]
+    bin/jarvis-network.py --alerts
+    bin/jarvis-network.py --status
+
+Files written:
+    ~/.jarvis/contacts/people.json    (extended schema, shared with contacts)
+    ~/.jarvis/contacts/network.json   network-level cache (mutual contact graph)
+    ~/.jarvis/contacts/alerts.json    last computed alert list
+    ~/.jarvis/logs/network.log        diagnostic log
+
+Gate: JARVIS_NETWORK=1 (default 1).
 """
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
 import math
@@ -60,50 +79,57 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
 BIN_DIR = ASSISTANT_DIR / "bin"
 LIB_DIR = ASSISTANT_DIR / "lib"
 CONTACTS_DIR = ASSISTANT_DIR / "contacts"
 PEOPLE_FILE = CONTACTS_DIR / "people.json"
+NETWORK_FILE = CONTACTS_DIR / "network.json"
+ALERTS_FILE = CONTACTS_DIR / "alerts.json"
 LOG_DIR = ASSISTANT_DIR / "logs"
 NETWORK_LOG = LOG_DIR / "network.log"
-STATE_DIR = ASSISTANT_DIR / "state"
-ALERTS_FILE = STATE_DIR / "network-alerts.json"
 
 ENRICH_INTERVAL_S = int(os.environ.get("JARVIS_NETWORK_REFRESH_S", str(7 * 86400)))
-SKILL_MODEL = os.environ.get("JARVIS_NETWORK_MODEL", "claude-haiku-4-5-20251001")
+SKILLS_MODEL = os.environ.get("JARVIS_NETWORK_SKILLS_MODEL", "claude-haiku-4-5-20251001")
 SUGGEST_MODEL = os.environ.get("JARVIS_NETWORK_SUGGEST_MODEL", "claude-sonnet-4-6")
+BATCH_CAP = int(os.environ.get("JARVIS_NETWORK_BATCH_CAP", "12"))
 
-STRENGTH_W_FREQ = float(os.environ.get("JARVIS_NETWORK_W_FREQ", "0.4"))
-STRENGTH_W_RECENCY = float(os.environ.get("JARVIS_NETWORK_W_RECENCY", "0.3"))
-STRENGTH_W_DEPTH = float(os.environ.get("JARVIS_NETWORK_W_DEPTH", "0.2"))
-STRENGTH_W_RECIPROCITY = float(os.environ.get("JARVIS_NETWORK_W_RECIPROCITY", "0.1"))
+# Half-lives in days. Recency for the strength formula uses a 30-day half-life
+# (interactions older than ~3 months barely count). Fading thresholds below.
+STRENGTH_HALFLIFE_DAYS = 30.0
 
-TRUST_THRESHOLDS = {
-    "inner_circle":  0.85,
-    "trusted":       0.65,
-    "professional":  0.40,
-    "acquaintance":  0.15,
-}
-
-# Hard-override relationship labels — anyone tagged this way gets bumped to
-# inner_circle regardless of measured signal volume.
-INNER_CIRCLE_RELATIONSHIPS = {
-    "spouse", "partner", "wife", "husband",
-    "co-founder", "cofounder", "co founder",
-    "best friend",
-}
-
-FADE_DAYS = {
-    "inner_circle": 14,
-    "trusted":      30,
+FADING_THRESHOLDS_DAYS = {
+    "inner_circle": 30,
+    "trusted": 60,
     "professional": 90,
+    "acquaintance": 180,
 }
 
+TRUST_LABEL_MAP = {
+    # explicit relationship labels → trust tier (case-insensitive substring)
+    "inner_circle": ["spouse", "partner", "co-founder", "cofounder", "best friend"],
+    "trusted": [
+        "investor", "client", "founder peer", "advisor", "mentor",
+        "team", "employee", "lead", "director", "manager",
+    ],
+    "professional": ["customer", "vendor", "supplier", "consultant", "contractor"],
+    "acquaintance": ["acquaintance", "lead", "prospect", "intro"],
+}
 
-# ── logging + gate ────────────────────────────────────────────────────
+TIER_WEIGHT = {
+    "inner_circle": 1.0,
+    "trusted": 0.8,
+    "professional": 0.6,
+    "acquaintance": 0.4,
+    "cold": 0.2,
+}
+
+VALID_TIERS = ("inner_circle", "trusted", "professional", "acquaintance", "cold")
+
+
+# ── Logging ─────────────────────────────────────────────────────────
 def _log(msg: str) -> None:
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,360 +140,718 @@ def _log(msg: str) -> None:
         pass
 
 
+# ── Gate ────────────────────────────────────────────────────────────
 def _gate_check() -> dict | None:
     if os.environ.get("JARVIS_NETWORK", "1") != "1":
         return {"error": "network intelligence disabled (JARVIS_NETWORK=0)"}
     return None
 
 
-# ── module loaders ────────────────────────────────────────────────────
-def _load_module(mod_id: str, filename: str, search_dirs: list[Path]) -> Any:
+# ── Sibling loaders ─────────────────────────────────────────────────
+def _bin_search() -> list[Path]:
+    return [BIN_DIR, Path(__file__).parent]
+
+
+def _lib_search() -> list[Path]:
+    return [LIB_DIR, Path(__file__).parent.parent / "lib"]
+
+
+_loaded: dict[str, Any] = {}
+
+
+def _load(module_id: str, relative: str, search_dirs: list[Path]):
+    if module_id in _loaded:
+        return _loaded[module_id]
     for d in search_dirs:
-        src = d / filename
+        src = d / relative
         if src.exists():
             try:
-                spec = importlib.util.spec_from_file_location(mod_id, src)
+                spec = importlib.util.spec_from_file_location(module_id, src)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                _loaded[module_id] = mod
                 return mod
             except Exception as e:
-                _log(f"load {filename} failed: {e}")
+                _log(f"load {relative} failed: {e}")
+                _loaded[module_id] = None
                 return None
+    _loaded[module_id] = None
     return None
 
 
-_BIN_SEARCH = [BIN_DIR, Path(__file__).parent]
-_LIB_SEARCH = [LIB_DIR, Path(__file__).parent.parent / "lib"]
-
-_cache: dict[str, Any] = {}
+def _contacts_mod():
+    return _load("jarvis_contacts_for_network", "jarvis-contacts.py", _bin_search())
 
 
-def _contacts():
-    if "contacts" not in _cache:
-        _cache["contacts"] = _load_module("jarvis_contacts_for_network",
-                                          "jarvis-contacts.py", _BIN_SEARCH)
-    return _cache["contacts"]
+def _primitive_mod():
+    return _load("primitive_for_network", "primitive.py", _lib_search())
 
 
-def _telegram():
-    if "telegram" not in _cache:
-        _cache["telegram"] = _load_module("jarvis_telegram_for_network",
-                                          "jarvis-telegram.py", _BIN_SEARCH)
-    return _cache["telegram"]
+def _ledger_mod():
+    return _load("outcome_ledger_for_network", "outcome_ledger.py", _lib_search())
 
 
-def _primitive():
-    if "primitive" not in _cache:
-        _cache["primitive"] = _load_module("primitive", "primitive.py", _LIB_SEARCH)
-    return _cache["primitive"]
+# ── Atomic JSON I/O ─────────────────────────────────────────────────
+def _read_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
 
 
-def _linkedin():
-    if "linkedin" not in _cache:
-        _cache["linkedin"] = _load_module("jarvis_linkedin_for_network",
-                                           "jarvis-linkedin.py", _BIN_SEARCH)
-    return _cache["linkedin"]
+def _write_json(path: Path, data) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except Exception as e:
+        _log(f"write {path.name} failed: {e}")
+        return False
 
 
-def _apple():
-    if "apple" not in _cache:
-        _cache["apple"] = _load_module("jarvis_apple_for_network",
-                                        "jarvis-apple.py", _BIN_SEARCH)
-    return _cache["apple"]
-
-
-def _stripe():
-    if "stripe" not in _cache:
-        _cache["stripe"] = _load_module("jarvis_stripe_for_network",
-                                          "jarvis-stripe.py", _BIN_SEARCH)
-    return _cache["stripe"]
-
-
-def _emit(action: str, status: str, **ctx) -> None:
-    p = _primitive()
-    if p is None:
+def _emit(action: str, status: str, context: dict | None = None,
+          latency_ms: float | None = None) -> None:
+    mod = _ledger_mod()
+    if mod is None:
         return
     try:
-        p.emit(cap="network", action=action, status=status, context=ctx)
+        mod.emit(cap="network", action=action, status=status,
+                 context=context, latency_ms=latency_ms)
     except Exception:
         pass
 
 
-# ── people-file I/O (delegates to jarvis-contacts to stay single-source) ─
-def _load_people() -> dict:
-    mod = _contacts()
-    if mod is not None:
-        try:
-            return mod._load_people()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-    if not PEOPLE_FILE.exists():
-        return {}
-    try:
-        data = json.loads(PEOPLE_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_people(data: dict) -> None:
-    mod = _contacts()
-    if mod is not None:
-        try:
-            mod._save_people(data)  # type: ignore[attr-defined]
-            return
-        except Exception:
-            pass
-    CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = PEOPLE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, PEOPLE_FILE)
-
-
-# ── network field defaults — additive, does NOT touch existing fields ─
+# ── Schema migration ────────────────────────────────────────────────
 def _ensure_network_fields(rec: dict) -> dict:
-    """Fill missing network-only fields with defaults. Idempotent — never
-    overwrites existing values. Returns rec for chaining."""
+    """Backfill network-layer fields onto a contact record if missing.
+    Idempotent and non-destructive — existing values win."""
     rec.setdefault("skills", [])
     rec.setdefault("expertise_areas", [])
     rec.setdefault("can_intro_to", [])
     rec.setdefault("relationship_strength", 0.0)
-    rec.setdefault("trust_level", "cold")
-    rec.setdefault("interaction_history", {
-        "email":    {"count": 0, "topics": [], "sentiment": "neutral", "avg_chars": 0},
-        "telegram": {"count": 0, "topics": [], "sentiment": "neutral", "avg_chars": 0},
-        "social":   {"count": 0, "topics": [], "sentiment": "neutral", "avg_chars": 0},
-    })
-    # Backfill missing channel sub-records on older entries.
-    ih = rec["interaction_history"]
-    for ch in ("email", "telegram", "social"):
-        ih.setdefault(ch, {"count": 0, "topics": [], "sentiment": "neutral", "avg_chars": 0})
-    rec.setdefault("network_position", {
-        "mutual_contacts": [], "groups_shared": [], "connector_score": 0.0,
-    })
+    rec.setdefault("trust_level", "acquaintance")
     rec.setdefault("tags", [])
-    rec.setdefault("network_notes", [])
-    rec.setdefault("network_enriched_at", None)
+    ih = rec.get("interaction_history") or {}
+    ih.setdefault("total_interactions", rec.get("interaction_count") or 0)
+    ih.setdefault("last_interaction", rec.get("last_interaction"))
+    ih.setdefault("avg_response_time_hours", None)
+    ih.setdefault("channels", {})
+    ih.setdefault("sentiment_trend", rec.get("sentiment_trend") or "neutral")
+    ih.setdefault("topics_discussed", [])
+    rec["interaction_history"] = ih
+    np = rec.get("network_position") or {}
+    np.setdefault("mutual_contacts", [])
+    np.setdefault("groups_shared", [])
+    np.setdefault("connector_score", 0.0)
+    rec["network_position"] = np
+    rec.setdefault("net_enriched_at", None)
     return rec
 
 
-# ── strength components ───────────────────────────────────────────────
-def _frequency_score(rec: dict) -> float:
-    """log-scaled normalized interaction count. 0 → 0; 5 → ~0.5; 50+ → ~1."""
-    n = int(rec.get("interaction_count") or 0)
-    if n <= 0:
-        return 0.0
-    # log10(n+1) / log10(51) so 50 maps to ~1.0
-    return min(1.0, math.log10(n + 1) / math.log10(51))
-
-
-def _recency_score(rec: dict, now: float | None = None) -> float:
-    last = rec.get("last_interaction")
-    if not last:
-        return 0.0
+def _load_people() -> dict:
+    cm = _contacts_mod()
+    if cm is None:
+        return _read_json(PEOPLE_FILE, {})
     try:
-        ts = datetime.fromisoformat(last).timestamp()
+        return cm._load_people()  # type: ignore[attr-defined]
     except Exception:
-        return 0.0
-    age_days = max(0.0, ((now or time.time()) - ts) / 86400.0)
-    # 30-day half-life, clamped to [0, 1]
-    return max(0.0, min(1.0, math.exp(-age_days / 30.0)))
+        return _read_json(PEOPLE_FILE, {})
+
+
+def _save_people(people: dict) -> None:
+    cm = _contacts_mod()
+    if cm is not None:
+        try:
+            cm._save_people(people)  # type: ignore[attr-defined]
+            return
+        except Exception:
+            pass
+    _write_json(PEOPLE_FILE, people)
+
+
+def _canonical(name: str) -> str:
+    cm = _contacts_mod()
+    if cm is not None:
+        try:
+            return cm._canonical(name)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
+def _resolve(name: str, people: dict | None = None):
+    cm = _contacts_mod()
+    if cm is None:
+        return None
+    try:
+        return cm._resolve(name, people)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
+# ── Strength + trust computation ────────────────────────────────────
+def _parse_iso(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _days_since(ts: str | None) -> float | None:
+    t = _parse_iso(ts)
+    if t is None:
+        return None
+    return max(0.0, (time.time() - t) / 86400.0)
+
+
+def _frequency_score(rec: dict) -> float:
+    """Saturating curve over 50 interactions — beyond that, strength is
+    carried by recency and depth, not raw volume."""
+    n = int(rec.get("interaction_count") or 0)
+    return min(1.0, n / 50.0)
+
+
+def _recency_score(rec: dict) -> float:
+    days = _days_since(rec.get("last_interaction"))
+    if days is None:
+        return 0.1
+    return max(0.0, math.exp(-days / STRENGTH_HALFLIFE_DAYS))
 
 
 def _depth_score(rec: dict) -> float:
-    """Blend avg-chars (capped) and topic diversity. A handful of long
-    threaded exchanges beats fifty one-liners."""
-    ih = rec.get("interaction_history") or {}
-    avg_chars: list[float] = []
-    topics: set[str] = set()
-    for ch in ("email", "telegram", "social"):
-        sub = ih.get(ch) or {}
-        c = float(sub.get("avg_chars") or 0)
-        if c > 0:
-            avg_chars.append(c)
-        for t in sub.get("topics") or []:
-            t = (t or "").strip().lower()
-            if t:
-                topics.add(t)
-    avg = (sum(avg_chars) / len(avg_chars)) if avg_chars else 0.0
-    # 600 chars saturates depth — ~typical multi-paragraph email
-    chars_score = min(1.0, avg / 600.0)
-    diversity = min(1.0, len(topics) / 8.0)
-    return 0.6 * chars_score + 0.4 * diversity
+    """Weight by trust tier so labels survive periods of light contact —
+    your spouse is a strong tie even on a quiet week."""
+    tier = (rec.get("trust_level") or "acquaintance").lower()
+    return TIER_WEIGHT.get(tier, 0.4)
 
 
 def _reciprocity_score(rec: dict) -> float:
-    """1.0 when in/out are roughly balanced, dropping toward 0 when
-    lopsided. We approximate "out" from interaction_count (we sent them
-    something) and "in" from email/telegram raw counts."""
-    n_total = int(rec.get("interaction_count") or 0)
-    if n_total <= 0:
-        return 0.0
+    """Channel diversity + balance proxy — multi-channel relationships score
+    higher than single-channel ones at the same volume. Returns 0.5 when we
+    don't have channel breakdown yet (neutral, doesn't penalize)."""
     ih = rec.get("interaction_history") or {}
-    n_in = sum(int((ih.get(ch) or {}).get("count") or 0)
-               for ch in ("email", "telegram", "social"))
-    if n_in <= 0:
-        # We've talked to them but never seen anything back — treat as low.
-        return 0.2
-    # Perfectly balanced when n_in ≈ n_total / 2 (roughly half were inbound).
-    ratio = min(n_in, n_total) / max(n_in, n_total)
-    return ratio
+    ch = ih.get("channels") or {}
+    if not ch:
+        return 0.5
+    total = sum(v for v in ch.values() if isinstance(v, (int, float)))
+    if total <= 0:
+        return 0.5
+    diversity = len([v for v in ch.values() if (v or 0) > 0]) / 3.0  # cap at 3 channels
+    diversity = min(1.0, diversity)
+    return round(0.5 * diversity + 0.5 * min(1.0, total / 30.0), 3)
 
 
-def compute_strength(rec: dict, now: float | None = None) -> float:
-    """Composite 0..1 score — see module docstring for the formula."""
-    f = _frequency_score(rec)
-    r = _recency_score(rec, now=now)
-    d = _depth_score(rec)
-    p = _reciprocity_score(rec)
-    score = (STRENGTH_W_FREQ * f + STRENGTH_W_RECENCY * r
-             + STRENGTH_W_DEPTH * d + STRENGTH_W_RECIPROCITY * p)
-    return round(max(0.0, min(1.0, score)), 3)
+def _compute_strength(rec: dict) -> float:
+    """strength = 0.4 freq + 0.3 recency + 0.2 depth + 0.1 reciprocity."""
+    s = (
+        0.4 * _frequency_score(rec)
+        + 0.3 * _recency_score(rec)
+        + 0.2 * _depth_score(rec)
+        + 0.1 * _reciprocity_score(rec)
+    )
+    return round(max(0.0, min(1.0, s)), 3)
 
 
-def _trust_for_strength(strength: float, rec: dict) -> str:
-    """Map composite strength to trust_level. Honours inner-circle hard
-    overrides (spouse / cofounder etc.) regardless of low signal."""
-    rel = (rec.get("relationship") or "").lower()
-    if any(tok in rel for tok in INNER_CIRCLE_RELATIONSHIPS):
-        return "inner_circle"
-    for level, threshold in TRUST_THRESHOLDS.items():
-        if strength >= threshold:
-            return level
-    return "cold"
+def _infer_trust_level(rec: dict) -> str:
+    """Map relationship label → tier; fall back to interaction-count heuristic."""
+    label = (rec.get("relationship") or "").lower()
+    if label:
+        for tier, keywords in TRUST_LABEL_MAP.items():
+            if any(kw in label for kw in keywords):
+                return tier
+    n = int(rec.get("interaction_count") or 0)
+    days = _days_since(rec.get("last_interaction"))
+    if days is None or days > 365:
+        return "cold"
+    if n >= 30:
+        return "trusted"
+    if n >= 10:
+        return "professional"
+    return "acquaintance"
 
 
-# ── interaction-history rebuild from raw history ──────────────────────
-_TOPIC_NOISE = re.compile(
-    r"^(re|fw|fwd):|^(hi|hey|hello|thanks|thx|yo|sup)\b", re.I,
-)
-
-
-def _topics_from_subjects(subjects: Iterable[str], cap: int = 8) -> list[str]:
-    """Light heuristic — strip Re:/Fw:, dedupe by lowercase, cap. Avoids a
-    Haiku call on every contact."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for s in subjects:
-        s = (s or "").strip()
-        if not s:
-            continue
-        s = re.sub(r"^(re|fw|fwd):\s*", "", s, flags=re.I).strip()
-        norm = s.lower()
-        if not norm or norm in seen or _TOPIC_NOISE.match(norm):
-            continue
-        seen.add(norm)
-        out.append(s[:80])
-        if len(out) >= cap:
-            break
+def _infer_channels(rec: dict) -> dict:
+    """Best-effort breakdown by counting how many fields look populated for
+    each channel. Real numbers come from enrich_network's history pull."""
+    out: dict[str, int] = {}
+    ih = rec.get("interaction_history") or {}
+    cur = ih.get("channels") or {}
+    if cur:
+        return {k: int(v) for k, v in cur.items() if isinstance(v, (int, float))}
+    last_channel = rec.get("last_channel") or ""
+    if last_channel:
+        root = last_channel.split(":", 1)[0]
+        out[root] = int(rec.get("interaction_count") or 0)
     return out
 
 
-def _rebuild_interaction_history(rec: dict, history: dict) -> None:
-    """Update rec['interaction_history'] in place from the raw history dict
-    (whatever shape jarvis-contacts returned). Sentiment is set to neutral
-    here — Haiku enrichment overwrites with a real label later."""
+# ── Network search ──────────────────────────────────────────────────
+_TOKENIZE_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(text: str | None) -> list[str]:
+    return _TOKENIZE_RE.findall((text or "").lower())
+
+
+def _record_corpus(rec: dict) -> str:
+    """Concatenate every searchable field into one string for substring scoring."""
+    parts: list[str] = []
+    for key in ("name", "relationship", "brief", "notes",
+                "communication_preference", "sentiment_trend"):
+        v = rec.get(key)
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, list):
+            parts.append(" ".join(str(x) for x in v))
+    for key in ("skills", "expertise_areas", "can_intro_to", "tags",
+                "topics_discussed", "open_threads", "talking_points"):
+        v = rec.get(key) or []
+        if isinstance(v, list):
+            parts.append(" ".join(str(x) for x in v))
+    ih = rec.get("interaction_history") or {}
+    for t in ih.get("topics_discussed") or []:
+        if isinstance(t, dict):
+            parts.append(str(t.get("topic") or ""))
+        else:
+            parts.append(str(t))
+    return " ".join(parts).lower()
+
+
+def _match_score(query: str, rec: dict) -> tuple[float, list[str]]:
+    """Return (score, reasons). Reasons explain why this record matched —
+    used to surface the 'why' in the response so Watson knows what we keyed on."""
+    if not query:
+        return 0.0, []
+    q = query.lower().strip()
+    q_tokens = [t for t in _tokens(q) if len(t) > 2]
+    score = 0.0
+    reasons: list[str] = []
+
+    skills = [s.lower() for s in (rec.get("skills") or [])]
+    expertise = [s.lower() for s in (rec.get("expertise_areas") or [])]
+    intros = [s.lower() for s in (rec.get("can_intro_to") or [])]
+    tags = [s.lower() for s in (rec.get("tags") or [])]
+    topics = []
+    for t in rec.get("topics_discussed") or []:
+        topics.append(str(t).lower())
+    for t in (rec.get("interaction_history") or {}).get("topics_discussed") or []:
+        if isinstance(t, dict):
+            topics.append(str(t.get("topic") or "").lower())
+        else:
+            topics.append(str(t).lower())
+
+    for label, weight, bag in (
+        ("skill", 3.0, skills),
+        ("expertise", 3.0, expertise),
+        ("intro_target", 2.5, intros),
+        ("tag", 2.0, tags),
+        ("topic", 1.5, topics),
+    ):
+        for entry in bag:
+            if not entry:
+                continue
+            if q in entry or entry in q:
+                score += weight
+                reasons.append(f"{label}: {entry}")
+                continue
+            ent_tokens = set(_tokens(entry))
+            shared = ent_tokens & set(q_tokens)
+            if shared:
+                score += weight * 0.5 * (len(shared) / max(1, len(set(q_tokens))))
+                reasons.append(f"{label}~{entry}")
+
+    corpus = _record_corpus(rec)
+    if q in corpus:
+        score += 1.0
+        reasons.append("brief/notes match")
+    else:
+        hits = sum(1 for t in q_tokens if t in corpus)
+        if hits:
+            score += 0.5 * (hits / max(1, len(q_tokens)))
+            reasons.append(f"{hits}/{len(q_tokens)} term hits")
+
+    # Boost by relationship strength so a weak connection that name-matches
+    # doesn't outrank a strong one.
+    strength = float(rec.get("relationship_strength") or 0.0)
+    score *= 1.0 + 0.6 * strength
+    return round(score, 3), reasons[:5]
+
+
+def _result_card(key: str, rec: dict, score: float | None = None,
+                 reasons: list[str] | None = None) -> dict:
+    return {
+        "key": key,
+        "name": rec.get("name"),
+        "trust_level": rec.get("trust_level"),
+        "relationship": rec.get("relationship"),
+        "relationship_strength": rec.get("relationship_strength"),
+        "skills": rec.get("skills") or [],
+        "expertise_areas": rec.get("expertise_areas") or [],
+        "can_intro_to": rec.get("can_intro_to") or [],
+        "last_interaction": rec.get("last_interaction"),
+        "last_channel": rec.get("last_channel"),
+        "communication_preference": rec.get("communication_preference"),
+        "brief": rec.get("brief"),
+        "tags": rec.get("tags") or [],
+        "match_score": score,
+        "match_reasons": reasons or [],
+    }
+
+
+def network_search(query: str, filters: dict | None = None,
+                   limit: int = 10) -> dict:
+    """Semantic search across the network. Returns ranked candidates with
+    reasoning. `filters` keys: trust_level (str | list), tags (list),
+    min_strength (float), channel (str), recency_days (int)."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    started = time.monotonic()
+    people = _load_people()
+    if not people:
+        _emit("network_search", "skipped",
+              context={"query": query[:80], "reason": "no contacts"})
+        return {"ok": True, "query": query, "results": [],
+                "count": 0, "reason": "no contacts on file"}
+
+    filt = filters or {}
+    desired_tiers = filt.get("trust_level")
+    if isinstance(desired_tiers, str):
+        desired_tiers = [desired_tiers]
+    desired_tags = [t.lower() for t in (filt.get("tags") or [])]
+    min_strength = float(filt.get("min_strength") or 0.0)
+    channel = (filt.get("channel") or "").lower() or None
+    recency_days = filt.get("recency_days")
+    try:
+        recency_days = float(recency_days) if recency_days is not None else None
+    except (TypeError, ValueError):
+        recency_days = None
+
+    scored: list[tuple[float, str, dict, list[str]]] = []
+    for key, rec in people.items():
+        rec = _ensure_network_fields(rec)
+        if desired_tiers and (rec.get("trust_level") not in desired_tiers):
+            continue
+        if desired_tags:
+            tags = [t.lower() for t in (rec.get("tags") or [])]
+            if not all(t in tags for t in desired_tags):
+                continue
+        strength = float(rec.get("relationship_strength") or 0.0)
+        if strength < min_strength:
+            continue
+        if channel:
+            ih_channels = (rec.get("interaction_history") or {}).get("channels") or {}
+            last_ch = (rec.get("last_channel") or "").split(":", 1)[0]
+            if not (channel in ih_channels or last_ch == channel):
+                continue
+        if recency_days is not None:
+            d = _days_since(rec.get("last_interaction"))
+            if d is None or d > recency_days:
+                continue
+
+        if query.strip():
+            score, reasons = _match_score(query, rec)
+            if score <= 0.0:
+                continue
+        else:
+            # No query → rank by relationship_strength (filter-only mode).
+            score = strength * 5.0
+            reasons = [f"strength {strength:.2f}"]
+        scored.append((score, key, rec, reasons))
+
+    scored.sort(key=lambda t: (-t[0], -float(t[2].get("relationship_strength") or 0.0)))
+    top = scored[:max(1, int(limit))]
+    results = [_result_card(k, r, score=s, reasons=rs) for s, k, r, rs in top]
+    latency = (time.monotonic() - started) * 1000
+    _emit("network_search", "success",
+          context={"query": query[:80], "filters": filt, "hits": len(results)},
+          latency_ms=int(latency))
+    return {
+        "ok": True,
+        "query": query,
+        "filters": filt,
+        "count": len(results),
+        "results": results,
+    }
+
+
+# ── Network map ─────────────────────────────────────────────────────
+def network_map(focus: str | None = None, limit: int = 20) -> dict:
+    """Network overview. With no focus, returns top contacts grouped by
+    trust tier — `the lay of my network`. With focus, returns who's
+    relevant to that focus + how to approach them."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    people = _load_people()
+    if not people:
+        return {"ok": True, "focus": focus, "summary": "no contacts on file",
+                "sections": []}
+
+    if focus and focus.strip():
+        # Focus mode — search + structure with suggested order
+        search_res = network_search(focus, limit=limit)
+        results = search_res.get("results") or []
+        if not results:
+            return {
+                "ok": True,
+                "focus": focus,
+                "summary": f"No one in your network maps to {focus!r} yet.",
+                "sections": [],
+            }
+        # Sort the matches by a blended score (match * strength) for the
+        # suggested approach order.
+        approach_order = sorted(
+            results,
+            key=lambda r: (r.get("match_score") or 0)
+                          * (1 + float(r.get("relationship_strength") or 0)),
+            reverse=True,
+        )
+        section = {
+            "title": f"Relevant to {focus!r}",
+            "count": len(results),
+            "people": approach_order,
+        }
+        summary = (
+            f"{len(results)} contact{'s' if len(results) != 1 else ''} match {focus!r}. "
+            f"Strongest fit: {approach_order[0].get('name')} "
+            f"({approach_order[0].get('trust_level')}, "
+            f"strength {approach_order[0].get('relationship_strength')})."
+        )
+        return {"ok": True, "focus": focus, "summary": summary, "sections": [section]}
+
+    # No focus: stratify by trust tier.
+    tiers: dict[str, list[dict]] = {t: [] for t in VALID_TIERS}
+    for key, rec in people.items():
+        rec = _ensure_network_fields(rec)
+        tier = rec.get("trust_level") or "acquaintance"
+        if tier not in tiers:
+            tier = "acquaintance"
+        tiers[tier].append(_result_card(key, rec))
+    for tier in tiers:
+        tiers[tier].sort(
+            key=lambda r: -(float(r.get("relationship_strength") or 0)),
+        )
+    sections = []
+    total = 0
+    for tier in VALID_TIERS:
+        people_in_tier = tiers[tier][:limit]
+        if not people_in_tier:
+            continue
+        sections.append({
+            "title": tier.replace("_", " ").title(),
+            "tier": tier,
+            "count": len(tiers[tier]),
+            "people": people_in_tier,
+        })
+        total += len(tiers[tier])
+    summary = (
+        f"{total} contact{'s' if total != 1 else ''} on file across "
+        f"{len(sections)} tier{'s' if len(sections) != 1 else ''}."
+    )
+    return {"ok": True, "focus": None, "summary": summary, "sections": sections}
+
+
+# ── Relationship score (single-person deep dive) ────────────────────
+def _trajectory(rec: dict, history: dict | None) -> str:
+    """growing | stable | fading — heuristic on recency vs older activity."""
+    days = _days_since(rec.get("last_interaction"))
+    tier = rec.get("trust_level") or "acquaintance"
+    threshold = FADING_THRESHOLDS_DAYS.get(tier, 90)
+    if days is None:
+        return "stable"
+    if days > threshold:
+        return "fading"
+    history = history or {}
     em = history.get("email") or []
     tg = history.get("telegram") or []
-    so = history.get("social") or []
-
-    em_chars = sum(len((e.get("snippet") or "")) for e in em)
-    tg_chars = sum(len((t.get("text") or "")) for t in tg)
-    so_chars = sum(len((s.get("text") or "")) for s in so)
-
-    rec.setdefault("interaction_history", {})
-    rec["interaction_history"]["email"] = {
-        "count": len(em),
-        "topics": _topics_from_subjects(e.get("subject", "") for e in em),
-        "sentiment": (rec.get("interaction_history") or {}).get("email", {}).get("sentiment") or "neutral",
-        "avg_chars": int(em_chars / len(em)) if em else 0,
-    }
-    rec["interaction_history"]["telegram"] = {
-        "count": len(tg),
-        "topics": [],  # no subjects in TG — left to Haiku enrichment
-        "sentiment": (rec.get("interaction_history") or {}).get("telegram", {}).get("sentiment") or "neutral",
-        "avg_chars": int(tg_chars / len(tg)) if tg else 0,
-    }
-    rec["interaction_history"]["social"] = {
-        "count": len(so),
-        "topics": [],
-        "sentiment": (rec.get("interaction_history") or {}).get("social", {}).get("sentiment") or "neutral",
-        "avg_chars": int(so_chars / len(so)) if so else 0,
-    }
+    msgs = sorted(
+        [m for m in em + tg if m.get("ts")],
+        key=lambda m: m.get("ts") or 0,
+        reverse=True,
+    )
+    if len(msgs) < 4:
+        return "stable"
+    half = len(msgs) // 2
+    recent_avg = sum(m["ts"] for m in msgs[:half]) / max(1, half)
+    older_avg = sum(m["ts"] for m in msgs[half:]) / max(1, len(msgs) - half)
+    # Compare gaps between consecutive messages — shorter recent gap → growing.
+    if recent_avg - older_avg > 30 * 86400:
+        return "growing"
+    return "stable"
 
 
-# ── network position ──────────────────────────────────────────────────
-def _compute_network_position(people: dict) -> dict[str, dict]:
-    """Build a {key: position_dict} map. Mutual contacts = people who share
-    a Telegram group with this person. Connector score = how many other
-    contacts they overlap with, capped 0..1 by the network size."""
-    # Map TG group title → set of contact keys present in that group
-    by_group: dict[str, set[str]] = {}
-    for k, v in people.items():
-        handle = (v.get("telegram_handle") or "").lstrip("@").lower()
-        if not handle:
-            continue
-        # We can't enumerate groups without the telegram cache; instead, we
-        # treat any contact whose `notes` or interaction history mentions a
-        # shared group title (after enrichment) as group-shared. Fallback:
-        # use the existing topics_discussed strings that look like group
-        # names. Cheap and good enough until we plumb real group rosters.
-    positions: dict[str, dict] = {}
-    network_size = max(1, len(people) - 1)
-    for k, v in people.items():
-        # Mutual = anyone whose name appears in this person's open_threads
-        # / notes / topics. Heuristic but lossless: when we get explicit
-        # mutual signals, we'll add them on top.
-        mentioned: set[str] = set()
-        text_blob = " ".join([
-            *(v.get("notes") or []),
-            *(v.get("open_threads") or []),
-            *(v.get("topics_discussed") or []),
-            *(v.get("network_notes") or []),
-        ]).lower()
-        for k2, v2 in people.items():
-            if k2 == k:
-                continue
-            n2 = (v2.get("name") or "").strip()
-            if not n2 or len(n2) < 3:
-                continue
-            if n2.lower() in text_blob:
-                mentioned.add(k2)
-        connector = round(min(1.0, len(mentioned) / network_size), 3)
-        positions[k] = {
-            "mutual_contacts": sorted(mentioned)[:20],
-            "groups_shared": [],  # placeholder until TG rosters wired
-            "connector_score": connector,
+def _suggested_action(rec: dict, trajectory: str) -> dict:
+    """Propose the next concrete move and channel."""
+    tier = rec.get("trust_level") or "acquaintance"
+    pref = rec.get("communication_preference") or rec.get("last_channel") or "email"
+    open_threads = rec.get("open_threads") or []
+    if open_threads:
+        return {
+            "action": f"Close out: {open_threads[0]}",
+            "channel": pref,
+            "urgency": "high" if trajectory == "fading" else "normal",
         }
-    return positions
+    if trajectory == "fading":
+        return {
+            "action": "Reach out — relationship is fading",
+            "channel": pref,
+            "urgency": "high" if tier in ("inner_circle", "trusted") else "normal",
+        }
+    talking = rec.get("talking_points") or []
+    if talking:
+        return {
+            "action": f"Open with: {talking[0]}",
+            "channel": pref,
+            "urgency": "normal",
+        }
+    return {
+        "action": "Maintain — no specific thread waiting",
+        "channel": pref,
+        "urgency": "low",
+    }
 
 
-# ── Haiku skill extraction ────────────────────────────────────────────
-SKILL_SYSTEM = """Extract Watson's network signal from one contact's history. Output ONE valid JSON object — no prose, no fences:
+def relationship_score(name: str) -> dict:
+    """Deep one-person snapshot. Pulls from contacts, computes strength
+    + trajectory, and proposes the next action."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    if not name:
+        return {"error": "name is required"}
+    cm = _contacts_mod()
+    if cm is None:
+        return {"error": "jarvis-contacts module not available"}
+    started = time.monotonic()
+    people = _load_people()
+    hit = _resolve(name, people)
+    if not hit:
+        _emit("relationship_score", "skipped",
+              context={"name": name[:80], "reason": "not found"})
+        return {"ok": False, "found": False, "query": name}
+    key, rec = hit
+    rec = _ensure_network_fields(rec)
+
+    history = {"email": [], "telegram": [], "memory": []}
+    try:
+        history["email"] = cm._email_history(rec) or []  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        history["telegram"] = cm._telegram_history(rec) or []  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        history["memory"] = cm._memory_recall(rec.get("name") or name) or []  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    # Refresh the rolling counters from the harvested history before scoring,
+    # so the snapshot reflects the live state.
+    em_count = len(history["email"])
+    tg_count = len(history["telegram"])
+    if em_count or tg_count:
+        rec["interaction_count"] = max(rec.get("interaction_count") or 0,
+                                       em_count + tg_count)
+        ih = rec.get("interaction_history") or {}
+        ih.setdefault("channels", {})
+        if em_count:
+            ih["channels"]["email"] = em_count
+        if tg_count:
+            ih["channels"]["telegram"] = tg_count
+        rec["interaction_history"] = ih
+
+    rec["trust_level"] = rec.get("trust_level") or _infer_trust_level(rec)
+    rec["relationship_strength"] = _compute_strength(rec)
+    trajectory = _trajectory(rec, history)
+    action = _suggested_action(rec, trajectory)
+
+    # Persist the freshly-scored record so subsequent reads see it.
+    people[key] = rec
+    _save_people(people)
+
+    latency = (time.monotonic() - started) * 1000
+    _emit("relationship_score", "success",
+          context={"name": rec.get("name"), "trajectory": trajectory,
+                   "strength": rec.get("relationship_strength")},
+          latency_ms=int(latency))
+
+    components = {
+        "frequency": round(_frequency_score(rec), 3),
+        "recency": round(_recency_score(rec), 3),
+        "depth": round(_depth_score(rec), 3),
+        "reciprocity": round(_reciprocity_score(rec), 3),
+    }
+    days_since = _days_since(rec.get("last_interaction"))
+    return {
+        "ok": True,
+        "found": True,
+        "name": rec.get("name"),
+        "trust_level": rec.get("trust_level"),
+        "relationship": rec.get("relationship"),
+        "relationship_strength": rec.get("relationship_strength"),
+        "components": components,
+        "trajectory": trajectory,
+        "days_since_last_interaction": round(days_since, 1) if days_since is not None else None,
+        "last_interaction": rec.get("last_interaction"),
+        "last_channel": rec.get("last_channel"),
+        "communication_preference": rec.get("communication_preference"),
+        "open_threads": rec.get("open_threads") or [],
+        "talking_points": rec.get("talking_points") or [],
+        "topics_discussed": rec.get("topics_discussed") or [],
+        "skills": rec.get("skills") or [],
+        "expertise_areas": rec.get("expertise_areas") or [],
+        "tags": rec.get("tags") or [],
+        "interaction_count": rec.get("interaction_count") or 0,
+        "history_pulled": {
+            "email": em_count, "telegram": tg_count,
+            "memory": len(history["memory"]),
+        },
+        "next_action": action,
+        "brief": rec.get("brief"),
+    }
+
+
+# ── network_suggest (Sonnet strategy) ───────────────────────────────
+SUGGEST_SYSTEM = """You are JARVIS's network strategist. Watson tells you a goal; you propose an actionable plan that leverages people in his network.
+
+Output ONE valid JSON object — no prose, no fences:
 
 {
-  "skills": ["specific verbs/nouns: 'react', 'fundraising', 'product strategy', 'rust'. Empty if unclear."],
-  "expertise_areas": ["broader domains: 'fintech', 'developer tools', 'community building'. <=4 items."],
-  "can_intro_to": [{"name": "person they could connect Watson to", "context": "why"}],
-  "tags": ["short tags Watson would use to find this person — 'austin', 'angel', 'react-native'. <=6."],
-  "sentiment": {
-    "email": "warm" | "neutral" | "cool",
-    "telegram": "warm" | "neutral" | "cool",
-    "social": "warm" | "neutral" | "cool"
-  }
+  "strategy": "2-3 sentences on the overall play, voice-ready (will be spoken).",
+  "approach_order": [
+    {
+      "name": "exact name from the network slice",
+      "reason": "why this person, one sentence",
+      "channel": "email | telegram | social | call | in_person",
+      "first_move": "concrete opening — what Watson should say or send"
+    }
+  ],
+  "fallback": "what to do if the primary path stalls (one sentence)",
+  "watch_outs": ["risks / things to avoid, each one short — empty list if none"]
 }
 
 Rules:
-- Be concrete. "fundraising" yes, "business stuff" no.
-- can_intro_to: only when they explicitly offered or strongly implied an intro.
-- Empty arrays are fine — better than fabrication.
-- sentiment per channel: only set non-neutral when there's clear signal in the snippets.
+- Pick people ONLY from the supplied network slice. Never invent names.
+- Order matters — strongest-fit first, but consider relationship strength,
+  trust, and what each person can actually do.
+- Keep approach_order short (2-4 entries). Watson's time is finite.
+- Be concrete: "Ask Corbin to introduce you to Lauren" beats "leverage Corbin's network".
+- If the network slice doesn't contain anyone strong for the goal, say so:
+  approach_order=[], strategy explains the gap and suggests adding contacts.
 """
 
 
-def _anthropic_call(api_key: str, model: str, system: str,
-                    user_text: str, max_tokens: int = 800,
-                    timeout: float = 30.0) -> str:
+def _anthropic_call(api_key: str, model: str, system: str, user_text: str,
+                    max_tokens: int = 1200, timeout: float = 25.0) -> str:
     payload = json.dumps({
         "model": model,
         "max_tokens": max_tokens,
@@ -489,14 +873,15 @@ def _anthropic_call(api_key: str, model: str, system: str,
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read())
             blocks = data.get("content") or []
-            return "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+            return "\n".join(b.get("text", "") for b in blocks
+                             if b.get("type") == "text").strip()
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code in (429, 500, 502, 503, 504) and attempt < 2:
                 time.sleep(1 + attempt * 1.5)
                 continue
             raise RuntimeError(f"API error {e.code}: {e}") from e
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             last_err = e
             if attempt < 2:
                 time.sleep(1 + attempt * 1.5)
@@ -505,1118 +890,824 @@ def _anthropic_call(api_key: str, model: str, system: str,
     raise RuntimeError(f"unexpected: {last_err}")
 
 
-def _extract_skills(rec: dict, history: dict, api_key: str) -> dict | None:
-    """One Haiku call. Returns parsed JSON or None on any failure."""
-    parts: list[str] = [f"Name: {rec.get('name')}"]
-    if rec.get("relationship"):
-        parts.append(f"Existing label: {rec['relationship']}")
-    if rec.get("notes"):
-        parts.append("Existing notes:\n- " + "\n- ".join(rec["notes"][:6]))
-    if rec.get("topics_discussed"):
-        parts.append("Topics seen: " + ", ".join(rec["topics_discussed"][:8]))
-    em = history.get("email") or []
-    tg = history.get("telegram") or []
-    if em:
-        parts.append("\nRecent email subjects + snippets:")
-        for e in em[:12]:
-            parts.append(f"  - {(e.get('subject') or '')[:80]} :: {(e.get('snippet') or '')[:150]}")
-    if tg:
-        parts.append("\nRecent Telegram messages:")
-        for t in tg[:12]:
-            parts.append(f"  - [{t.get('group') or ''}] {(t.get('text') or '')[:160]}")
-    user_text = "\n".join(parts)
-    try:
-        raw = _anthropic_call(api_key, SKILL_MODEL, SKILL_SYSTEM, user_text,
-                              max_tokens=700, timeout=25)
-    except Exception as e:
-        _log(f"skill call failed ({rec.get('name')}): {e}")
+def _extract_first_json(text: str) -> dict | None:
+    if not text:
         return None
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
-
-
-# ── enrich one contact (used by enrich_network's per-contact loop) ────
-def _enrich_one(rec: dict, force: bool, api_key: str | None) -> dict:
-    """Recompute interaction_history, strength, trust_level for one record.
-    Optionally calls Haiku for skills/sentiment if api_key is provided and
-    the record is stale (or force=True)."""
-    _ensure_network_fields(rec)
-
-    # Pull history via the existing harvester functions on jarvis-contacts.
-    history: dict = {"email": [], "telegram": [], "social": []}
-    mod = _contacts()
-    if mod is not None:
+    fence = re.search(r"```(?:json)?\s*\n(.+?)\n```", text, re.DOTALL)
+    if fence:
         try:
-            history["email"] = mod._email_history(rec)  # type: ignore[attr-defined]
-        except Exception:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
             pass
-        try:
-            history["telegram"] = mod._telegram_history(rec)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-    _rebuild_interaction_history(rec, history)
-
-    needs_haiku = force
-    if not needs_haiku:
-        last = rec.get("network_enriched_at")
-        if not last:
-            needs_haiku = True
-        else:
-            try:
-                age = time.time() - datetime.fromisoformat(last).timestamp()
-                needs_haiku = age > ENRICH_INTERVAL_S
-            except Exception:
-                needs_haiku = True
-
-    if needs_haiku and api_key:
-        parsed = _extract_skills(rec, history, api_key)
-        if parsed:
-            if isinstance(parsed.get("skills"), list):
-                rec["skills"] = [s for s in parsed["skills"] if isinstance(s, str)][:20]
-            if isinstance(parsed.get("expertise_areas"), list):
-                rec["expertise_areas"] = [s for s in parsed["expertise_areas"]
-                                          if isinstance(s, str)][:6]
-            intros = parsed.get("can_intro_to") or []
-            if isinstance(intros, list):
-                rec["can_intro_to"] = [
-                    {"name": str(it.get("name") or "")[:80],
-                     "context": str(it.get("context") or "")[:200]}
-                    for it in intros if isinstance(it, dict) and it.get("name")
-                ][:10]
-            tags = parsed.get("tags") or []
-            if isinstance(tags, list):
-                # Merge with existing user-set tags, preserve order, dedupe.
-                merged: list[str] = list(rec.get("tags") or [])
-                for t in tags:
-                    if isinstance(t, str) and t and t not in merged:
-                        merged.append(t)
-                rec["tags"] = merged[:15]
-            sent = parsed.get("sentiment") or {}
-            if isinstance(sent, dict):
-                for ch in ("email", "telegram", "social"):
-                    v = sent.get(ch)
-                    if v in ("warm", "neutral", "cool"):
-                        rec.setdefault("interaction_history", {}).setdefault(ch, {})
-                        rec["interaction_history"][ch]["sentiment"] = v
-            rec["network_enriched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    rec["relationship_strength"] = compute_strength(rec)
-    rec["trust_level"] = _trust_for_strength(rec["relationship_strength"], rec)
-    return rec
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
 
 
-# ── PUBLIC: enrich_network ────────────────────────────────────────────
-def enrich_network(force: bool = False) -> dict:
-    """Batch-update every contact's network fields. Caps Haiku calls per
-    run via JARVIS_NETWORK_BATCH_CAP (default 10) to stay friendly to the
-    rate limit when run inside jarvis-improve."""
-    started = time.monotonic()
+def _build_suggest_prompt(goal: str, slice_results: list[dict]) -> str:
+    lines = [f"GOAL: {goal.strip()}", ""]
+    if not slice_results:
+        lines.append("NETWORK SLICE: (empty — no relevant contacts found)")
+        return "\n".join(lines)
+    lines.append("NETWORK SLICE (most relevant first):")
+    for r in slice_results:
+        bits = [f"- {r.get('name')}"]
+        bits.append(f"trust={r.get('trust_level')}")
+        s = r.get("relationship_strength")
+        if s is not None:
+            bits.append(f"strength={s}")
+        if r.get("relationship"):
+            bits.append(f"label={r['relationship']}")
+        if r.get("skills"):
+            bits.append("skills=" + ", ".join(r["skills"][:5]))
+        if r.get("expertise_areas"):
+            bits.append("expertise=" + ", ".join(r["expertise_areas"][:5]))
+        if r.get("can_intro_to"):
+            bits.append("intros=" + ", ".join(r["can_intro_to"][:5]))
+        if r.get("last_interaction"):
+            bits.append(f"last={r['last_interaction'][:10]}")
+        if r.get("communication_preference"):
+            bits.append(f"prefers={r['communication_preference']}")
+        if r.get("brief"):
+            bits.append("brief=" + (r["brief"][:200] or "").replace("\n", " "))
+        lines.append("  ".join(bits))
+    return "\n".join(lines)
+
+
+def network_suggest(goal: str) -> dict:
+    """Sonnet-driven strategy: who to leverage and how, grounded in the
+    actual network. Falls back to a search-only response if no API key."""
     gate = _gate_check()
     if gate:
-        _emit("enrich_network", "skipped", reason="gate")
         return gate
+    goal = (goal or "").strip()
+    if not goal:
+        return {"error": "goal is required"}
+
+    started = time.monotonic()
+    search = network_search(goal, limit=8)
+    slice_results = search.get("results") or []
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        # Heuristic fallback so the tool stays useful offline.
+        if not slice_results:
+            return {
+                "ok": True,
+                "goal": goal,
+                "strategy": "No one in your network maps directly to this goal yet.",
+                "approach_order": [],
+                "fallback": "Add candidates with --add or jarvis-recall, then re-ask.",
+                "watch_outs": [],
+                "slice": [],
+            }
+        approach = []
+        for r in slice_results[:4]:
+            approach.append({
+                "name": r.get("name"),
+                "reason": "; ".join(r.get("match_reasons") or []) or "strong fit",
+                "channel": r.get("communication_preference") or "email",
+                "first_move": (r.get("talking_points") or [None])[0]
+                              or "Open with current context.",
+            })
+        return {
+            "ok": True,
+            "goal": goal,
+            "strategy": (
+                f"Lead with {approach[0]['name']} — the closest fit by skills "
+                "and current strength."
+            ),
+            "approach_order": approach,
+            "fallback": "Cycle to the next-highest match if no response in 48h.",
+            "watch_outs": [],
+            "slice": slice_results,
+            "model_used": "fallback (no API key)",
+        }
+
+    prompt = _build_suggest_prompt(goal, slice_results)
+    try:
+        raw = _anthropic_call(api_key, SUGGEST_MODEL, SUGGEST_SYSTEM, prompt,
+                              max_tokens=1200, timeout=25.0)
+    except Exception as e:
+        _emit("network_suggest", "failed",
+              context={"goal": goal[:80], "reason": str(e)[:200]})
+        return {"error": f"suggest call failed: {e}"}
+
+    parsed = _extract_first_json(raw) or {}
+    parsed.setdefault("strategy", "")
+    parsed.setdefault("approach_order", [])
+    parsed.setdefault("fallback", "")
+    parsed.setdefault("watch_outs", [])
+    latency = (time.monotonic() - started) * 1000
+    _emit("network_suggest", "success",
+          context={"goal": goal[:80],
+                   "approach_count": len(parsed.get("approach_order") or [])},
+          latency_ms=int(latency))
+    return {
+        "ok": True,
+        "goal": goal,
+        "strategy": parsed.get("strategy"),
+        "approach_order": parsed.get("approach_order") or [],
+        "fallback": parsed.get("fallback"),
+        "watch_outs": parsed.get("watch_outs") or [],
+        "slice": slice_results,
+        "model_used": SUGGEST_MODEL,
+    }
+
+
+# ── Skill / expertise extraction (Haiku) ────────────────────────────
+SKILLS_SYSTEM = """You are extracting professional signals about someone Watson knows. Output ONE valid JSON object — no prose, no fences:
+
+{
+  "skills": ["concrete capabilities — 'react frontend', 'B2B sales', 'fundraising'. Skip generic adjectives. Empty list if not evident."],
+  "expertise_areas": ["domains they appear to know deeply — 'B2B SaaS', 'HVAC', 'investor relations'. Empty if unclear."],
+  "can_intro_to": ["people / orgs they mentioned knowing or being able to connect Watson to. Empty if none mentioned."],
+  "tags": ["short labels Watson can filter on — 'pitch_target', 'advisor', 'customer', 'recruit'. Empty if unclear."]
+}
+
+Rules:
+- Ground every entry in the evidence — never invent.
+- Be specific: "raised seed at PostHog" → can_intro_to: ["PostHog team"], skills: ["fundraising"].
+- Each list ≤ 6 entries, each entry ≤ 5 words.
+- If evidence is thin (1-2 messages), most lists will be empty — that's fine."""
+
+
+def _build_skills_prompt(rec: dict, history: dict) -> str:
+    parts = [f"Name: {rec.get('name')}"]
+    if rec.get("relationship"):
+        parts.append(f"Label: {rec['relationship']}")
+    if rec.get("brief"):
+        parts.append(f"Brief: {rec['brief']}")
+    em = history.get("email") or []
+    tg = history.get("telegram") or []
+    mem = history.get("memory") or []
+    if em:
+        parts.append("\nEmail subjects + snippets (recent first):")
+        for e in em[:12]:
+            ts = (datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d")
+                  if e.get("ts") else "?")
+            parts.append(
+                f"  [{ts}] {e.get('subject') or ''}: {e.get('snippet') or ''}"
+            )
+    if tg:
+        parts.append("\nTelegram messages (recent first):")
+        for t in tg[:12]:
+            ts = (datetime.fromtimestamp(t["ts"]).strftime("%Y-%m-%d")
+                  if t.get("ts") else "?")
+            parts.append(f"  [{ts}] {t.get('text') or ''}")
+    if mem:
+        parts.append("\nWatson's memory entries about them:")
+        for m in mem[:6]:
+            parts.append(f"  [{m.get('created_at','')[:10]}] {m.get('text','')}")
+    if rec.get("notes"):
+        parts.append("\nExisting notes:\n- " + "\n- ".join(rec["notes"][:6]))
+    return "\n".join(parts)
+
+
+def _infer_skills(rec: dict, history: dict, api_key: str) -> dict:
+    """Return {skills, expertise_areas, can_intro_to, tags}. Empty on failure."""
+    if not api_key:
+        return {}
+    prompt = _build_skills_prompt(rec, history)
+    if not prompt.strip():
+        return {}
+    try:
+        raw = _anthropic_call(api_key, SKILLS_MODEL, SKILLS_SYSTEM, prompt,
+                              max_tokens=400, timeout=20.0)
+    except Exception as e:
+        _log(f"skills inference failed for {rec.get('name')}: {e}")
+        return {}
+    parsed = _extract_first_json(raw) or {}
+    return {
+        "skills": parsed.get("skills") or [],
+        "expertise_areas": parsed.get("expertise_areas") or [],
+        "can_intro_to": parsed.get("can_intro_to") or [],
+        "tags": parsed.get("tags") or [],
+    }
+
+
+# ── Mutual contacts / shared groups ─────────────────────────────────
+def _compute_mutuals(people: dict) -> dict:
+    """Build the mutual-contacts graph. Two people are mutual if either
+    appears in the other's notes / brief / can_intro_to / open_threads, OR
+    they share a known group via Telegram. Coarse but useful as a hint."""
+    name_index: dict[str, str] = {}
+    for key, rec in people.items():
+        nm = (rec.get("name") or "").strip()
+        if nm:
+            name_index[_canonical(nm)] = key
+    mentions: dict[str, set[str]] = {key: set() for key in people}
+    for key, rec in people.items():
+        text_blob = " ".join(filter(None, [
+            rec.get("brief") or "",
+            " ".join(rec.get("notes") or []),
+            " ".join(rec.get("can_intro_to") or []),
+            " ".join(rec.get("open_threads") or []),
+        ])).lower()
+        for canon, other_key in name_index.items():
+            if other_key == key:
+                continue
+            if not canon or len(canon) < 3:
+                continue
+            if re.search(r"\b" + re.escape(canon) + r"\b", text_blob):
+                mentions[key].add(other_key)
+                mentions[other_key].add(key)
+    return {k: sorted(v) for k, v in mentions.items()}
+
+
+def _enrich_one(key: str, rec: dict, mutuals: dict, api_key: str,
+                force: bool = False) -> bool:
+    """Update one record in place. Returns True if any field changed."""
+    changed = False
+    rec = _ensure_network_fields(rec)
+
+    cm = _contacts_mod()
+    history = {"email": [], "telegram": [], "memory": []}
+    if cm is not None:
+        try:
+            history["email"] = cm._email_history(rec) or []  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            history["telegram"] = cm._telegram_history(rec) or []  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            history["memory"] = cm._memory_recall(rec.get("name") or "") or []  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    em_count = len(history["email"])
+    tg_count = len(history["telegram"])
+    if em_count or tg_count:
+        rec["interaction_count"] = max(rec.get("interaction_count") or 0,
+                                       em_count + tg_count)
+        ih = rec["interaction_history"]
+        ih_channels = ih.get("channels") or {}
+        if em_count:
+            ih_channels["email"] = em_count
+        if tg_count:
+            ih_channels["telegram"] = tg_count
+        ih["channels"] = ih_channels
+        ih["total_interactions"] = rec["interaction_count"]
+        # Keep the harvested newest timestamp as last_interaction.
+        latest = 0
+        latest_ch = rec.get("last_channel")
+        if history["email"]:
+            ts = history["email"][0].get("ts") or 0
+            if ts > latest:
+                latest = ts
+                latest_ch = "email"
+        if history["telegram"]:
+            ts = history["telegram"][0].get("ts") or 0
+            if ts > latest:
+                latest = ts
+                latest_ch = "telegram"
+        if latest:
+            iso = (datetime.fromtimestamp(latest).astimezone()
+                   .isoformat(timespec="seconds"))
+            if rec.get("last_interaction") != iso:
+                rec["last_interaction"] = iso
+                changed = True
+            rec["last_channel"] = latest_ch
+            ih["last_interaction"] = iso
+        changed = True
+
+    # Skills inference — Haiku call. Only run when forced or never run.
+    needs_skills = force or not rec.get("net_enriched_at")
+    if needs_skills and api_key:
+        inferred = _infer_skills(rec, history, api_key)
+        if inferred:
+            for k in ("skills", "expertise_areas", "can_intro_to", "tags"):
+                merged = list(dict.fromkeys((rec.get(k) or [])
+                                            + (inferred.get(k) or [])))
+                if merged != (rec.get(k) or []):
+                    rec[k] = merged
+                    changed = True
+
+    # Mutuals
+    mlist = mutuals.get(key) or []
+    if mlist != (rec["network_position"].get("mutual_contacts") or []):
+        rec["network_position"]["mutual_contacts"] = mlist
+        # Connector score: more mutuals + more intro_targets → higher.
+        intro_count = len(rec.get("can_intro_to") or [])
+        rec["network_position"]["connector_score"] = round(
+            min(1.0, len(mlist) / 10.0 + intro_count / 10.0), 3,
+        )
+        changed = True
+
+    # Trust level + strength always recomputed (cheap, deterministic).
+    new_tier = _infer_trust_level(rec)
+    if new_tier != rec.get("trust_level"):
+        rec["trust_level"] = new_tier
+        changed = True
+    new_strength = _compute_strength(rec)
+    if new_strength != rec.get("relationship_strength"):
+        rec["relationship_strength"] = new_strength
+        changed = True
+
+    rec["net_enriched_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    return changed
+
+
+def enrich_network(force: bool = False, cap: int | None = None) -> dict:
+    """Sweep across the network. Refreshes strength + trust on every record;
+    runs the Haiku skills extraction for those that haven't been net-enriched
+    or when force=True. Caps Haiku calls at JARVIS_NETWORK_BATCH_CAP per pass
+    so a single weekly run doesn't blow the budget on a large network."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    started = time.monotonic()
     people = _load_people()
     if not people:
-        _emit("enrich_network", "skipped", reason="no_contacts")
         return {"ok": True, "enriched": 0, "skipped": 0,
                 "reason": "no contacts on file"}
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    cap = int(os.environ.get("JARVIS_NETWORK_BATCH_CAP", "10"))
+    cap = cap if cap is not None else BATCH_CAP
+
+    # One mutual-graph pass for the whole network (cheap, all in-memory).
+    mutuals = _compute_mutuals(people)
 
     enriched = 0
     skipped = 0
-    haiku_calls = 0
+    skill_calls = 0
     errors: list[str] = []
-    for k, rec in people.items():
+    for key, rec in people.items():
         try:
-            uses_haiku = bool(api_key) and (force or not rec.get("network_enriched_at"))
-            if uses_haiku and haiku_calls >= cap:
-                # Refresh cheap fields without Haiku so strength + trust
-                # stay current even when we've hit the batch cap.
-                _enrich_one(rec, force=False, api_key=None)
-                people[k] = rec
+            needs_skills = force or not rec.get("net_enriched_at")
+            if needs_skills and skill_calls >= cap and api_key:
+                # Refresh strength/trust + mutuals without the Haiku call;
+                # we'll pick up skills next run.
+                changed = _enrich_one(key, rec, mutuals, api_key="", force=False)
+            else:
+                if needs_skills and api_key:
+                    skill_calls += 1
+                changed = _enrich_one(key, rec, mutuals, api_key, force=force)
+            if changed:
+                enriched += 1
+            else:
                 skipped += 1
-                continue
-            _enrich_one(rec, force=force, api_key=api_key or None)
-            people[k] = rec
-            enriched += 1
-            if uses_haiku:
-                haiku_calls += 1
         except Exception as e:
             errors.append(f"{rec.get('name')}: {e}")
 
-    # Network position needs the full updated map.
-    positions = _compute_network_position(people)
-    for k, pos in positions.items():
-        if k in people:
-            people[k].setdefault("network_position", {})
-            people[k]["network_position"].update(pos)
-
-    # LinkedIn pass — cheap when most contacts have no handle, capped per
-    # run so a large network doesn't blow the Voyager rate limit. Each
-    # call merges skills + industry into the contact record in place.
-    li_calls = _linkedin_pass(people, force=force)
-
-    # Apple pass — fold iMessage interaction counts into the strength
-    # signal, and backfill missing phones/emails from Apple Contacts
-    # when a contact doesn't have one yet. No-ops on non-macOS.
-    apple_signals = _apple_pass(people)
-
-    # Stripe pass — annotate paying customers with subscription metadata.
-    # No-op when Stripe gate is off or STRIPE_SECRET_KEY isn't set.
-    stripe_signals = _stripe_pass(people)
-
     _save_people(people)
-    elapsed = int((time.monotonic() - started) * 1000)
+
+    # Persist the network-level cache for fast lookups elsewhere.
+    summary_cache = {
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "people_count": len(people),
+        "by_tier": {t: 0 for t in VALID_TIERS},
+        "fading": [],
+        "mutual_graph": mutuals,
+    }
+    for rec in people.values():
+        tier = rec.get("trust_level") or "acquaintance"
+        if tier not in summary_cache["by_tier"]:
+            tier = "acquaintance"
+        summary_cache["by_tier"][tier] += 1
+    _write_json(NETWORK_FILE, summary_cache)
+
+    # Refresh alerts as part of every enrich pass — keeps the briefing
+    # section in sync with the data.
+    try:
+        network_alerts(refresh=True)
+    except Exception:
+        pass
+
+    latency = (time.monotonic() - started) * 1000
     _emit("enrich_network", "success" if not errors else "failed",
-          enriched=enriched, skipped=skipped, haiku_calls=haiku_calls,
-          linkedin_calls=li_calls, apple_signals=apple_signals,
-          stripe_signals=stripe_signals,
-          errors_count=len(errors))
-    _log(f"enrich_network: enriched={enriched} skipped={skipped} "
-         f"haiku={haiku_calls} linkedin={li_calls} apple={apple_signals} "
-         f"stripe={stripe_signals} errors={len(errors)} ({elapsed}ms)")
+          context={"enriched": enriched, "skipped": skipped,
+                   "skill_calls": skill_calls, "errors": errors[:5]},
+          latency_ms=int(latency))
     return {
         "ok": True,
         "enriched": enriched,
         "skipped": skipped,
-        "haiku_calls": haiku_calls,
-        "linkedin_calls": li_calls,
-        "apple_signals": apple_signals,
-        "stripe_signals": stripe_signals,
+        "skill_calls": skill_calls,
         "errors": errors,
     }
 
 
-def _stripe_pass(people: dict) -> int:
-    """Fold Stripe customer status onto contacts. Each contact's email
-    (or name fallback) is matched against Stripe; on hit, customer_since,
-    plan, mrr_dollars, ltv_dollars, status, and reliability_score are
-    written under rec['stripe']. No-ops when Stripe gate is off or the
-    module is missing. Capped per run."""
-    sm = _stripe()
-    if sm is None:
-        return 0
-    try:
-        gate = sm._gate_check()  # type: ignore[attr-defined]
-    except Exception:
-        gate = {"error": "stripe gate not callable"}
-    if gate:
-        return 0
-    cap = int(os.environ.get("JARVIS_NETWORK_STRIPE_CAP", "20"))
-    enriched = 0
-    for k, rec in people.items():
-        if enriched >= cap:
-            break
-        needle = rec.get("email") or rec.get("name") or ""
-        if not needle:
-            continue
-        try:
-            cust = sm.customer_for_contact(needle)  # type: ignore[attr-defined]
-        except Exception:
-            continue
-        if not isinstance(cust, dict) or not cust.get("found"):
-            continue
-        rec["stripe"] = {
-            "customer_id": cust.get("customer_id"),
-            "customer_since": cust.get("customer_since"),
-            "plan": cust.get("plan"),
-            "mrr_dollars": cust.get("mrr_dollars"),
-            "ltv_dollars": cust.get("ltv_dollars"),
-            "status": cust.get("status"),
-            "delinquent": cust.get("delinquent", False),
-            "reliability_score": cust.get("reliability_score"),
-            "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
-        # Tag paying customers so network_search can filter on it.
-        tags = set(rec.get("tags") or [])
-        tags.add("customer")
-        if cust.get("delinquent"):
-            tags.add("delinquent")
-        rec["tags"] = sorted(tags)
-        enriched += 1
-    return enriched
-
-
-def _apple_pass(people: dict) -> int:
-    """Fold iMessage activity into each contact's interaction signal,
-    and backfill missing phones/emails from Apple Contacts. Skips
-    silently when the apple module isn't available (non-macOS) or the
-    contact has no resolvable handle. Returns the number of contacts
-    that received an Apple-side update."""
-    ap = _apple()
-    if ap is None:
-        return 0
-    try:
-        gate = ap._apple_gate()  # type: ignore[attr-defined]
-    except Exception:
-        gate = {"error": "apple gate not callable"}
-    if gate:
-        return 0
-
-    bumped = 0
-    backfill_cap = int(os.environ.get("JARVIS_NETWORK_APPLE_BACKFILL_CAP", "4"))
-    backfill_used = 0
-    for k, rec in people.items():
-        # 1. iMessage interaction signal — bumps interaction_count and
-        # last_interaction so the strength formula picks up the channel.
-        try:
-            sig = ap.interaction_signal_for_contact(rec, hours=72)  # type: ignore[attr-defined]
-        except Exception:
-            sig = None
-        if isinstance(sig, dict) and (sig.get("count") or 0) > 0:
-            rec["interaction_count"] = (rec.get("interaction_count") or 0) + int(sig["count"])
-            last = sig.get("last_ts")
-            if last and (not rec.get("last_interaction")
-                         or last > rec["last_interaction"]):
-                rec["last_interaction"] = last
-                rec["last_channel"] = "imessage"
-            bumped += 1
-
-        # 2. Apple Contacts backfill — only when the record is missing
-        # both phone and email. Capped per run so we don't pop the
-        # AppleScript dialog more than necessary.
-        if (not rec.get("email")) and (not rec.get("phone")) \
-                and backfill_used < backfill_cap:
-            name = rec.get("name") or ""
-            if not name:
-                continue
-            try:
-                res = ap.apple_contacts_search(name, limit=1)  # type: ignore[attr-defined]
-            except Exception:
-                res = None
-            backfill_used += 1
-            if not isinstance(res, dict) or not res.get("ok"):
-                continue
-            matches = res.get("matches") or []
-            if not matches:
-                continue
-            m = matches[0]
-            if m.get("emails") and not rec.get("email"):
-                rec["email"] = m["emails"][0]
-            if m.get("phones") and not rec.get("phone"):
-                rec["phone"] = m["phones"][0]
-            if m.get("organization") and not rec.get("organization"):
-                rec["organization"] = m["organization"]
-            bumped += 1
-    return bumped
-
-
-def _linkedin_pass(people: dict, force: bool = False) -> int:
-    """Best-effort LinkedIn enrichment for contacts that already carry a
-    LinkedIn handle. Skips silently when the module isn't installed or
-    the cookie is missing. Cap is independent of the Haiku cap so a busy
-    LinkedIn week can't starve relationship_strength updates.
-
-    Returns the number of profiles fetched from LinkedIn this pass."""
-    li = _linkedin()
-    if li is None:
-        return 0
-    try:
-        gate = li._gate_check()  # type: ignore[attr-defined]
-    except Exception:
-        gate = {"error": "linkedin module not callable"}
-    if gate:
-        return 0
-    cap = int(os.environ.get("JARVIS_NETWORK_LINKEDIN_CAP", "5"))
-    calls = 0
-    for k, rec in people.items():
-        if calls >= cap:
-            break
-        handles = rec.get("social_handles") or {}
-        stored = (handles.get("linkedin") or "").strip()
-        if not stored:
-            continue
-        try:
-            res = li.linkedin_enrich(stored, force=force)  # type: ignore[attr-defined]
-        except Exception as e:
-            _log(f"linkedin enrich failed for {rec.get('name')}: {e}")
-            continue
-        # linkedin_enrich loads/saves people.json itself when a contact
-        # match is found; reload our copy so subsequent contacts see the
-        # merged values.
-        if isinstance(res, dict) and res.get("merged_into_contact"):
-            try:
-                fresh = _load_people()
-                # In-place refresh of the dict we're iterating — copy
-                # values onto the existing keys so the for-loop stays
-                # valid and downstream callers use the latest data.
-                for fk, fv in fresh.items():
-                    people[fk] = fv
-            except Exception:
-                pass
-        if isinstance(res, dict) and res.get("ok"):
-            calls += 1
-    return calls
-
-
-# ── PUBLIC: network_search ────────────────────────────────────────────
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-
-def _tokens(s: str) -> set[str]:
-    return {t for t in _TOKEN_RE.findall((s or "").lower()) if len(t) > 2}
-
-
-def _searchable_text(rec: dict) -> str:
-    bits = [
-        rec.get("name") or "",
-        rec.get("relationship") or "",
-        rec.get("brief") or "",
-        " ".join(rec.get("skills") or []),
-        " ".join(rec.get("expertise_areas") or []),
-        " ".join(rec.get("tags") or []),
-        " ".join(rec.get("topics_discussed") or []),
-        " ".join(it.get("name", "") + " " + it.get("context", "")
-                 for it in (rec.get("can_intro_to") or [])
-                 if isinstance(it, dict)),
-    ]
-    return " ".join(b for b in bits if b)
-
-
-def network_search(query: str, filters: dict | None = None,
-                   limit: int = 8) -> dict:
-    """Token-overlap rank against skills / expertise / can_intro_to / tags.
-    Filters: trust (str | list), tag (str | list), min_strength (float),
-    recent_within_days (int)."""
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("network_search", "skipped", reason="gate")
-        return gate
-    q_tokens = _tokens(query or "")
-    if not q_tokens:
-        _emit("network_search", "failed", reason="empty_query")
-        return {"error": "query is required"}
-
-    filters = filters or {}
-    trust_filter = filters.get("trust")
-    if isinstance(trust_filter, str):
-        trust_filter = [trust_filter]
-    tag_filter = filters.get("tag")
-    if isinstance(tag_filter, str):
-        tag_filter = [tag_filter]
-    min_strength = float(filters.get("min_strength") or 0.0)
-    recent_within = filters.get("recent_within_days")
-
-    people = _load_people()
-    now = time.time()
-    results: list[tuple[float, dict, list[str]]] = []
-    for k, rec in people.items():
-        _ensure_network_fields(rec)
-        if trust_filter and rec.get("trust_level") not in trust_filter:
-            continue
-        if tag_filter:
-            tags_lower = {t.lower() for t in (rec.get("tags") or [])}
-            if not any(t.lower() in tags_lower for t in tag_filter):
-                continue
-        if rec.get("relationship_strength", 0.0) < min_strength:
-            continue
-        if recent_within:
-            li = rec.get("last_interaction")
-            if not li:
-                continue
-            try:
-                age_days = (now - datetime.fromisoformat(li).timestamp()) / 86400.0
-            except Exception:
-                age_days = 9999
-            if age_days > float(recent_within):
-                continue
-
-        text = _searchable_text(rec)
-        text_tokens = _tokens(text)
-        overlap = q_tokens & text_tokens
-        if not overlap:
-            continue
-        score = len(overlap)
-        # Prefer skill / expertise / tag hits over generic text.
-        skill_tokens = _tokens(" ".join(rec.get("skills") or []))
-        expertise_tokens = _tokens(" ".join(rec.get("expertise_areas") or []))
-        tag_tokens = _tokens(" ".join(rec.get("tags") or []))
-        if q_tokens & skill_tokens:
-            score += 2
-        if q_tokens & expertise_tokens:
-            score += 1
-        if q_tokens & tag_tokens:
-            score += 1
-        score += 0.5 * rec.get("relationship_strength", 0.0)
-        match_reasons: list[str] = []
-        if q_tokens & skill_tokens:
-            match_reasons.append("skill")
-        if q_tokens & expertise_tokens:
-            match_reasons.append("expertise")
-        if q_tokens & tag_tokens:
-            match_reasons.append("tag")
-        if not match_reasons:
-            match_reasons.append("text")
-        results.append((score, rec, match_reasons))
-
-    results.sort(key=lambda t: (t[0], t[1].get("relationship_strength", 0)),
-                 reverse=True)
-    out = [
-        {
-            "name": rec.get("name"),
-            "trust_level": rec.get("trust_level"),
-            "relationship_strength": rec.get("relationship_strength"),
-            "skills": rec.get("skills") or [],
-            "expertise_areas": rec.get("expertise_areas") or [],
-            "tags": rec.get("tags") or [],
-            "last_interaction": rec.get("last_interaction"),
-            "match_reasons": reasons,
-        }
-        for _, rec, reasons in results[:max(1, limit)]
-    ]
-    elapsed = int((time.monotonic() - started) * 1000)
-    _emit("network_search", "success", query=query[:80],
-          filters={k: v for k, v in (filters or {}).items() if v is not None},
-          hit_count=len(out), latency_ms=elapsed)
-    return {"ok": True, "query": query, "filters": filters or {},
-            "count": len(out), "results": out}
-
-
-# ── PUBLIC: network_map ───────────────────────────────────────────────
-def network_map(focus: str | None = None) -> dict:
-    """Without focus: people grouped by trust_level. With focus: anyone
-    matching the topic, plus their connections via mutual_contacts /
-    can_intro_to."""
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("network_map", "skipped", reason="gate")
-        return gate
-    people = _load_people()
-    if not people:
-        _emit("network_map", "skipped", reason="no_contacts")
-        return {"ok": True, "summary": "(no contacts yet)", "groups": {}}
-
-    if focus:
-        # Reuse network_search to find the relevant set.
-        hits = network_search(focus, limit=20).get("results") or []
-        names = [h["name"] for h in hits]
-        # Walk one hop: who do those people connect to?
-        connections: dict[str, list[str]] = {}
-        for h in hits:
-            rec = next((v for v in people.values() if v.get("name") == h["name"]), {})
-            mutual_keys = (rec.get("network_position") or {}).get("mutual_contacts") or []
-            mutual_names = [people[k].get("name") for k in mutual_keys if k in people]
-            intros = [it.get("name") for it in (rec.get("can_intro_to") or [])
-                      if isinstance(it, dict) and it.get("name")]
-            connections[h["name"]] = sorted(set(filter(None, mutual_names + intros)))[:8]
-        elapsed = int((time.monotonic() - started) * 1000)
-        _emit("network_map", "success", focus=focus[:80], hit_count=len(hits),
-              latency_ms=elapsed)
-        return {
-            "ok": True, "focus": focus, "people": hits,
-            "connections": connections,
-        }
-
-    # Trust-level rollup.
-    groups: dict[str, list[dict]] = {
-        "inner_circle": [], "trusted": [], "professional": [],
-        "acquaintance": [], "cold": [],
+# ── Alerts ──────────────────────────────────────────────────────────
+def _alert_record(kind: str, name: str, message: str,
+                  priority: str = "normal", **extra) -> dict:
+    base = {
+        "kind": kind,
+        "name": name,
+        "message": message,
+        "priority": priority,
+        "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
-    for rec in people.values():
-        _ensure_network_fields(rec)
-        groups.setdefault(rec.get("trust_level") or "cold", []).append({
-            "name": rec.get("name"),
-            "relationship": rec.get("relationship"),
-            "relationship_strength": rec.get("relationship_strength"),
-            "last_interaction": rec.get("last_interaction"),
-            "tags": rec.get("tags") or [],
-        })
-    for v in groups.values():
-        v.sort(key=lambda r: r.get("relationship_strength") or 0.0, reverse=True)
-
-    summary = (
-        f"{len(groups['inner_circle'])} inner circle, "
-        f"{len(groups['trusted'])} trusted, "
-        f"{len(groups['professional'])} professional, "
-        f"{len(groups['acquaintance'])} acquaintance, "
-        f"{len(groups['cold'])} cold."
-    )
-    elapsed = int((time.monotonic() - started) * 1000)
-    _emit("network_map", "success", focus=None,
-          total=sum(len(v) for v in groups.values()), latency_ms=elapsed)
-    return {"ok": True, "summary": summary, "groups": groups}
+    base.update(extra)
+    return base
 
 
-# ── PUBLIC: relationship_score ────────────────────────────────────────
-def _trajectory(rec: dict) -> str:
-    """Compare the last 30d signal to the prior 30d. Heuristic — if we
-    don't have the data, return 'stable'."""
-    last = rec.get("last_interaction")
-    if not last:
-        return "dormant"
-    try:
-        age_days = (time.time() - datetime.fromisoformat(last).timestamp()) / 86400.0
-    except Exception:
-        return "stable"
-    if age_days < 7:
-        return "active"
-    if age_days < 30:
-        return "warm"
-    if age_days < 90:
-        return "cooling"
-    return "dormant"
+_INTRO_RE = re.compile(
+    r"\b(can intro|introduce you|knows? someone at|connect you with|"
+    r"put you in touch|hook you up with)\b", re.I,
+)
 
 
-def _suggest_next(rec: dict) -> dict:
-    """Voice-friendly suggestion based on trust + trajectory."""
-    trust = rec.get("trust_level") or "cold"
-    traj = _trajectory(rec)
-    name = rec.get("name") or "this contact"
-    pref = rec.get("communication_preference") or "either"
-
-    if trust in ("inner_circle", "trusted") and traj in ("cooling", "dormant"):
-        return {
-            "action": f"Reach out to {name} — relationship is cooling.",
-            "channel": pref if pref != "either" else "telegram",
-            "timing": "today" if trust == "inner_circle" else "this week",
-        }
-    if traj == "active":
-        threads = rec.get("open_threads") or []
-        if threads:
-            return {
-                "action": f"Continue the open thread: {threads[0]}",
-                "channel": pref if pref != "either" else (rec.get("last_channel") or "email"),
-                "timing": "today",
-            }
-        return {
-            "action": f"Conversation is healthy — no action needed.",
-            "channel": None,
-            "timing": "—",
-        }
-    if trust == "cold":
-        return {
-            "action": f"Re-engage if useful — relationship is faint.",
-            "channel": "email",
-            "timing": "next opportunity",
-        }
-    # Professional / acquaintance, warm
-    return {
-        "action": f"Light touch — share something relevant when natural.",
-        "channel": pref if pref != "either" else "email",
-        "timing": "this month",
-    }
-
-
-def relationship_score(name: str) -> dict:
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("relationship_score", "skipped", reason="gate")
-        return gate
-    if not name:
-        _emit("relationship_score", "failed", reason="no_name")
-        return {"error": "name is required"}
-
-    mod = _contacts()
-    if mod is None:
-        _emit("relationship_score", "failed", reason="contacts_missing")
-        return {"error": "jarvis-contacts not installed"}
-    hit = mod._resolve(name)  # type: ignore[attr-defined]
-    if not hit:
-        _emit("relationship_score", "failed", reason="not_found", name=name[:80])
-        return {"ok": False, "found": False, "name": name}
-    key, rec = hit
-    _ensure_network_fields(rec)
-
-    # Refresh derived fields (no Haiku — just the cheap recompute).
-    history = {
-        "email": [], "telegram": [],
-    }
-    try:
-        history["email"] = mod._email_history(rec)  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    try:
-        history["telegram"] = mod._telegram_history(rec)  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    _rebuild_interaction_history(rec, history)
-    rec["relationship_strength"] = compute_strength(rec)
-    rec["trust_level"] = _trust_for_strength(rec["relationship_strength"], rec)
-    # Persist the recompute so next caller has fresh values.
-    people = _load_people()
-    people[key] = rec
-    _save_people(people)
-
-    components = {
-        "frequency":   round(_frequency_score(rec), 3),
-        "recency":     round(_recency_score(rec), 3),
-        "depth":       round(_depth_score(rec), 3),
-        "reciprocity": round(_reciprocity_score(rec), 3),
-    }
-    responsiveness = "unknown"
-    ih = rec.get("interaction_history") or {}
-    in_count = sum(int((ih.get(c) or {}).get("count") or 0)
-                   for c in ("email", "telegram", "social"))
-    out_count = max(0, int(rec.get("interaction_count") or 0) - in_count)
-    if in_count and out_count:
-        ratio = in_count / max(1, out_count)
-        if ratio >= 0.8:
-            responsiveness = "high"
-        elif ratio >= 0.4:
-            responsiveness = "moderate"
-        else:
-            responsiveness = "low"
-    elapsed = int((time.monotonic() - started) * 1000)
-    _emit("relationship_score", "success", name=rec.get("name"),
-          strength=rec["relationship_strength"], trust=rec["trust_level"],
-          latency_ms=elapsed)
-    return {
-        "ok": True,
-        "found": True,
-        "name": rec.get("name"),
-        "trust_level": rec.get("trust_level"),
-        "relationship_strength": rec.get("relationship_strength"),
-        "components": components,
-        "trajectory": _trajectory(rec),
-        "responsiveness": responsiveness,
-        "skills": rec.get("skills") or [],
-        "expertise_areas": rec.get("expertise_areas") or [],
-        "tags": rec.get("tags") or [],
-        "open_threads": rec.get("open_threads") or [],
-        "last_interaction": rec.get("last_interaction"),
-        "last_channel": rec.get("last_channel"),
-        "communication_preference": rec.get("communication_preference"),
-        "next_action": _suggest_next(rec),
-    }
-
-
-# ── PUBLIC: network_suggest ───────────────────────────────────────────
-SUGGEST_SYSTEM = """You are JARVIS planning who Watson should leverage to advance a goal.
-
-Input: a goal + a candidate set of contacts (each with skills, expertise, trust level, strength, and any open threads / tags).
-
-Output ONE JSON object — no prose, no fences:
-
-{
-  "rationale": "one sentence — what this plan accomplishes and why these people",
-  "suggested_people": [
-    {"name": "...", "role": "primary | supporting | intro_path",
-     "why": "concrete reason grounded in their skills / relationship",
-     "approach": "channel + framing — 'telegram, ask about Tuesday demo' / 'email warm intro request'",
-     "timing": "now | this week | when blocked"
-    }
-  ],
-  "intro_paths": [
-    {"target": "person Watson does NOT yet know", "via": "contact who can intro",
-     "context": "why this intro makes sense"}
-  ],
-  "sequence": ["short imperative steps Watson should take in order"]
-}
-
-Rules:
-- Lead with the strongest, most-trusted contact whose skills actually match.
-- If the candidate set is thin, say so explicitly in rationale and suggest broadening.
-- intro_paths: only when a contact's `can_intro_to` field has a relevant target.
-- Keep sequence to 3-5 steps. No filler.
-"""
-
-
-def network_suggest(goal: str) -> dict:
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("network_suggest", "skipped", reason="gate")
-        return gate
-    if not goal or not goal.strip():
-        _emit("network_suggest", "failed", reason="no_goal")
-        return {"error": "goal is required"}
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        _emit("network_suggest", "failed", reason="no_api_key")
-        return {"error": "ANTHROPIC_API_KEY not set"}
-
-    candidates = network_search(goal, limit=12).get("results") or []
-    if not candidates:
-        # Fall back to the strongest dozen contacts if the search came up dry.
-        people = _load_people()
-        ranked = sorted(
-            ({"name": v.get("name"),
-              "trust_level": v.get("trust_level"),
-              "relationship_strength": v.get("relationship_strength"),
-              "skills": v.get("skills") or [],
-              "expertise_areas": v.get("expertise_areas") or [],
-              "tags": v.get("tags") or []}
-             for v in people.values()
-             if (v.get("relationship_strength") or 0) > 0),
-            key=lambda r: r["relationship_strength"], reverse=True,
-        )
-        candidates = ranked[:12]
-
-    # Add can_intro_to for each candidate from the source record.
-    people = _load_people()
-    for c in candidates:
-        rec = next((v for v in people.values() if v.get("name") == c["name"]), {})
-        c["can_intro_to"] = rec.get("can_intro_to") or []
-        c["open_threads"] = rec.get("open_threads") or []
-
-    user_text = (
-        f"GOAL: {goal.strip()}\n\n"
-        "CANDIDATE CONTACTS:\n"
-        + json.dumps(candidates, ensure_ascii=False, indent=2)
-    )
-    try:
-        raw = _anthropic_call(api_key, SUGGEST_MODEL, SUGGEST_SYSTEM,
-                              user_text, max_tokens=1200, timeout=30)
-    except Exception as e:
-        _emit("network_suggest", "failed", reason=f"api: {e}")
-        return {"error": f"network_suggest call failed: {e}"}
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
-        _emit("network_suggest", "failed", reason="no_json")
-        return {"error": "model did not return JSON", "raw": raw[:500]}
-    try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        _emit("network_suggest", "failed", reason=f"json: {e}")
-        return {"error": f"could not parse model output: {e}", "raw": raw[:500]}
-
-    elapsed = int((time.monotonic() - started) * 1000)
-    parsed["ok"] = True
-    parsed["goal"] = goal
-    parsed["candidate_count"] = len(candidates)
-    _emit("network_suggest", "success", goal=goal[:80],
-          candidate_count=len(candidates), latency_ms=elapsed)
-    return parsed
-
-
-# ── PUBLIC: network_alerts ────────────────────────────────────────────
-def network_alerts() -> dict:
-    """Surface fading relationships, stale follow-ups, and pending intro
-    opportunities. Persists the last result to ALERTS_FILE so notifications
-    + briefing have a stable cache."""
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("network_alerts", "skipped", reason="gate")
-        return gate
-    people = _load_people()
-    if not people:
-        _emit("network_alerts", "skipped", reason="no_contacts")
-        return {"ok": True, "alerts": [], "fading": [], "follow_ups": [],
-                "intro_opportunities": []}
-
-    now = time.time()
-    fading: list[dict] = []
-    follow_ups: list[dict] = []
-    intros: list[dict] = []
-
-    for rec in people.values():
-        _ensure_network_fields(rec)
-        trust = rec.get("trust_level") or "cold"
-        last = rec.get("last_interaction")
-        try:
-            age_days = (now - datetime.fromisoformat(last).timestamp()) / 86400.0 if last else 9999
-        except Exception:
-            age_days = 9999
-
-        # Fading inner_circle / trusted / professional contacts
-        threshold = FADE_DAYS.get(trust)
-        if threshold and age_days >= threshold:
-            fading.append({
-                "name": rec.get("name"),
-                "trust_level": trust,
-                "days_since": int(age_days) if age_days < 9000 else None,
-                "communication_preference": rec.get("communication_preference"),
-                "relationship_strength": rec.get("relationship_strength"),
-            })
-
-        # Follow-ups: open_threads with stale last_interaction
-        threads = rec.get("open_threads") or []
-        if threads and age_days >= 7:
-            follow_ups.append({
-                "name": rec.get("name"),
-                "trust_level": trust,
-                "days_since": int(age_days) if age_days < 9000 else None,
-                "thread": threads[0],
-            })
-
-        # Intro opportunities: any can_intro_to entry — surface so Watson
-        # remembers the offer is on the table.
-        for it in rec.get("can_intro_to") or []:
-            if not isinstance(it, dict) or not it.get("name"):
-                continue
-            intros.append({
-                "via": rec.get("name"),
-                "target": it.get("name"),
-                "context": it.get("context") or "",
-            })
-
-    # Sort + clip
-    fading.sort(key=lambda r: ({"inner_circle": 0, "trusted": 1, "professional": 2}.get(
-        r["trust_level"], 3), -(r.get("relationship_strength") or 0)))
-    fading = fading[:12]
-    follow_ups.sort(key=lambda r: r.get("days_since") or 0, reverse=True)
-    follow_ups = follow_ups[:10]
-    intros = intros[:10]
-
+def _generate_alerts(people: dict) -> list[dict]:
     alerts: list[dict] = []
-    for f in fading:
-        urgency = "high" if f["trust_level"] == "inner_circle" else "medium"
-        alerts.append({
-            "type": "fading",
-            "urgency": urgency,
-            "name": f["name"],
-            "summary": f"{f['name']} ({f['trust_level']}) — last interaction "
-                       f"{f.get('days_since', '?')}d ago",
-        })
-    for fu in follow_ups:
-        alerts.append({
-            "type": "follow_up",
-            "urgency": "medium",
-            "name": fu["name"],
-            "summary": f"{fu['name']} — open thread '{fu['thread']}' "
-                       f"({fu.get('days_since', '?')}d cold)",
-        })
-    for it in intros:
-        alerts.append({
-            "type": "intro_opportunity",
-            "urgency": "low",
-            "name": it["target"],
-            "summary": f"{it['via']} can intro you to {it['target']}"
-                       + (f" — {it['context']}" if it["context"] else ""),
-        })
+    for key, rec in people.items():
+        rec = _ensure_network_fields(rec)
+        tier = rec.get("trust_level") or "acquaintance"
+        days = _days_since(rec.get("last_interaction"))
+        threshold = FADING_THRESHOLDS_DAYS.get(tier)
 
-    payload = {
-        "ok": True,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "alerts": alerts,
-        "fading": fading,
-        "follow_ups": follow_ups,
-        "intro_opportunities": intros,
-    }
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        ALERTS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                               encoding="utf-8")
-    except Exception:
-        pass
+        # Fading — only meaningful for the closer tiers.
+        if (threshold is not None and days is not None
+                and days > threshold and tier in ("inner_circle", "trusted")):
+            priority = "high" if tier == "inner_circle" else "normal"
+            alerts.append(_alert_record(
+                "fading", rec.get("name"),
+                f"You haven't talked to {rec.get('name')} in "
+                f"{int(days)} days — {tier.replace('_', ' ')}.",
+                priority=priority,
+                key=key, days=int(days), tier=tier,
+            ))
 
-    elapsed = int((time.monotonic() - started) * 1000)
-    _emit("network_alerts", "success",
-          alert_count=len(alerts), fading=len(fading),
-          follow_ups=len(follow_ups), intros=len(intros), latency_ms=elapsed)
-    return payload
-
-
-# ── briefing + notifications + context hooks ──────────────────────────
-def briefing_section() -> str:
-    """Markdown 'Relationship Alerts' block for jarvis-briefing. Empty when
-    nothing is fading so quiet weeks don't pad the briefing."""
-    if not ALERTS_FILE.exists():
-        return ""
-    try:
-        data = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    fading = data.get("fading") or []
-    follow_ups = data.get("follow_ups") or []
-    intros = data.get("intro_opportunities") or []
-    if not (fading or follow_ups or intros):
-        return ""
-    lines = ["## Relationship Alerts", ""]
-    if fading:
-        lines.append("**Fading:**")
-        for f in fading[:5]:
-            lines.append(
-                f"- {f['name']} ({f['trust_level']}) — {f.get('days_since', '?')}d ago"
-            )
-        lines.append("")
-    if follow_ups:
-        lines.append("**Open follow-ups:**")
-        for fu in follow_ups[:5]:
-            lines.append(f"- {fu['name']} — {fu['thread']} ({fu.get('days_since', '?')}d)")
-        lines.append("")
-    if intros:
-        lines.append("**Intro opportunities:**")
-        for it in intros[:5]:
-            ctx = f" — {it['context']}" if it.get("context") else ""
-            lines.append(f"- {it['via']} → {it['target']}{ctx}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def context_hint(mentioned_names: list[str] | None = None) -> str:
-    """One-line system-prompt hint. If `mentioned_names` is supplied, lead
-    with quick stats on those people. Otherwise surface the topmost fading
-    inner-circle contact when one exists."""
-    if not _gate_check() is None:
-        return ""
-    bits: list[str] = []
-    if mentioned_names:
-        people = _load_people()
-        mod = _contacts()
-        for nm in mentioned_names[:3]:
-            hit = None
-            if mod is not None:
-                try:
-                    hit = mod._resolve(nm, people)  # type: ignore[attr-defined]
-                except Exception:
-                    hit = None
-            if not hit:
+        # Open threads → follow-ups
+        for thread in (rec.get("open_threads") or [])[:3]:
+            if not thread:
                 continue
-            _, rec = hit
-            _ensure_network_fields(rec)
-            bits.append(
-                f"{rec.get('name')} ({rec.get('trust_level')}, "
-                f"strength={rec.get('relationship_strength')})"
-            )
-    if bits:
-        return ("**Network:** " + "; ".join(bits)
-                + ". Use `relationship_score` for the deep brief.")
-    if ALERTS_FILE.exists():
-        try:
-            data = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return ""
-        if not isinstance(data, dict):
-            return ""
-        fading = data.get("fading") or []
-        inner = [f for f in fading if f.get("trust_level") == "inner_circle"]
-        if inner:
-            top = inner[0]
-            return (f"**Network:** {top['name']} (inner circle) has gone "
-                    f"{top.get('days_since', '?')}d quiet. Consider a check-in.")
-    return ""
+            alerts.append(_alert_record(
+                "follow_up", rec.get("name"),
+                f"Open thread with {rec.get('name')}: {thread}",
+                priority="normal",
+                key=key, thread=thread,
+            ))
+
+        # Intro opportunities — surface if their notes/brief mention a possible intro
+        haystack = " ".join(filter(None, [
+            rec.get("brief") or "",
+            " ".join(rec.get("notes") or []),
+        ]))
+        if haystack and _INTRO_RE.search(haystack):
+            for intro_target in (rec.get("can_intro_to") or [])[:2]:
+                alerts.append(_alert_record(
+                    "intro_opportunity", rec.get("name"),
+                    f"{rec.get('name')} mentioned a path to {intro_target}.",
+                    priority="low",
+                    key=key, target=intro_target,
+                ))
+
+    # Sort: high → normal → low, then newest first.
+    rank = {"high": 0, "normal": 1, "low": 2}
+    alerts.sort(key=lambda a: (rank.get(a["priority"], 3), a["ts"]),
+                reverse=False)
+    return alerts
 
 
-def fading_inner_circle_priority_boost(sender: str | None) -> int:
-    """Hook for jarvis-notifications. Returns +N to add to a notification's
-    score when its sender is a fading inner_circle contact. Encourages the
-    bus to interrupt-route a 'hey what's up' that would otherwise queue."""
-    if not sender or not ALERTS_FILE.exists():
-        return 0
-    try:
-        data = json.loads(ALERTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return 0
-    if not isinstance(data, dict):
-        return 0
-    fading = data.get("fading") or []
-    s = (sender or "").strip().lower().lstrip("@")
-    if not s:
-        return 0
-    mod = _contacts()
-    if mod is None:
-        return 0
-    try:
-        hit = mod._resolve(sender)  # type: ignore[attr-defined]
-    except Exception:
-        return 0
-    if not hit:
-        return 0
-    _, rec = hit
-    rec_name = (rec.get("name") or "").lower()
-    for f in fading:
-        if f.get("trust_level") != "inner_circle":
+def network_alerts(refresh: bool = False) -> dict:
+    """Return the current alert list. By default reads the cached file
+    (cheap); refresh=True recomputes from people.json."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    if not refresh:
+        cached = _read_json(ALERTS_FILE, None)
+        if isinstance(cached, dict) and "alerts" in cached:
+            return {"ok": True, "alerts": cached["alerts"],
+                    "count": len(cached["alerts"]),
+                    "computed_at": cached.get("computed_at")}
+    people = _load_people()
+    alerts = _generate_alerts(people) if people else []
+    rec = {
+        "computed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "alerts": alerts,
+    }
+    _write_json(ALERTS_FILE, rec)
+    return {"ok": True, "alerts": alerts, "count": len(alerts),
+            "computed_at": rec["computed_at"]}
+
+
+# ── Briefing helper ─────────────────────────────────────────────────
+def relationship_alerts_section() -> str:
+    """Markdown block for jarvis-briefing. Returns "" when nothing is
+    actionable so the briefing stays clean on quiet days."""
+    if os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    res = network_alerts(refresh=False)
+    items = res.get("alerts") or []
+    if not items:
+        return ""
+    actionable = [a for a in items
+                  if a.get("priority") in ("high", "normal")][:5]
+    if not actionable:
+        return ""
+    lines = ["## Relationship Alerts\n"]
+    for a in actionable:
+        kind = a.get("kind") or ""
+        prio = a.get("priority") or "normal"
+        marker = "🔴" if prio == "high" else ("🟡" if prio == "normal" else "·")
+        lines.append(f"- {marker} **{kind.replace('_', ' ').title()}** — "
+                     f"{a.get('message')}")
+    return "\n".join(lines) + "\n"
+
+
+# ── Notifications hook ──────────────────────────────────────────────
+def push_alerts_to_notifications() -> dict:
+    """Forward fresh alerts onto the smart notification bus. Idempotent —
+    we only push alerts that are new since the last push (tracked by ts)."""
+    gate = _gate_check()
+    if gate:
+        return gate
+    state_path = ASSISTANT_DIR / "state" / "network_alerts_pushed.json"
+    state = _read_json(state_path, {"last_pushed": None}) or {}
+    last_pushed = state.get("last_pushed")
+    res = network_alerts(refresh=True)
+    items = res.get("alerts") or []
+    new_items: list[dict] = []
+    for a in items:
+        if last_pushed and a.get("ts") and a["ts"] <= last_pushed:
             continue
-        if (f.get("name") or "").lower() == rec_name:
-            return 2  # bump enough to cross interrupt threshold for warm contacts
-    return 0
+        new_items.append(a)
+
+    notif_src = BIN_DIR / "jarvis-notifications.py"
+    if not notif_src.exists():
+        notif_src = Path(__file__).parent / "jarvis-notifications.py"
+    if not notif_src.exists() or not new_items:
+        if new_items:
+            state["last_pushed"] = max(a["ts"] for a in new_items)
+            _write_json(state_path, state)
+        return {"ok": True, "pushed": 0,
+                "reason": "no notifications module" if not notif_src.exists()
+                          else "no new alerts"}
+
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "jarvis_notifications_for_network", notif_src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception as e:
+        _log(f"notification module load failed: {e}")
+        return {"error": f"notifications load failed: {e}"}
+
+    pushed = 0
+    for a in new_items:
+        priority = a.get("priority") or "normal"
+        time_sensitivity = 3 if priority == "high" else (1 if priority == "normal" else 0)
+        try:
+            mod.enqueue(
+                source="network",
+                content=a.get("message") or "",
+                sender=a.get("name"),
+                urgency_keywords=[a.get("kind") or "network"],
+                time_sensitivity=time_sensitivity,
+            )
+            pushed += 1
+        except Exception as e:
+            _log(f"enqueue failed for alert: {e}")
+
+    if new_items:
+        state["last_pushed"] = max(a["ts"] for a in new_items)
+        _write_json(state_path, state)
+    return {"ok": True, "pushed": pushed, "total": len(new_items)}
 
 
-# ── CLI ────────────────────────────────────────────────────────────────
-def _cli() -> int:
-    p = argparse.ArgumentParser(description="Jarvis network intelligence")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    ps = sub.add_parser("search")
-    ps.add_argument("query")
-    ps.add_argument("--trust", default=None,
-                    help="comma-separated trust levels: inner_circle,trusted,...")
-    ps.add_argument("--tag", default=None, help="comma-separated tags")
-    ps.add_argument("--min-strength", type=float, default=0.0)
-    ps.add_argument("--recent-within-days", type=int, default=None)
-    ps.add_argument("--limit", type=int, default=8)
-
-    pm = sub.add_parser("map")
-    pm.add_argument("--focus", default=None)
-
-    pr = sub.add_parser("score")
-    pr.add_argument("name")
-
-    psug = sub.add_parser("suggest")
-    psug.add_argument("goal", nargs="+")
-
-    pe = sub.add_parser("enrich")
-    pe.add_argument("--force", action="store_true")
-
-    sub.add_parser("alerts")
-    sub.add_parser("briefing-section")
-    pch = sub.add_parser("context-hint")
-    pch.add_argument("--names", default=None,
-                     help="comma-separated mentioned names")
-
-    args = p.parse_args()
-
-    if args.cmd == "search":
-        filters: dict = {}
-        if args.trust:
-            filters["trust"] = [t.strip() for t in args.trust.split(",") if t.strip()]
-        if args.tag:
-            filters["tag"] = [t.strip() for t in args.tag.split(",") if t.strip()]
-        if args.min_strength:
-            filters["min_strength"] = args.min_strength
-        if args.recent_within_days is not None:
-            filters["recent_within_days"] = args.recent_within_days
-        print(json.dumps(network_search(args.query, filters=filters,
-                                        limit=args.limit),
-                         ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "map":
-        print(json.dumps(network_map(focus=args.focus),
-                         ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "score":
-        print(json.dumps(relationship_score(args.name),
-                         ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "suggest":
-        print(json.dumps(network_suggest(" ".join(args.goal)),
-                         ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "enrich":
-        print(json.dumps(enrich_network(force=args.force),
-                         ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "alerts":
-        print(json.dumps(network_alerts(), ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "briefing-section":
-        s = briefing_section()
-        print(s if s else "(no fading / follow-ups / intros)")
-        return 0
-    if args.cmd == "context-hint":
-        names = [n.strip() for n in (args.names or "").split(",") if n.strip()]
-        h = context_hint(mentioned_names=names or None)
-        print(h if h else "(no hint)")
-        return 0
-    return 2
+# ── Context hint ────────────────────────────────────────────────────
+def context_hint() -> str:
+    """One-liner for jarvis-context.py — only fires when actionable, high-
+    priority alerts are pending. Empty otherwise so the cache stays warm."""
+    if os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    res = network_alerts(refresh=False)
+    items = res.get("alerts") or []
+    if not items:
+        return ""
+    high = [a for a in items if a.get("priority") == "high"]
+    fading = [a for a in items if a.get("kind") == "fading"]
+    follow = [a for a in items if a.get("kind") == "follow_up"]
+    bits = []
+    if high:
+        names = ", ".join(a.get("name") or "" for a in high[:3])
+        bits.append(f"{len(high)} high-priority ({names})")
+    if fading and not high:
+        bits.append(f"{len(fading)} fading")
+    if follow:
+        bits.append(f"{len(follow)} follow-up{'s' if len(follow) != 1 else ''} pending")
+    if not bits:
+        return ""
+    return (
+        "**Network:** " + "; ".join(bits) + ". If Watson asks about a person "
+        "by name, lead with `relationship_score`; for goals or strategy, "
+        "use `network_suggest`."
+    )
 
 
+# ── Mention-aware context hint (for jarvis-context name injection) ──
+def name_context_hint(user_text: str) -> str:
+    """When Watson's current message names a contact, surface a one-line
+    relationship reminder so the model has it without burning a tool call.
+    Returns "" when nothing matches — keeps it cheap."""
+    if not user_text or os.environ.get("JARVIS_NETWORK", "1") != "1":
+        return ""
+    people = _load_people()
+    if not people:
+        return ""
+    text_lower = user_text.lower()
+    matched: list[dict] = []
+    for key, rec in people.items():
+        name = (rec.get("name") or "").strip()
+        if not name:
+            continue
+        # Only match on whole-word name occurrences to avoid false hits like
+        # "lauren" matching "laurence".
+        first = name.split()[0]
+        if not first or len(first) < 3:
+            continue
+        if re.search(r"\b" + re.escape(first.lower()) + r"\b", text_lower):
+            matched.append(_ensure_network_fields(rec))
+        if len(matched) >= 3:
+            break
+    if not matched:
+        return ""
+    lines = []
+    for rec in matched:
+        days = _days_since(rec.get("last_interaction"))
+        days_phrase = (f", {int(days)}d since last contact"
+                       if days is not None else "")
+        tier = rec.get("trust_level") or "acquaintance"
+        rel = rec.get("relationship") or tier.replace("_", " ")
+        lines.append(
+            f"- **{rec.get('name')}** ({rel}, strength "
+            f"{rec.get('relationship_strength')}{days_phrase})"
+        )
+    return "**Named contacts in this turn:**\n" + "\n".join(lines)
+
+
+# ── Status ──────────────────────────────────────────────────────────
+def status() -> dict:
+    people = _load_people()
+    cache = _read_json(NETWORK_FILE, {})
+    alerts = (network_alerts(refresh=False).get("alerts") or [])
+    by_tier: dict[str, int] = {}
+    fresh = stale = 0
+    for rec in people.values():
+        tier = rec.get("trust_level") or "acquaintance"
+        by_tier[tier] = by_tier.get(tier, 0) + 1
+        en = rec.get("net_enriched_at")
+        if en:
+            age = _days_since(en)
+            if age is not None and age < (ENRICH_INTERVAL_S / 86400):
+                fresh += 1
+            else:
+                stale += 1
+        else:
+            stale += 1
+    return {
+        "ok": True,
+        "people_count": len(people),
+        "by_tier": by_tier,
+        "alerts": len(alerts),
+        "fresh": fresh,
+        "stale": stale,
+        "cache_path": str(NETWORK_FILE),
+        "alerts_path": str(ALERTS_FILE),
+        "people_path": str(PEOPLE_FILE),
+        "last_enriched": cache.get("updated_at"),
+    }
+
+
+# ── jarvis-improve hook ─────────────────────────────────────────────
 def main() -> int:
-    """jarvis-improve entrypoint — runs enrich_network + alerts. Always
-    exits 0 so the chain doesn't break on a transient failure."""
+    """Entrypoint for jarvis-improve weekly pass. Refreshes the network
+    layer + pushes new alerts onto the notification bus. Soft-fails — never
+    breaks the daemon chain."""
     if os.environ.get("JARVIS_NETWORK", "1") != "1":
         return 0
     try:
-        enrich_network(force=False)
-        network_alerts()
+        res = enrich_network(force=False)
+        print(f"jarvis-network: enriched={res.get('enriched', 0)} "
+              f"skipped={res.get('skipped', 0)} "
+              f"skill_calls={res.get('skill_calls', 0)}")
     except Exception as e:
-        _log(f"main: {e}")
+        print(f"jarvis-network: enrich skipped — {e}", file=sys.stderr)
+    try:
+        push = push_alerts_to_notifications()
+        print(f"jarvis-network: alerts pushed={push.get('pushed', 0)}")
+    except Exception as e:
+        print(f"jarvis-network: alert push skipped — {e}", file=sys.stderr)
     return 0
 
 
+# ── CLI ─────────────────────────────────────────────────────────────
+def _cli() -> int:
+    args = sys.argv[1:]
+    if not args:
+        return main()
+    if args[0] in ("-h", "--help"):
+        sys.stdout.write(__doc__ or "")
+        return 0
+    cmd = args[0]
+    rest = args[1:]
+
+    def _flag(name: str, default: str | None = None) -> str | None:
+        if name in rest:
+            i = rest.index(name)
+            if i + 1 < len(rest):
+                return rest[i + 1]
+        return default
+
+    if cmd == "--search":
+        if not rest:
+            print("usage: --search QUERY [--tier T] [--min-strength N] [--limit N]",
+                  file=sys.stderr)
+            return 2
+        query = rest[0]
+        filters: dict[str, Any] = {}
+        tier = _flag("--tier")
+        if tier:
+            filters["trust_level"] = tier
+        ms = _flag("--min-strength")
+        if ms:
+            try:
+                filters["min_strength"] = float(ms)
+            except ValueError:
+                pass
+        ch = _flag("--channel")
+        if ch:
+            filters["channel"] = ch
+        rd = _flag("--recency-days")
+        if rd:
+            try:
+                filters["recency_days"] = float(rd)
+            except ValueError:
+                pass
+        limit = int(_flag("--limit", "10") or "10")
+        print(json.dumps(network_search(query, filters=filters, limit=limit),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--map":
+        focus = _flag("--focus")
+        limit = int(_flag("--limit", "20") or "20")
+        print(json.dumps(network_map(focus=focus, limit=limit),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--score":
+        if not rest:
+            print("usage: --score NAME", file=sys.stderr)
+            return 2
+        print(json.dumps(relationship_score(rest[0]), indent=2,
+                         ensure_ascii=False))
+        return 0
+    if cmd == "--suggest":
+        if not rest:
+            print("usage: --suggest 'goal'", file=sys.stderr)
+            return 2
+        goal = " ".join(rest)
+        print(json.dumps(network_suggest(goal), indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--enrich-all":
+        force = "--force" in rest
+        cap_str = _flag("--cap")
+        cap = int(cap_str) if cap_str and cap_str.isdigit() else None
+        print(json.dumps(enrich_network(force=force, cap=cap), indent=2,
+                         ensure_ascii=False))
+        return 0
+    if cmd == "--alerts":
+        refresh = "--refresh" in rest
+        print(json.dumps(network_alerts(refresh=refresh), indent=2,
+                         ensure_ascii=False))
+        return 0
+    if cmd == "--push-alerts":
+        print(json.dumps(push_alerts_to_notifications(), indent=2,
+                         ensure_ascii=False))
+        return 0
+    if cmd == "--status":
+        print(json.dumps(status(), indent=2, ensure_ascii=False))
+        return 0
+    print(f"unknown command: {cmd}", file=sys.stderr)
+    return 2
+
+
 if __name__ == "__main__":
-    sys.exit(_cli() if len(sys.argv) > 1 else main())
+    sys.exit(_cli())
