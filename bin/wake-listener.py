@@ -539,121 +539,6 @@ def transcribe_streaming():
     return transcript
 
 
-# ─── Conversation-mode state file ────────────────────────────────────
-def _set_convo_flag(active: bool) -> None:
-    """Touch / remove the convo_active state file. Best-effort — failures
-    just mean jarvis-notify can't tell whether to queue, in which case it
-    falls back to immediate delivery."""
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        if active:
-            CONVO_FLAG.touch()
-        else:
-            try:
-                CONVO_FLAG.unlink()
-            except FileNotFoundError:
-                pass
-    except Exception as e:
-        log(f"convo flag toggle failed: {e}")
-
-
-def _is_activate_phrase(text: str) -> bool:
-    return bool(_ACTIVATE_RE.match((text or "").strip()))
-
-
-def _is_deactivate_phrase(text: str) -> bool:
-    return bool(_DEACTIVATE_RE.match((text or "").strip()))
-
-
-def _set_persistent_convo(active: bool) -> None:
-    """Write the persistent convo-mode flag to disk. Survives process
-    restart so a subsequent launch enters convo mode immediately."""
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        CONVO_PERSIST_FLAG.write_text("1" if active else "0", encoding="utf-8")
-    except Exception as e:
-        log(f"persistent convo flag write failed: {e}")
-
-
-def _is_persistent_convo_active() -> bool:
-    try:
-        return CONVO_PERSIST_FLAG.read_text(encoding="utf-8").strip() == "1"
-    except (FileNotFoundError, OSError):
-        return False
-
-
-def _handle_special_phrases(user_text: str) -> str | None:
-    """If user_text triggers a mode change, set state + speak ack.
-    Returns 'activate' / 'deactivate' / None.
-
-    Detected post-transcription so it works with any STT backend (whisper,
-    Deepgram, future). Caller decides what to do with the action — typically
-    skip sending to Claude (this IS the response)."""
-    if _is_activate_phrase(user_text):
-        log("Activate phrase detected — persistent convo mode ON")
-        _set_persistent_convo(True)
-        speak(ACTIVATE_REPLY)
-        return "activate"
-    if _is_deactivate_phrase(user_text):
-        log("Deactivate phrase detected — persistent convo mode OFF")
-        _set_persistent_convo(False)
-        speak(DEACTIVATE_REPLY)
-        return "deactivate"
-    return None
-
-
-# ─── Notification queue (drained at idle moments) ─────────────────────
-def _deliver_one_pending_notification() -> bool:
-    """Pop one message from pending.json and deliver via `jarvis-notify --force`.
-    Returns True if something was delivered. Best-effort — on any IO/JSON error
-    we leave the queue alone for the next attempt."""
-    if not PENDING_NOTIFICATIONS.exists():
-        return False
-    try:
-        with PENDING_NOTIFICATIONS.open("r", encoding="utf-8") as f:
-            queue = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return False
-    if not isinstance(queue, list) or not queue:
-        return False
-
-    notif = queue.pop(0)
-    try:
-        with PENDING_NOTIFICATIONS.open("w", encoding="utf-8") as f:
-            json.dump(queue, f, indent=2)
-    except OSError:
-        return False
-
-    msg = notif.get("message", "") if isinstance(notif, dict) else str(notif)
-    if not msg:
-        return False
-
-    notify_bin = BIN_DIR / "jarvis-notify"
-    if not notify_bin.exists():
-        log("pending notification dropped — jarvis-notify not installed")
-        return False
-
-    log(f"delivering pending notification: {msg[:60]}")
-    try:
-        subprocess.run(
-            [str(notify_bin), "--force", msg],
-            timeout=30,
-            check=False,
-            capture_output=True,
-        )
-    except Exception as e:
-        log(f"jarvis-notify failed: {e}")
-    return True
-
-
-def _drain_pending_notifications(limit: int = 5) -> None:
-    """Deliver up to `limit` queued notifications back-to-back. Bounded so a
-    runaway queue can't pin the loop forever."""
-    for _ in range(limit):
-        if not _deliver_one_pending_notification():
-            return
-
-
 # ─── Send to Claude and speak response ────────────────────────────────
 # Generous ceiling for the full think + TTS pipeline. The previous 30s killed
 # any response whose streamed audio took longer than that, leaking the orphan
@@ -735,18 +620,7 @@ def on_wake_detected() -> str | None:
         audio_path = record_command()
         if not audio_path:
             log("No command recorded")
-            return None
-
-        # Voice fingerprint check — only the whisper path exposes the raw
-        # WAV. Deepgram streams audio internally and we'd need to fork the
-        # streamer to fingerprint it. Fail open when no enrollment exists.
-        if not _voice_matches_owner(audio_path):
-            log("Voice mismatch — ignoring this turn")
-            try:
-                os.unlink(audio_path)
-            except Exception:
-                pass
-            return None
+            return
 
         user_text = transcribe(audio_path)
         try:

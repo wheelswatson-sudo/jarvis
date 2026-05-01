@@ -126,6 +126,9 @@ think() {
         filler_pid=$(start_filler)
     fi
 
+    local filler_pid
+    filler_pid=$(start_filler)
+
     local response
     response=$(
         HISTORY_FILE="$HISTORY_FILE" \
@@ -138,9 +141,7 @@ think() {
 
     kill_filler "$filler_pid"
 
-    if [[ "$stream" != "1" ]]; then
-        echo -e "\r                              "  # Clear "thinking..."
-    fi
+    echo -e "\r                              "  # Clear "thinking..."
 
     if [[ -n "$response" ]]; then
         echo "$response"
