@@ -5,6 +5,7 @@ const PUBLIC_PATHS = [
   '/login',
   '/auth',
   '/api/health',
+  '/api/intelligence/health',
   // Cron-callable: route handler enforces auth via x-cron-secret OR user
   // session, so the proxy redirect would just block legitimate cron calls.
   '/api/intelligence/analyze',
