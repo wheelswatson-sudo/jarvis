@@ -1,68 +1,65 @@
 #!/usr/bin/env python3
-"""Social media monitoring + reporting agent.
+"""Social media monitoring — Twitter, LinkedIn, Instagram, RSS.
 
-Watson wants to stop checking social apps. This module polls a configurable
-set of platforms (Twitter/X, LinkedIn, Instagram, RSS), normalizes everything
-into a single JSONL cache, and exposes five tools so jarvis-think.py can read,
-search, summarize, post, and reply through one consistent surface.
+Watson tells Jarvis which handles / pages / feeds to watch; this module pulls
+recent activity, summarizes it, and surfaces replies/comments aimed at him.
+Stdlib-only HTTP (urllib + xml.etree), matching jarvis-telegram.py's shape.
 
-Each platform is fully independent. Missing API keys disable just that
-platform — the rest still work. Stdlib only (urllib + json + html.parser +
-xml.etree.ElementTree), matching the other Jarvis agents.
+Each platform is independent — missing credentials simply disable that one.
+The four authentications are:
 
-Public functions (all return JSON-serializable dicts):
+    Twitter    TWITTER_BEARER_TOKEN     API v2, read-only with bearer
+    LinkedIn   LINKEDIN_COOKIE          Voyager API — EXPERIMENTAL, may break
+    Instagram  INSTAGRAM_ACCESS_TOKEN   Graph API (Business / Creator account)
+    RSS        (none)                   any feed URL the user adds
+
+Public functions (all return JSON-serializable dicts so jarvis-think wires
+them straight into the tool layer):
 
     check_social(platform=None, hours=4)
-        Recent activity. `platform` filters to one of {twitter, linkedin,
-        instagram, rss}; None pulls everything.
+        Recent items from the local cache, optionally filtered to one
+        platform ("twitter" / "linkedin" / "instagram" / "rss").
 
-    social_digest(hours=12)
-        Haiku-summarized digest grouped by platform with urgency ratings.
+    social_digest(hours=12, platform=None)
+        Per-platform AI summary via Haiku. Identifies replies/mentions
+        directed at Watson, trending topics, urgent threads.
 
     social_reply(platform, item_id, message, confirm=False)
-        Reply to a specific item — confirm=True required, style auto-applied
-        on the preview round (same as send_email / send_telegram).
+        Reply to a specific tweet/post/comment. confirm=True required —
+        same safety net as send_telegram.
 
-    social_post(platform, content, confirm=False)
-        New post with per-platform character limit enforcement.
-        confirm=True required.
+    social_post(platform, message, confirm=False)
+        Publish a new top-level post. confirm=True required.
 
     social_search(query, platform=None, hours=48)
         Substring search across the cache.
 
-Polling — `poll_loop()` is the wake-listener entry point. It walks the
-enabled platforms in turn, honouring per-platform minimum intervals so we
-never hammer a rate limit. State (last_id / last_seen / next_poll) lives in
-~/.jarvis/social/state.json.
-
-Files:
-    ~/.jarvis/social/feeds.json            user RSS list
-    ~/.jarvis/social/state.json            polling state
-    ~/.jarvis/social/cache/{platform}.jsonl normalized records
-    ~/.jarvis/logs/social.log              diagnostic log
-
-Env gates:
-    JARVIS_SOCIAL=1     master gate, defaults on if any platform is configured
-    JARVIS_TWITTER=1    requires TWITTER_BEARER_TOKEN
-    JARVIS_LINKEDIN=1   requires LINKEDIN_COOKIE     (experimental — Voyager)
-    JARVIS_INSTAGRAM=1  requires INSTAGRAM_ACCESS_TOKEN
-    JARVIS_RSS=1        no auth, default on if feeds.json exists
-
 CLI:
+    bin/jarvis-social.py --setup
     bin/jarvis-social.py --status
-    bin/jarvis-social.py --check [--platform X] [--hours N]
-    bin/jarvis-social.py --digest [--hours N]
+    bin/jarvis-social.py --check [platform] [--hours N]
+    bin/jarvis-social.py --digest [--platform X] [--hours N]
     bin/jarvis-social.py --search "query" [--platform X] [--hours N]
-    bin/jarvis-social.py --post PLATFORM "content" [--confirm]
-    bin/jarvis-social.py --reply PLATFORM ITEM_ID "msg" [--confirm]
-    bin/jarvis-social.py --poll-once [--platform X]
+    bin/jarvis-social.py --reply PLATFORM ITEM_ID "message" [--confirm]
+    bin/jarvis-social.py --post PLATFORM "message" [--confirm]
+    bin/jarvis-social.py --poll-once
     bin/jarvis-social.py --poll-loop
-    bin/jarvis-social.py --rss-add URL [--name X] [--priority high|normal|low]
+
+Files written:
+    ~/.jarvis/social/config.json                monitored handles + feeds
+    ~/.jarvis/social/state.json                 rate limits + last-seen cursors
+    ~/.jarvis/social/cache/{platform}.jsonl     append-only message log
+    ~/.jarvis/logs/social.log                   diagnostic log
+
+Gate:
+    JARVIS_SOCIAL=1                  master gate (default 1)
+    JARVIS_SOCIAL_TWITTER            per-platform; auto-on iff token set
+    JARVIS_SOCIAL_LINKEDIN           per-platform; auto-on iff cookie set
+    JARVIS_SOCIAL_INSTAGRAM          per-platform; auto-on iff token set
+    JARVIS_SOCIAL_RSS=1              per-platform (default 1, no creds needed)
 """
 from __future__ import annotations
 
-import html
-import importlib.util
 import json
 import os
 import re
@@ -73,13 +70,12 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
 SOCIAL_DIR = ASSISTANT_DIR / "social"
-FEEDS_FILE = SOCIAL_DIR / "feeds.json"
+CONFIG_FILE = SOCIAL_DIR / "config.json"
 STATE_FILE = SOCIAL_DIR / "state.json"
 CACHE_DIR = SOCIAL_DIR / "cache"
 LOG_DIR = ASSISTANT_DIR / "logs"
@@ -87,42 +83,19 @@ SOCIAL_LOG = LOG_DIR / "social.log"
 
 PLATFORMS = ("twitter", "linkedin", "instagram", "rss")
 
-# Per-platform minimum poll intervals. The free Twitter v2 tier is brutal —
-# 60s between calls is a safe floor. LinkedIn's Voyager API has no published
-# limit but cookie-auth scraping should be polite. Instagram Graph allows
-# more but we cap to keep batteries happy. RSS is free but most feeds
-# update at most every ~10 minutes.
-POLL_INTERVALS_S = {
-    "twitter": int(os.environ.get("JARVIS_TWITTER_INTERVAL_S", "60")),
-    "linkedin": int(os.environ.get("JARVIS_LINKEDIN_INTERVAL_S", "300")),
-    "instagram": int(os.environ.get("JARVIS_INSTAGRAM_INTERVAL_S", "120")),
-    "rss": int(os.environ.get("JARVIS_RSS_INTERVAL_S", "600")),
+HTTP_TIMEOUT_S = float(os.environ.get("JARVIS_SOCIAL_HTTP_TIMEOUT_S", "10"))
+CACHE_RETENTION_DAYS = int(os.environ.get("JARVIS_SOCIAL_RETENTION_DAYS", "7"))
+DIGEST_MODEL = os.environ.get("JARVIS_SOCIAL_DIGEST_MODEL", "claude-haiku-4-5-20251001")
+DIGEST_MAX_ITEMS = int(os.environ.get("JARVIS_SOCIAL_DIGEST_MAX", "40"))
+
+# Per-platform poll cadence (seconds). Conservative defaults — chosen so a
+# 24h run stays well under each platform's free-tier rate limit budget.
+POLL_INTERVALS = {
+    "twitter": int(os.environ.get("JARVIS_SOCIAL_TWITTER_INTERVAL_S", "180")),
+    "linkedin": int(os.environ.get("JARVIS_SOCIAL_LINKEDIN_INTERVAL_S", "300")),
+    "instagram": int(os.environ.get("JARVIS_SOCIAL_INSTAGRAM_INTERVAL_S", "600")),
+    "rss": int(os.environ.get("JARVIS_SOCIAL_RSS_INTERVAL_S", "300")),
 }
-
-# Retention — short for social (the platforms are the source of truth), longer
-# for RSS (Watson may want to recall an article a few days later).
-RETENTION_DAYS = {
-    "twitter": int(os.environ.get("JARVIS_SOCIAL_RETENTION_TWITTER_D", "3")),
-    "linkedin": int(os.environ.get("JARVIS_SOCIAL_RETENTION_LINKEDIN_D", "3")),
-    "instagram": int(os.environ.get("JARVIS_SOCIAL_RETENTION_INSTAGRAM_D", "3")),
-    "rss": int(os.environ.get("JARVIS_SOCIAL_RETENTION_RSS_D", "7")),
-}
-
-# Per-platform character ceilings used by social_post. These are the public
-# API limits at time of writing. We enforce them locally so a too-long post
-# fails before burning a network round trip.
-CHAR_LIMITS = {
-    "twitter": 280,
-    "linkedin": 3000,
-    "instagram": 2200,
-    "rss": 0,  # not postable
-}
-
-HTTP_TIMEOUT_S = float(os.environ.get("JARVIS_SOCIAL_HTTP_TIMEOUT_S", "12"))
-
-DIGEST_MODEL = os.environ.get("JARVIS_SOCIAL_DIGEST_MODEL",
-                              "claude-haiku-4-5-20251001")
-DIGEST_MAX_PER_PLATFORM = int(os.environ.get("JARVIS_SOCIAL_DIGEST_MAX", "40"))
 
 
 # ── Logging ─────────────────────────────────────────────────────────
@@ -137,52 +110,88 @@ def _log(msg: str) -> None:
 
 
 # ── Gates ───────────────────────────────────────────────────────────
-def _platform_token(platform: str) -> str | None:
-    """Return the env var that auths `platform`, or None if no auth needed."""
+def _master_gate() -> bool:
+    return os.environ.get("JARVIS_SOCIAL", "1") == "1"
+
+
+def _platform_default_gate(platform: str) -> str:
+    """auto-on iff the platform's credential is configured. RSS has no
+    credential — defaults on outright."""
     if platform == "twitter":
-        return os.environ.get("TWITTER_BEARER_TOKEN") or None
+        return "1" if os.environ.get("TWITTER_BEARER_TOKEN") else "0"
     if platform == "linkedin":
-        return os.environ.get("LINKEDIN_COOKIE") or None
+        return "1" if os.environ.get("LINKEDIN_COOKIE") else "0"
     if platform == "instagram":
-        return os.environ.get("INSTAGRAM_ACCESS_TOKEN") or None
+        return "1" if os.environ.get("INSTAGRAM_ACCESS_TOKEN") else "0"
     if platform == "rss":
-        # RSS needs no token; "configured" means feeds.json exists.
-        return "rss" if FEEDS_FILE.exists() else None
-    return None
+        return "1"
+    return "0"
 
 
 def _platform_enabled(platform: str) -> bool:
-    """Per-platform gate. Defaults on iff token/feeds exist; user can force
-    off by setting JARVIS_<PLATFORM>=0."""
-    if platform not in PLATFORMS:
+    if not _master_gate():
         return False
-    if not _platform_token(platform):
-        return False
-    env_var = f"JARVIS_{platform.upper()}"
-    return os.environ.get(env_var, "1") == "1"
+    env_var = f"JARVIS_SOCIAL_{platform.upper()}"
+    return os.environ.get(env_var, _platform_default_gate(platform)) == "1"
 
 
-def _master_gate_default() -> str:
-    """Master gate defaults on iff at least one platform is configured."""
-    return "1" if any(_platform_token(p) for p in PLATFORMS) else "0"
-
-
-def _master_gate_check() -> dict | None:
-    if os.environ.get("JARVIS_SOCIAL", _master_gate_default()) != "1":
-        return {"error": "social disabled (JARVIS_SOCIAL=0 or no platform tokens)"}
+def _gate_check_master() -> dict | None:
+    if not _master_gate():
+        return {"error": "social disabled (JARVIS_SOCIAL=0)"}
     return None
 
 
-def _enabled_platforms() -> list[str]:
+def _gate_check_platform(platform: str) -> dict | None:
+    gate = _gate_check_master()
+    if gate:
+        return gate
+    if platform not in PLATFORMS:
+        return {"error": f"unknown platform {platform!r}"}
+    if not _platform_enabled(platform):
+        return {"error": f"{platform} disabled or not configured"}
+    return None
+
+
+def enabled_platforms() -> list[str]:
     return [p for p in PLATFORMS if _platform_enabled(p)]
 
 
-# ── State ───────────────────────────────────────────────────────────
+# ── Config + state persistence ──────────────────────────────────────
+DEFAULT_CONFIG: dict[str, Any] = {
+    "twitter": {"watch_handles": [], "watch_self_mentions": True, "self_handle": ""},
+    "linkedin": {"watch_self_feed": True},
+    "instagram": {"watch_user_id": "", "watch_hashtags": []},
+    "rss": {"feeds": []},
+}
+
+
+def _load_config() -> dict:
+    if not CONFIG_FILE.exists():
+        return json.loads(json.dumps(DEFAULT_CONFIG))
+    try:
+        with CONFIG_FILE.open() as f:
+            data = json.load(f)
+    except Exception:
+        return json.loads(json.dumps(DEFAULT_CONFIG))
+    if not isinstance(data, dict):
+        return json.loads(json.dumps(DEFAULT_CONFIG))
+    for k, v in DEFAULT_CONFIG.items():
+        data.setdefault(k, v)
+    return data
+
+
+def _save_config(cfg: dict) -> None:
+    SOCIAL_DIR.mkdir(parents=True, exist_ok=True)
+    with CONFIG_FILE.open("w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
 def _load_state() -> dict:
     if not STATE_FILE.exists():
         return {}
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        with STATE_FILE.open() as f:
+            data = json.load(f)
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -191,58 +200,53 @@ def _load_state() -> dict:
 def _save_state(state: dict) -> None:
     SOCIAL_DIR.mkdir(parents=True, exist_ok=True)
     tmp = STATE_FILE.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
+    with tmp.open("w") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
     os.replace(tmp, STATE_FILE)
 
 
-# ── Cache (per-platform JSONL) ──────────────────────────────────────
+def _platform_state(state: dict, platform: str) -> dict:
+    s = state.setdefault(platform, {})
+    s.setdefault("last_poll_ts", 0)
+    s.setdefault("rate_limit_reset", 0)  # epoch seconds; 0 = unknown
+    s.setdefault("rate_limit_remaining", None)
+    s.setdefault("seen_ids", [])  # cap below
+    return s
+
+
+def _record_seen(state: dict, platform: str, item_id: str) -> None:
+    """Track recently-seen item ids per platform so we don't re-cache the same
+    tweet/post on every poll. Capped to avoid unbounded growth."""
+    s = _platform_state(state, platform)
+    seen = s["seen_ids"]
+    if item_id in seen:
+        return
+    seen.append(item_id)
+    if len(seen) > 500:
+        del seen[: len(seen) - 500]
+
+
+def _is_seen(state: dict, platform: str, item_id: str) -> bool:
+    return item_id in _platform_state(state, platform).get("seen_ids", [])
+
+
+# ── Cache I/O (per-platform JSONL) ──────────────────────────────────
 def _cache_path(platform: str) -> Path:
     return CACHE_DIR / f"{platform}.jsonl"
 
 
-def _append_records(platform: str, records: Iterable[dict]) -> int:
-    """Append one or more normalized records to the platform's cache.
-    De-dup by record `id` against the in-file ids (cheap because caches
-    are kept under retention)."""
-    records = list(records)
-    if not records:
-        return 0
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    seen_ids = _existing_ids(platform)
-    fresh = [r for r in records if r.get("id") and r["id"] not in seen_ids]
-    if not fresh:
-        return 0
+def _append_item(record: dict) -> None:
+    """Append one social item to its platform cache. Best-effort — losing one
+    item is preferable to crashing the polling thread."""
+    platform = record.get("platform")
+    if not platform:
+        return
     try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
         with _cache_path(platform).open("a", encoding="utf-8") as f:
-            for rec in fresh:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        return len(fresh)
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         _log(f"cache append failed ({platform}): {e}")
-        return 0
-
-
-def _existing_ids(platform: str) -> set:
-    path = _cache_path(platform)
-    if not path.exists():
-        return set()
-    out: set = set()
-    try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("id"):
-                    out.add(rec["id"])
-    except Exception as e:
-        _log(f"cache read failed ({platform}): {e}")
-    return out
 
 
 def _read_cache(platform: str, since_ts: float) -> list[dict]:
@@ -260,646 +264,632 @@ def _read_cache(platform: str, since_ts: float) -> list[dict]:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (rec.get("timestamp") or 0) >= since_ts:
+                if rec.get("timestamp", 0) >= since_ts:
                     out.append(rec)
     except Exception as e:
         _log(f"cache read failed ({platform}): {e}")
     return out
 
 
-def _prune_cache(platform: str, retention_days: int | None = None) -> int:
-    """Drop messages older than retention_days. Rewrites the file in place."""
-    if retention_days is None:
-        retention_days = RETENTION_DAYS.get(platform, 3)
-    path = _cache_path(platform)
-    if not path.exists():
+def _prune_cache(retention_days: int = CACHE_RETENTION_DAYS) -> int:
+    if not CACHE_DIR.exists():
         return 0
-    cutoff = time.time() - retention_days * 86400
+    cutoff = time.time() - (retention_days * 86400)
     pruned = 0
-    try:
-        kept: list[str] = []
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.rstrip("\n")
-                if not line.strip():
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    pruned += 1
-                    continue
-                if (rec.get("timestamp") or 0) >= cutoff:
-                    kept.append(line)
-                else:
-                    pruned += 1
-        if pruned:
-            with path.open("w", encoding="utf-8") as f:
-                f.write("\n".join(kept) + ("\n" if kept else ""))
-    except Exception as e:
-        _log(f"cache prune failed ({platform}): {e}")
+    for path in CACHE_DIR.glob("*.jsonl"):
+        try:
+            kept: list[str] = []
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        pruned += 1
+                        continue
+                    if rec.get("timestamp", 0) >= cutoff:
+                        kept.append(line)
+                    else:
+                        pruned += 1
+            if pruned:
+                with path.open("w", encoding="utf-8") as f:
+                    f.write("\n".join(kept) + ("\n" if kept else ""))
+        except Exception as e:
+            _log(f"cache prune failed ({path.name}): {e}")
+    if pruned:
+        _log(f"pruned {pruned} cache items older than {retention_days}d")
     return pruned
 
 
-# ── HTTP helper ─────────────────────────────────────────────────────
-def _http_get(url: str, headers: dict | None = None,
-              timeout: float | None = None) -> tuple[int, bytes, dict]:
-    """Plain GET that surfaces (status, body, headers) without raising on
-    non-2xx — platforms have wildly different error shapes, so the caller
-    gets to interpret. Returns (-1, b"", {}) on transport errors."""
-    req = urllib.request.Request(url, headers=headers or {})
-    eff = timeout if timeout is not None else HTTP_TIMEOUT_S
+# ── Generic HTTP ────────────────────────────────────────────────────
+def _http_request(url: str, method: str = "GET", headers: dict | None = None,
+                  body: bytes | None = None, timeout: float | None = None
+                  ) -> tuple[int, dict, bytes]:
+    """Single request. Returns (status, response_headers, body). On network
+    failure raises — callers convert to {"error": ...}."""
+    req = urllib.request.Request(url, data=body, method=method,
+                                  headers=headers or {})
+    eff_timeout = timeout if timeout is not None else HTTP_TIMEOUT_S
     try:
-        with urllib.request.urlopen(req, timeout=eff) as r:
-            return r.status, r.read(), dict(r.headers)
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read()
-        except Exception:
-            body = b""
-        return e.code, body, dict(getattr(e, "headers", {}) or {})
-    except (urllib.error.URLError, TimeoutError) as e:
-        _log(f"http error: {url} -> {e}")
-        return -1, b"", {}
-    except Exception as e:
-        _log(f"http unexpected: {url} -> {e}")
-        return -1, b"", {}
-
-
-def _http_post(url: str, body: bytes, headers: dict | None = None,
-               timeout: float | None = None,
-               method: str = "POST") -> tuple[int, bytes, dict]:
-    req = urllib.request.Request(url, data=body, headers=headers or {},
-                                 method=method)
-    eff = timeout if timeout is not None else HTTP_TIMEOUT_S
-    try:
-        with urllib.request.urlopen(req, timeout=eff) as r:
-            return r.status, r.read(), dict(r.headers)
+        with urllib.request.urlopen(req, timeout=eff_timeout) as r:
+            data = r.read()
+            return r.status, dict(r.headers.items()), data
     except urllib.error.HTTPError as e:
         try:
             data = e.read()
         except Exception:
             data = b""
-        return e.code, data, dict(getattr(e, "headers", {}) or {})
-    except (urllib.error.URLError, TimeoutError) as e:
-        _log(f"http POST error: {url} -> {e}")
-        return -1, b"", {}
-    except Exception as e:
-        _log(f"http POST unexpected: {url} -> {e}")
-        return -1, b"", {}
+        return e.code, dict(e.headers.items() if e.headers else []), data
 
 
-# ── Twitter / X (API v2, bearer auth) ───────────────────────────────
+# ── Twitter (API v2) ────────────────────────────────────────────────
 TWITTER_API = "https://api.twitter.com/2"
 
 
-def _twitter_user_id(token: str) -> str | None:
-    """Resolve the bearer token's user via /users/me. Cached in state."""
+def _twitter_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {os.environ.get('TWITTER_BEARER_TOKEN', '')}",
+        "User-Agent": "jarvis-social/1.0",
+    }
+
+
+def _twitter_apply_rate_limit(state: dict, headers: dict) -> None:
+    rem = headers.get("x-rate-limit-remaining")
+    reset = headers.get("x-rate-limit-reset")
+    s = _platform_state(state, "twitter")
+    if rem is not None:
+        try:
+            s["rate_limit_remaining"] = int(rem)
+        except ValueError:
+            pass
+    if reset is not None:
+        try:
+            s["rate_limit_reset"] = int(reset)
+        except ValueError:
+            pass
+
+
+def _twitter_user_id(handle: str) -> str | None:
+    """Resolve @handle to user_id via /2/users/by/username. One call per handle
+    per session; result is memoized in state for 24h."""
     state = _load_state()
-    cached = (state.get("twitter") or {}).get("user_id")
-    if cached:
-        return cached
-    status, body, _ = _http_get(
-        f"{TWITTER_API}/users/me",
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    cache = state.setdefault("twitter_user_id_cache", {})
+    h = handle.lstrip("@").lower()
+    rec = cache.get(h)
+    if rec and (time.time() - (rec.get("ts") or 0)) < 86400:
+        return rec.get("id")
+    url = f"{TWITTER_API}/users/by/username/{urllib.parse.quote(h)}"
+    try:
+        status, headers, body = _http_request(url, headers=_twitter_headers())
+    except Exception as e:
+        _log(f"twitter user lookup failed ({h}): {e}")
+        return None
+    _twitter_apply_rate_limit(state, headers)
     if status != 200:
-        _log(f"twitter /users/me failed status={status}")
+        _log(f"twitter user lookup {status} for {h}: {body[:200]!r}")
+        _save_state(state)
         return None
     try:
         data = json.loads(body)
+        uid = (data.get("data") or {}).get("id")
     except Exception:
-        return None
-    uid = (data.get("data") or {}).get("id")
+        uid = None
     if uid:
-        state.setdefault("twitter", {})["user_id"] = uid
-        state["twitter"]["username"] = (data.get("data") or {}).get("username")
+        cache[h] = {"id": uid, "ts": time.time()}
         _save_state(state)
     return uid
 
 
-def _twitter_fetch(token: str) -> list[dict]:
-    """Pull recent @-mentions of the authenticated user, plus a small
-    sweep of tweets where `to:<username>` (DMs require elevated access we
-    can't assume). Returns normalized records."""
-    uid = _twitter_user_id(token)
-    if not uid:
-        return []
-    state = _load_state()
-    tw_state = state.setdefault("twitter", {})
-    since_id = tw_state.get("last_mention_id")
-    params = {
-        "max_results": "20",
-        "tweet.fields": "created_at,author_id,conversation_id,in_reply_to_user_id",
-        "expansions": "author_id",
-        "user.fields": "username,name",
-    }
-    if since_id:
-        params["since_id"] = since_id
-    url = (f"{TWITTER_API}/users/{uid}/mentions?"
-           + urllib.parse.urlencode(params))
-    status, body, headers = _http_get(
-        url, headers={"Authorization": f"Bearer {token}"},
-    )
-    if status == 429:
-        # Push next poll out by the rate-limit reset (or +60s as a fallback).
-        reset = headers.get("x-rate-limit-reset")
-        delay = 60
-        if reset and reset.isdigit():
-            delay = max(60, int(reset) - int(time.time()))
-        tw_state["next_poll"] = int(time.time()) + delay
-        _save_state(state)
-        _log(f"twitter rate-limited; next poll in {delay}s")
-        return []
-    if status != 200:
-        _log(f"twitter mentions failed status={status}")
-        return []
-    try:
-        data = json.loads(body)
-    except Exception:
-        return []
-    tweets = data.get("data") or []
-    users = {u.get("id"): u for u in (data.get("includes") or {}).get("users", [])}
+def _twitter_poll(state: dict) -> int:
+    """Pull recent tweets from each watched handle and (optionally) the user's
+    own mentions. Returns count of new items stored."""
+    cfg = _load_config().get("twitter", {})
+    handles = cfg.get("watch_handles") or []
+    self_handle = (cfg.get("self_handle") or "").strip().lstrip("@")
+    watch_self = bool(cfg.get("watch_self_mentions")) and self_handle
+    new_items = 0
 
-    out: list[dict] = []
-    max_id = since_id
-    for t in tweets:
-        tid = t.get("id")
-        if not tid:
+    for handle in handles:
+        uid = _twitter_user_id(handle)
+        if not uid:
             continue
-        if max_id is None or int(tid) > int(max_id):
-            max_id = tid
-        author = users.get(t.get("author_id")) or {}
-        ts = _parse_iso(t.get("created_at"))
-        out.append({
-            "platform": "twitter",
-            "id": f"twitter:{tid}",
-            "kind": "mention",
-            "from_handle": "@" + (author.get("username") or "?"),
-            "from_name": author.get("name") or author.get("username") or "?",
-            "text": t.get("text") or "",
-            "url": (f"https://twitter.com/{author.get('username') or 'i'}"
-                    f"/status/{tid}"),
-            "timestamp": ts,
-            "datetime": _format_ts(ts),
-            "raw_id": tid,
-            "reply_to": t.get("in_reply_to_user_id") and \
-                f"twitter:user:{t['in_reply_to_user_id']}",
-            "is_dm": False,
-        })
-    if max_id and max_id != since_id:
-        tw_state["last_mention_id"] = max_id
-        _save_state(state)
-    return out
-
-
-def _twitter_post(token: str, content: str,
-                  reply_to_tweet_id: str | None = None) -> dict:
-    body = {"text": content}
-    if reply_to_tweet_id:
-        body["reply"] = {"in_reply_to_tweet_id": reply_to_tweet_id}
-    status, raw, _ = _http_post(
-        f"{TWITTER_API}/tweets",
-        body=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-    )
-    if status not in (200, 201):
+        url = (f"{TWITTER_API}/users/{uid}/tweets"
+               "?max_results=10&tweet.fields=created_at,public_metrics,referenced_tweets")
         try:
-            err = json.loads(raw).get("detail") or json.loads(raw).get("title") or raw.decode("utf-8", "replace")
-        except Exception:
-            err = f"status {status}"
-        return {"error": f"twitter post: {err}"}
-    try:
-        data = json.loads(raw).get("data") or {}
-    except Exception:
-        data = {}
-    return {"sent": True, "id": data.get("id"), "platform": "twitter"}
-
-
-# ── LinkedIn (Voyager — experimental, cookie-auth) ──────────────────
-# LinkedIn doesn't expose mentions / messaging on its public REST API to
-# end users; the only practical pathway from a personal account is the
-# internal Voyager API, called with a logged-in `li_at` session cookie.
-# This is fragile by design — LinkedIn rotates endpoints — so we mark
-# every result `experimental: true` and degrade silently on failure.
-LINKEDIN_VOYAGER_ROOT = "https://www.linkedin.com/voyager/api"
-
-
-def _linkedin_headers(cookie: str) -> dict:
-    return {
-        "Cookie": f"li_at={cookie}",
-        "Csrf-Token": "ajax:1234",  # Voyager requires the literal "ajax:..." form
-        "X-Restli-Protocol-Version": "2.0.0",
-        "X-Li-Lang": "en_US",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
-    }
-
-
-def _linkedin_fetch(cookie: str) -> list[dict]:
-    """Pull recent notification activity. Voyager's /messaging surfaces are
-    the closest approximation to "what arrived for me on LinkedIn"."""
-    url = (f"{LINKEDIN_VOYAGER_ROOT}/voyagerNotificationsDashNotificationCards"
-           "?q=filterVanityName&count=20&filterVanityName=ALL")
-    status, body, _ = _http_get(url, headers=_linkedin_headers(cookie))
-    if status == 401 or status == 403:
-        _log(f"linkedin auth failed (status={status}) — cookie may be expired")
-        return []
-    if status != 200 or not body:
-        _log(f"linkedin notifications failed status={status}")
-        return []
-    try:
-        data = json.loads(body)
-    except Exception:
-        return []
-    elements = data.get("elements") or data.get("included") or []
-    out: list[dict] = []
-    for el in elements:
-        if not isinstance(el, dict):
-            continue
-        nid = el.get("entityUrn") or el.get("trackingId") or el.get("publishedAt")
-        if not nid:
-            continue
-        # Voyager is messy. Reach for the most-likely-populated text fields,
-        # falling back to the headline/subheadline. Keep it best-effort.
-        text = (
-            (el.get("headline") or {}).get("text")
-            or (el.get("subheadline") or {}).get("text")
-            or el.get("cardAction", {}).get("actionTarget")
-            or ""
-        )
-        if not text:
-            # Skip empty cards — LinkedIn returns lots of structural records.
-            continue
-        ts_ms = el.get("publishedAt") or 0
-        ts = int(ts_ms / 1000) if ts_ms > 1e10 else int(ts_ms or time.time())
-        actor = (el.get("actor") or {}).get("name", {}).get("text") or ""
-        out.append({
-            "platform": "linkedin",
-            "id": f"linkedin:{nid}",
-            "kind": "notification",
-            "from_handle": actor,
-            "from_name": actor,
-            "text": text[:1000],
-            "url": el.get("cardAction", {}).get("actionTarget") or "",
-            "timestamp": ts,
-            "datetime": _format_ts(ts),
-            "raw_id": nid,
-            "is_dm": False,
-            "experimental": True,
-        })
-    return out
-
-
-def _linkedin_post(_cookie: str, _content: str) -> dict:
-    # Posting via Voyager triggers anti-automation flags fast, and a wrong
-    # call here can silently lock the account. Punting until the user
-    # explicitly asks to enable it.
-    return {"error": "linkedin posting not implemented (Voyager requires "
-                     "anti-automation handling — open an issue if you "
-                     "actually want this)"}
-
-
-# ── Instagram (Graph API / Basic Display) ───────────────────────────
-INSTAGRAM_API = "https://graph.instagram.com"
-
-
-def _instagram_fetch(token: str) -> list[dict]:
-    """Pull recent media on the authenticated account. Basic Display token
-    only sees the user's own posts — comments / DMs need the Graph API
-    business token, which we surface if the token works against /me/media."""
-    state = _load_state()
-    last_seen = (state.get("instagram") or {}).get("last_seen_id")
-    fields = "id,caption,media_type,media_url,permalink,timestamp,username"
-    url = (f"{INSTAGRAM_API}/me/media?fields={fields}"
-           f"&limit=20&access_token={urllib.parse.quote(token)}")
-    status, body, _ = _http_get(url)
-    if status == 401:
-        _log("instagram token rejected (401) — may have expired")
-        return []
-    if status != 200:
-        _log(f"instagram media failed status={status}")
-        return []
-    try:
-        data = json.loads(body)
-    except Exception:
-        return []
-    items = data.get("data") or []
-    out: list[dict] = []
-    new_last = last_seen
-    for it in items:
-        mid = it.get("id")
-        if not mid:
-            continue
-        if new_last is None:
-            new_last = mid
-        ts = _parse_iso(it.get("timestamp"))
-        out.append({
-            "platform": "instagram",
-            "id": f"instagram:{mid}",
-            "kind": "post",
-            "from_handle": "@" + (it.get("username") or "you"),
-            "from_name": it.get("username") or "(self)",
-            "text": (it.get("caption") or "")[:1000],
-            "url": it.get("permalink") or "",
-            "timestamp": ts,
-            "datetime": _format_ts(ts),
-            "raw_id": mid,
-            "media_type": it.get("media_type"),
-            "is_dm": False,
-        })
-    if new_last and new_last != last_seen:
-        state.setdefault("instagram", {})["last_seen_id"] = new_last
-        _save_state(state)
-    return out
-
-
-def _instagram_post(_token: str, _content: str) -> dict:
-    # Posting to Instagram via Graph requires a published-at media URL plus
-    # the Container/Publish two-step. Out of scope for v1 — explicit error.
-    return {"error": "instagram posting not implemented (Graph requires "
-                     "media container + publish flow; pure-text posts are "
-                     "not supported by IG itself)"}
-
-
-# ── RSS feeds ───────────────────────────────────────────────────────
-def _load_feeds() -> list[dict]:
-    if not FEEDS_FILE.exists():
-        return []
-    try:
-        data = json.loads(FEEDS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    out: list[dict] = []
-    for entry in data:
-        if isinstance(entry, dict) and entry.get("url"):
-            out.append({
-                "url": entry["url"],
-                "name": entry.get("name") or entry["url"],
-                "priority": entry.get("priority") or "normal",
-            })
-    return out
-
-
-def _save_feeds(feeds: list[dict]) -> None:
-    SOCIAL_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = FEEDS_FILE.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(feeds, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, FEEDS_FILE)
-
-
-class _StripHTML(HTMLParser):
-    """Drops tags and collapses whitespace — RSS descriptions are usually
-    HTML-encoded, but we cache plain text so the digest reads cleanly."""
-    def __init__(self) -> None:
-        super().__init__()
-        self._buf: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self._buf.append(data)
-
-    def text(self) -> str:
-        joined = "".join(self._buf)
-        joined = html.unescape(joined)
-        return re.sub(r"\s+", " ", joined).strip()
-
-
-def _strip_html(s: str) -> str:
-    if not s:
-        return ""
-    p = _StripHTML()
-    try:
-        p.feed(s)
-        p.close()
-    except Exception:
-        return re.sub(r"<[^>]+>", "", s).strip()
-    return p.text()
-
-
-def _parse_rfc822_date(s: str) -> int:
-    """Parse the variety of date strings RSS feeds emit. Falls back to 0."""
-    if not s:
-        return 0
-    fmts = [
-        "%a, %d %b %Y %H:%M:%S %z",
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S.%f%z",
-        "%Y-%m-%d %H:%M:%S",
-    ]
-    for fmt in fmts:
-        try:
-            dt = datetime.strptime(s.strip(), fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp())
-        except ValueError:
-            continue
-    return 0
-
-
-def _rss_fetch_one(feed: dict) -> list[dict]:
-    """Fetch one RSS or Atom feed. Tolerant of both formats — peeks at the
-    root tag and dispatches accordingly."""
-    status, body, _ = _http_get(
-        feed["url"],
-        headers={"User-Agent": "jarvis-social/1.0 (+rss-aggregator)"},
-    )
-    if status != 200 or not body:
-        _log(f"rss fetch failed ({feed['url']}) status={status}")
-        return []
-    try:
-        # Parse with a tolerant approach — feed.parser would be nicer but
-        # we're stdlib only.
-        root = ET.fromstring(body)
-    except ET.ParseError as e:
-        _log(f"rss parse failed ({feed['url']}): {e}")
-        return []
-    out: list[dict] = []
-    tag = root.tag.lower()
-    if tag.endswith("rss") or tag == "rss":
-        # RSS 2.0 — items live under channel/item.
-        for item in root.findall(".//item"):
-            out.append(_rss_record_from_rss(item, feed))
-    elif tag.endswith("feed"):
-        # Atom — items are <entry> elements with the Atom namespace.
-        ns = {"a": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall("a:entry", ns):
-            out.append(_rss_record_from_atom(entry, feed, ns))
-    return [r for r in out if r]
-
-
-def _xml_text(node, path: str, ns: dict | None = None) -> str:
-    if node is None:
-        return ""
-    el = node.find(path, ns) if ns else node.find(path)
-    if el is None:
-        return ""
-    return (el.text or "").strip()
-
-
-def _rss_record_from_rss(item, feed: dict) -> dict | None:
-    title = _xml_text(item, "title")
-    link = _xml_text(item, "link")
-    desc = _xml_text(item, "description")
-    pub = _xml_text(item, "pubDate")
-    guid = _xml_text(item, "guid") or link or title
-    if not guid:
-        return None
-    ts = _parse_rfc822_date(pub) or int(time.time())
-    return {
-        "platform": "rss",
-        "id": f"rss:{feed.get('name') or feed['url']}:{guid}",
-        "kind": "article",
-        "from_handle": feed.get("name") or feed["url"],
-        "from_name": feed.get("name") or feed["url"],
-        "text": (title + ((" — " + _strip_html(desc)[:600]) if desc else "")).strip(),
-        "url": link,
-        "timestamp": ts,
-        "datetime": _format_ts(ts),
-        "raw_id": guid,
-        "feed_priority": feed.get("priority", "normal"),
-        "is_dm": False,
-    }
-
-
-def _rss_record_from_atom(entry, feed: dict, ns: dict) -> dict | None:
-    title = _xml_text(entry, "a:title", ns)
-    summary = _xml_text(entry, "a:summary", ns) or _xml_text(entry, "a:content", ns)
-    pub = _xml_text(entry, "a:published", ns) or _xml_text(entry, "a:updated", ns)
-    eid = _xml_text(entry, "a:id", ns)
-    link_el = entry.find("a:link", ns)
-    link = (link_el.attrib.get("href") if link_el is not None else "") or eid
-    if not eid and not link:
-        return None
-    ts = _parse_rfc822_date(pub) or int(time.time())
-    guid = eid or link
-    return {
-        "platform": "rss",
-        "id": f"rss:{feed.get('name') or feed['url']}:{guid}",
-        "kind": "article",
-        "from_handle": feed.get("name") or feed["url"],
-        "from_name": feed.get("name") or feed["url"],
-        "text": (title + ((" — " + _strip_html(summary)[:600]) if summary else "")).strip(),
-        "url": link,
-        "timestamp": ts,
-        "datetime": _format_ts(ts),
-        "raw_id": guid,
-        "feed_priority": feed.get("priority", "normal"),
-        "is_dm": False,
-    }
-
-
-def _rss_fetch(_token: str) -> list[dict]:
-    feeds = _load_feeds()
-    if not feeds:
-        return []
-    out: list[dict] = []
-    for feed in feeds:
-        try:
-            out.extend(_rss_fetch_one(feed))
+            status, headers, body = _http_request(url, headers=_twitter_headers())
         except Exception as e:
-            _log(f"rss fetch crashed ({feed.get('url')}): {e}")
-    return out
+            _log(f"twitter tweets fetch failed ({handle}): {e}")
+            continue
+        _twitter_apply_rate_limit(state, headers)
+        if status == 429:
+            _log(f"twitter rate-limited on {handle}")
+            break
+        if status != 200:
+            _log(f"twitter tweets fetch {status} for {handle}: {body[:200]!r}")
+            continue
+        try:
+            data = json.loads(body)
+        except Exception:
+            continue
+        for tw in data.get("data") or []:
+            tid = tw.get("id")
+            if not tid or _is_seen(state, "twitter", f"tweet:{tid}"):
+                continue
+            ts = _parse_iso8601(tw.get("created_at"))
+            metrics = tw.get("public_metrics") or {}
+            _append_item({
+                "platform": "twitter",
+                "kind": "tweet",
+                "item_id": tid,
+                "author": handle.lstrip("@"),
+                "text": tw.get("text") or "",
+                "timestamp": ts,
+                "url": f"https://twitter.com/{handle.lstrip('@')}/status/{tid}",
+                "extra": {
+                    "likes": metrics.get("like_count"),
+                    "replies": metrics.get("reply_count"),
+                    "retweets": metrics.get("retweet_count"),
+                },
+            })
+            _record_seen(state, "twitter", f"tweet:{tid}")
+            new_items += 1
+
+    if watch_self:
+        uid = _twitter_user_id(self_handle)
+        if uid:
+            url = (f"{TWITTER_API}/users/{uid}/mentions"
+                   "?max_results=10&tweet.fields=created_at,author_id"
+                   "&expansions=author_id&user.fields=username,name")
+            try:
+                status, headers, body = _http_request(url, headers=_twitter_headers())
+            except Exception as e:
+                _log(f"twitter mentions fetch failed: {e}")
+                status = 0
+                body = b""
+            _twitter_apply_rate_limit(state, headers if status else {})
+            if status == 200:
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    data = {}
+                authors = {u.get("id"): u for u in
+                            (data.get("includes") or {}).get("users") or []}
+                for tw in data.get("data") or []:
+                    tid = tw.get("id")
+                    if not tid or _is_seen(state, "twitter", f"mention:{tid}"):
+                        continue
+                    author = authors.get(tw.get("author_id")) or {}
+                    ts = _parse_iso8601(tw.get("created_at"))
+                    _append_item({
+                        "platform": "twitter",
+                        "kind": "mention",
+                        "item_id": tid,
+                        "author": author.get("username") or "(unknown)",
+                        "author_name": author.get("name") or "",
+                        "text": tw.get("text") or "",
+                        "timestamp": ts,
+                        "url": f"https://twitter.com/{author.get('username') or 'i'}/status/{tid}",
+                        "directed_at_self": True,
+                    })
+                    _record_seen(state, "twitter", f"mention:{tid}")
+                    new_items += 1
+    return new_items
 
 
-# ── Helpers ─────────────────────────────────────────────────────────
-def _parse_iso(s: str | None) -> int:
+def _parse_iso8601(s: str | None) -> int:
     if not s:
         return int(time.time())
     try:
-        # Twitter / Instagram both emit RFC3339; .replace handles "Z"
         return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
     except Exception:
-        return _parse_rfc822_date(s) or int(time.time())
+        return int(time.time())
 
 
-def _format_ts(ts: int | float | None) -> str:
-    if not ts:
-        return ""
+def _twitter_search_api(query: str, max_results: int = 25) -> dict:
+    """Live recent search — used when local cache search misses. Bearer-only
+    is fine for /search/recent. Most plans cap at ~450 reqs/15min."""
+    if not os.environ.get("TWITTER_BEARER_TOKEN"):
+        return {"error": "TWITTER_BEARER_TOKEN not set"}
+    url = (f"{TWITTER_API}/tweets/search/recent"
+           f"?query={urllib.parse.quote(query)}"
+           f"&max_results={max(10, min(100, max_results))}"
+           "&tweet.fields=created_at,author_id&expansions=author_id"
+           "&user.fields=username")
     try:
-        return (datetime.fromtimestamp(int(ts), tz=timezone.utc)
-                .astimezone()
-                .strftime("%Y-%m-%d %H:%M"))
+        status, _, body = _http_request(url, headers=_twitter_headers())
+    except Exception as e:
+        return {"error": f"network: {e}"}
+    if status != 200:
+        return {"error": f"twitter search {status}: {body[:200]!r}"}
+    try:
+        data = json.loads(body)
+    except Exception as e:
+        return {"error": f"parse: {e}"}
+    authors = {u.get("id"): u.get("username") for u in
+                (data.get("includes") or {}).get("users") or []}
+    return {"ok": True, "results": [
+        {
+            "item_id": t.get("id"),
+            "author": authors.get(t.get("author_id")) or "?",
+            "text": t.get("text") or "",
+            "timestamp": _parse_iso8601(t.get("created_at")),
+            "url": f"https://twitter.com/i/status/{t.get('id')}",
+        }
+        for t in (data.get("data") or [])
+    ]}
+
+
+def _twitter_post(text: str, reply_to: str | None = None) -> dict:
+    """POST /2/tweets requires user-context OAuth (TWITTER_OAUTH_*); bearer
+    alone can't write. We surface a clear error rather than silently failing."""
+    if not os.environ.get("TWITTER_OAUTH_USER_TOKEN"):
+        return {"error": (
+            "twitter post requires user-context OAuth, not just bearer. "
+            "Set TWITTER_OAUTH_USER_TOKEN (PKCE access token) to enable. "
+            "Skipping."
+        )}
+    body: dict = {"text": text}
+    if reply_to:
+        body["reply"] = {"in_reply_to_tweet_id": str(reply_to)}
+    headers = {
+        "Authorization": f"Bearer {os.environ['TWITTER_OAUTH_USER_TOKEN']}",
+        "Content-Type": "application/json",
+        "User-Agent": "jarvis-social/1.0",
+    }
+    try:
+        status, _, resp = _http_request(
+            f"{TWITTER_API}/tweets", method="POST",
+            headers=headers, body=json.dumps(body).encode(),
+        )
+    except Exception as e:
+        return {"error": f"network: {e}"}
+    if status not in (200, 201):
+        return {"error": f"twitter post {status}: {resp[:200]!r}"}
+    try:
+        data = json.loads(resp)
     except Exception:
-        return ""
+        data = {}
+    return {"ok": True, "id": (data.get("data") or {}).get("id"),
+            "url": f"https://twitter.com/i/status/{(data.get('data') or {}).get('id')}"}
 
 
-# ── Polling ─────────────────────────────────────────────────────────
-_FETCHERS = {
-    "twitter": _twitter_fetch,
-    "linkedin": _linkedin_fetch,
-    "instagram": _instagram_fetch,
-    "rss": _rss_fetch,
-}
+# ── LinkedIn (Voyager — experimental) ───────────────────────────────
+LINKEDIN_VOYAGER = "https://www.linkedin.com/voyager/api"
 
 
-def poll_once(platform: str | None = None) -> dict:
-    """Fetch any new items for `platform` (or every enabled platform).
-    Honours per-platform `next_poll` timestamps so back-to-back calls don't
-    bypass the rate-limit floor.
+def _linkedin_headers() -> dict | None:
+    cookie = os.environ.get("LINKEDIN_COOKIE", "").strip()
+    if not cookie:
+        return None
+    csrf = _extract_jsessionid(cookie)
+    if not csrf:
+        return None
+    return {
+        "Cookie": cookie,
+        "Csrf-Token": csrf,
+        "Accept": "application/vnd.linkedin.normalized+json+2.1",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "User-Agent": "Mozilla/5.0 jarvis-social/1.0",
+    }
 
-    Returns {ok, polled: {platform: stored_count}, errors}."""
-    gate = _master_gate_check()
+
+def _extract_jsessionid(cookie: str) -> str | None:
+    """LinkedIn Voyager wants the JSESSIONID value as the CSRF token, with
+    quotes stripped. Returns None if not present."""
+    m = re.search(r"JSESSIONID=\"?([^;\"]+)\"?", cookie)
+    return m.group(1) if m else None
+
+
+def _linkedin_poll(state: dict) -> int:
+    """Pull the user's own feed updates. Voyager's feed endpoint isn't
+    documented; this is best-effort and may break with any LinkedIn change.
+    Stays read-only by design — TOS-grey and breakable."""
+    headers = _linkedin_headers()
+    if headers is None:
+        _log("linkedin: missing cookie or JSESSIONID")
+        return 0
+    url = (f"{LINKEDIN_VOYAGER}/feed/updates"
+           "?count=10&q=chronFeed")
+    try:
+        status, _, body = _http_request(url, headers=headers)
+    except Exception as e:
+        _log(f"linkedin fetch failed: {e}")
+        return 0
+    if status == 401 or status == 403:
+        _log(f"linkedin auth failed ({status}) — refresh LINKEDIN_COOKIE")
+        return 0
+    if status != 200:
+        _log(f"linkedin fetch {status}: {body[:200]!r}")
+        return 0
+    try:
+        data = json.loads(body)
+    except Exception as e:
+        _log(f"linkedin parse failed: {e}")
+        return 0
+    new_items = 0
+    elements = data.get("elements") or data.get("included") or []
+    for el in elements:
+        urn = el.get("urn") or el.get("entityUrn") or ""
+        if not urn or _is_seen(state, "linkedin", urn):
+            continue
+        text = (((el.get("commentary") or {}).get("text") or {}).get("text")
+                or el.get("text") or "")
+        actor = ((el.get("actor") or {}).get("name") or {}).get("text") or ""
+        ts = el.get("createdAt") or el.get("publishedAt") or int(time.time() * 1000)
+        try:
+            ts = int(int(ts) // 1000) if int(ts) > 1e11 else int(ts)
+        except Exception:
+            ts = int(time.time())
+        if not text and not actor:
+            continue
+        _append_item({
+            "platform": "linkedin",
+            "kind": "feed_post",
+            "item_id": urn,
+            "author": actor or "(unknown)",
+            "text": text[:1200],
+            "timestamp": ts,
+            "url": f"https://www.linkedin.com/feed/update/{urn}",
+        })
+        _record_seen(state, "linkedin", urn)
+        new_items += 1
+    return new_items
+
+
+def _linkedin_post(text: str, reply_to: str | None = None) -> dict:
+    """LinkedIn writes via Voyager are explicitly TOS-violating. We refuse
+    here and surface a clear message. If Watson wants automated posting,
+    that's the official Marketing API path with an OAuth app."""
+    return {"error": (
+        "linkedin posting via Voyager cookie is not supported (TOS risk). "
+        "Use the LinkedIn Marketing API with an OAuth app for automated posts."
+    )}
+
+
+# ── Instagram (Graph API) ───────────────────────────────────────────
+IG_GRAPH = "https://graph.instagram.com"
+
+
+def _instagram_poll(state: dict) -> int:
+    token = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
+    if not token:
+        return 0
+    cfg = _load_config().get("instagram", {})
+    user_id = (cfg.get("watch_user_id") or "me").strip() or "me"
+    fields = "id,caption,media_type,permalink,timestamp,like_count,comments_count"
+    url = (f"{IG_GRAPH}/{urllib.parse.quote(user_id)}/media"
+           f"?fields={fields}&access_token={urllib.parse.quote(token)}&limit=15")
+    try:
+        status, _, body = _http_request(url)
+    except Exception as e:
+        _log(f"instagram fetch failed: {e}")
+        return 0
+    if status != 200:
+        _log(f"instagram fetch {status}: {body[:200]!r}")
+        return 0
+    try:
+        data = json.loads(body)
+    except Exception:
+        return 0
+    new_items = 0
+    for m in data.get("data") or []:
+        mid = m.get("id")
+        if not mid or _is_seen(state, "instagram", mid):
+            continue
+        ts = _parse_iso8601(m.get("timestamp"))
+        _append_item({
+            "platform": "instagram",
+            "kind": m.get("media_type", "post").lower(),
+            "item_id": mid,
+            "author": "self",
+            "text": m.get("caption") or "",
+            "timestamp": ts,
+            "url": m.get("permalink") or "",
+            "extra": {
+                "likes": m.get("like_count"),
+                "comments": m.get("comments_count"),
+            },
+        })
+        _record_seen(state, "instagram", mid)
+        new_items += 1
+    return new_items
+
+
+def _instagram_post(text: str, reply_to: str | None = None) -> dict:
+    """Instagram Graph API requires a two-step container/publish flow plus
+    an image_url for feed posts. Plain text-only posts aren't supported on
+    the platform. We surface that constraint instead of silently failing."""
+    return {"error": (
+        "instagram doesn't support text-only feed posts — every post needs "
+        "media. For DMs / comment replies use the Messaging API with the "
+        "appropriate webhook setup. Skipping."
+    )}
+
+
+# ── RSS (no auth) ───────────────────────────────────────────────────
+def _rss_poll(state: dict) -> int:
+    feeds = (_load_config().get("rss") or {}).get("feeds") or []
+    new_items = 0
+    for entry in feeds:
+        if isinstance(entry, str):
+            feed_url, label = entry, ""
+        else:
+            feed_url = entry.get("url") or ""
+            label = entry.get("label") or ""
+        if not feed_url:
+            continue
+        try:
+            req = urllib.request.Request(feed_url, headers={
+                "User-Agent": "jarvis-social/1.0",
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
+            })
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as r:
+                body = r.read()
+        except Exception as e:
+            _log(f"rss fetch failed ({feed_url}): {e}")
+            continue
+        try:
+            new_items += _rss_parse_and_store(state, body, feed_url, label)
+        except Exception as e:
+            _log(f"rss parse failed ({feed_url}): {e}")
+            continue
+    return new_items
+
+
+def _rss_parse_and_store(state: dict, body: bytes, feed_url: str,
+                          label: str) -> int:
+    """Parse RSS or Atom, append new entries to cache. Returns count stored."""
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return 0
+    new_items = 0
+    tag = root.tag.lower()
+    is_atom = tag.endswith("feed")
+    items: list[ET.Element] = []
+    if is_atom:
+        items = list(root.findall("{http://www.w3.org/2005/Atom}entry"))
+    else:
+        items = list(root.findall(".//item"))
+    for it in items:
+        if is_atom:
+            link_el = it.find("{http://www.w3.org/2005/Atom}link")
+            link = link_el.get("href") if link_el is not None else ""
+            iid = (it.findtext("{http://www.w3.org/2005/Atom}id") or link or "").strip()
+            title = (it.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+            summary = (it.findtext("{http://www.w3.org/2005/Atom}summary")
+                       or it.findtext("{http://www.w3.org/2005/Atom}content")
+                       or "").strip()
+            pub = (it.findtext("{http://www.w3.org/2005/Atom}published")
+                   or it.findtext("{http://www.w3.org/2005/Atom}updated") or "")
+        else:
+            link = (it.findtext("link") or "").strip()
+            iid = (it.findtext("guid") or link or it.findtext("title") or "").strip()
+            title = (it.findtext("title") or "").strip()
+            summary = (it.findtext("description") or "").strip()
+            pub = (it.findtext("pubDate") or "")
+        if not iid:
+            continue
+        seen_key = f"{feed_url}::{iid}"
+        if _is_seen(state, "rss", seen_key):
+            continue
+        ts = _parse_rss_date(pub) or int(time.time())
+        text = title + (("\n\n" + _strip_html(summary)) if summary else "")
+        _append_item({
+            "platform": "rss",
+            "kind": "item",
+            "item_id": iid,
+            "author": label or _domain_from_url(feed_url),
+            "text": text[:1500],
+            "timestamp": ts,
+            "url": link,
+            "extra": {"feed": feed_url, "label": label},
+        })
+        _record_seen(state, "rss", seen_key)
+        new_items += 1
+    return new_items
+
+
+def _domain_from_url(url: str) -> str:
+    try:
+        return urllib.parse.urlparse(url).netloc or url
+    except Exception:
+        return url
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_ENTITY_RE = re.compile(r"&([#a-zA-Z0-9]+);")
+
+
+def _strip_html(s: str) -> str:
+    out = _HTML_TAG_RE.sub("", s or "")
+    return _HTML_ENTITY_RE.sub(lambda m: {
+        "amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'",
+        "#39": "'", "nbsp": " ",
+    }.get(m.group(1), m.group(0)), out).strip()
+
+
+def _parse_rss_date(s: str) -> int | None:
+    """Best-effort: RFC 822 (RSS) or ISO 8601 (Atom). Returns epoch seconds
+    or None — caller falls back to now()."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return _parse_iso8601(s) if "T" in s or "-" in s.split(" ", 1)[0] else None
+    except Exception:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+
+# ── Polling orchestration ───────────────────────────────────────────
+def poll_once() -> dict:
+    """Single round across enabled platforms. Each platform respects its
+    own min-interval — a tight loop won't hammer rate limits."""
+    gate = _gate_check_master()
     if gate:
         return gate
     state = _load_state()
-    targets = [platform] if platform else _enabled_platforms()
-    polled: dict[str, int] = {}
-    errors: list[str] = []
     now = time.time()
-    for p in targets:
+    out: dict[str, int] = {}
+    errors: list[str] = []
+    for p in PLATFORMS:
         if not _platform_enabled(p):
             continue
-        ps = state.setdefault(p, {})
-        if ps.get("next_poll") and now < ps["next_poll"]:
-            polled[p] = 0
+        s = _platform_state(state, p)
+        # Honor a known rate-limit reset window before re-trying.
+        if s.get("rate_limit_reset") and now < s["rate_limit_reset"]:
             continue
-        token = _platform_token(p) or ""
-        fetcher = _FETCHERS[p]
+        if (now - (s.get("last_poll_ts") or 0)) < POLL_INTERVALS.get(p, 300):
+            continue
         try:
-            records = fetcher(token)
+            if p == "twitter":
+                n = _twitter_poll(state)
+            elif p == "linkedin":
+                n = _linkedin_poll(state)
+            elif p == "instagram":
+                n = _instagram_poll(state)
+            elif p == "rss":
+                n = _rss_poll(state)
+            else:
+                n = 0
         except Exception as e:
             errors.append(f"{p}: {e}")
-            _log(f"poll {p} crashed: {e}")
-            records = []
-        stored = _append_records(p, records)
-        polled[p] = stored
-        ps["last_poll"] = int(now)
-        ps["next_poll"] = int(now) + POLL_INTERVALS_S.get(p, 300)
-        # If the platform pushed next_poll out itself (rate-limit branch),
-        # don't shrink it back down — keep the larger of the two.
-        ps["next_poll"] = max(ps["next_poll"], int(state.get(p, {}).get("next_poll") or 0))
+            _log(f"{p} poll crashed: {e}")
+            continue
+        s["last_poll_ts"] = int(now)
+        out[p] = n
     _save_state(state)
-    return {"ok": True, "polled": polled, "errors": errors}
+    return {"ok": True, "fetched": out, "errors": errors}
 
 
 def poll_loop() -> None:
-    """Run forever. Designed to be the wake-listener's daemon-thread target.
-    Sleeps until the soonest enabled platform is due, then calls poll_once."""
-    gate = _master_gate_check()
-    if gate:
-        _log(f"poll_loop refused to start: {gate['error']}")
+    """Long-running poll loop for wake-listener's background thread.
+    Sleeps min(POLL_INTERVALS) between rounds and lets each platform's own
+    last_poll_ts decide whether to actually fire. Exits on KeyboardInterrupt."""
+    if not _master_gate():
+        _log("poll_loop refused to start: JARVIS_SOCIAL=0")
         return
-    # Single startup prune pass for every platform.
-    for p in PLATFORMS:
-        try:
-            n = _prune_cache(p)
-            if n:
-                _log(f"startup prune {p}: {n}")
-        except Exception:
-            pass
-    backoff = 5.0
+    if not enabled_platforms():
+        _log("poll_loop refused to start: no platforms enabled")
+        return
+    _prune_cache()
+    backoff = 1.0
+    base_sleep = max(30, min(POLL_INTERVALS.values()))
     while True:
         try:
-            poll_once()
+            res = poll_once()
         except KeyboardInterrupt:
             _log("poll_loop stopped by user")
             return
@@ -908,51 +898,59 @@ def poll_loop() -> None:
             time.sleep(min(backoff, 120))
             backoff = min(backoff * 2, 120)
             continue
-        backoff = 5.0
-        # Sleep until the closest next_poll across enabled platforms.
-        state = _load_state()
-        now = time.time()
-        nexts = [
-            (state.get(p) or {}).get("next_poll") or 0
-            for p in _enabled_platforms()
-        ]
-        if not nexts:
-            time.sleep(60)
+        if isinstance(res, dict) and res.get("error"):
+            _log(f"poll_loop error: {res['error']}")
+            time.sleep(min(backoff, 120))
+            backoff = min(backoff * 2, 120)
             continue
-        wait = max(5, min(n - now for n in nexts) if any(n > now for n in nexts) else 30)
-        # Cap at 5 min so a clock skew can't deadlock us.
-        time.sleep(min(wait, 300))
+        backoff = 1.0
+        time.sleep(base_sleep)
 
 
 # ── Public: check_social ────────────────────────────────────────────
 def check_social(platform: str | None = None, hours: int = 4) -> dict:
-    """Return recent activity from cache."""
-    gate = _master_gate_check()
+    gate = _gate_check_master()
     if gate:
         return gate
     if platform and platform not in PLATFORMS:
         return {"error": f"unknown platform {platform!r}"}
-    targets = [platform] if platform else _enabled_platforms()
+    targets = [platform] if platform else enabled_platforms()
     if not targets:
-        return {"error": "no social platforms configured"}
+        return {"error": "no platforms enabled — run `jarvis-social.py --setup`"}
     since = time.time() - max(0, hours) * 3600
     items: list[dict] = []
     for p in targets:
-        items.extend(_read_cache(p, since))
-    items.sort(key=lambda r: r.get("timestamp") or 0, reverse=True)
-    return {
-        "ok": True,
-        "items": items,
-        "count": len(items),
-        "hours": hours,
-        "platforms": targets,
-    }
+        for rec in _read_cache(p, since):
+            items.append({
+                "platform": rec.get("platform"),
+                "kind": rec.get("kind"),
+                "item_id": rec.get("item_id"),
+                "author": rec.get("author"),
+                "text": rec.get("text") or "",
+                "timestamp": rec.get("timestamp"),
+                "datetime": _format_ts(rec.get("timestamp")),
+                "url": rec.get("url") or "",
+                "directed_at_self": rec.get("directed_at_self", False),
+                "extra": rec.get("extra") or {},
+            })
+    items.sort(key=lambda r: r.get("timestamp") or 0)
+    return {"ok": True, "items": items, "count": len(items),
+            "platforms": targets, "hours": hours}
+
+
+def _format_ts(ts: int | float | None) -> str:
+    if not ts:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
 
 
 # ── Public: social_search ───────────────────────────────────────────
 def social_search(query: str, platform: str | None = None,
-                  hours: int = 48) -> dict:
-    gate = _master_gate_check()
+                   hours: int = 48) -> dict:
+    gate = _gate_check_master()
     if gate:
         return gate
     query = (query or "").strip()
@@ -961,39 +959,37 @@ def social_search(query: str, platform: str | None = None,
     res = check_social(platform=platform, hours=hours)
     if res.get("error"):
         return res
-    q = query.lower()
-    hits = [
-        i for i in res["items"]
-        if q in (i.get("text") or "").lower()
-        or q in (i.get("from_handle") or "").lower()
-        or q in (i.get("from_name") or "").lower()
-    ]
-    return {"ok": True, "query": query, "hits": hits, "count": len(hits)}
+    items = res["items"]
+    q_lower = query.lower()
+    hits = [m for m in items if q_lower in (m.get("text") or "").lower()
+            or q_lower in (m.get("author") or "").lower()]
+    return {"ok": True, "query": query, "hits": hits, "count": len(hits),
+            "platforms": res["platforms"]}
 
 
 # ── Public: social_digest ───────────────────────────────────────────
-DIGEST_SYSTEM = """You are summarizing one social platform's activity for Watson.
+DIGEST_SYSTEM = """You are summarizing social media activity for Watson.
 
 Output ONE valid JSON object — no prose, no fences. Schema:
 
 {
-  "summary": "1-2 sentences in past tense, EA register. What appeared, who's notable, what's open.",
-  "action_items": ["Things directed at Watson that he should personally handle. Empty list if none."],
+  "summary": "2-3 sentences in past tense, EA register. What was posted, what got engagement, what needs his attention.",
+  "action_items": ["Items directed at Watson he should personally handle. Empty list if none."],
   "urgent": true | false,
   "key_topics": ["short", "noun", "phrases"]
 }
 
 Rules:
-- urgent=true ONLY when there's a direct DM to Watson, an @mention from a known contact, or a deadline today/tomorrow. Default false.
-- action_items list each as one imperative phrase ("Reply to @karina re Tuesday demo"). Drop items already resolved.
-- If the activity is just noise / promo / ambient browsing, say so plainly and action_items=[]/urgent=false.
-- Quantify when useful (e.g. "three @mentions, two from strangers").
+- urgent=true ONLY when there's a direct mention/reply to Watson, a customer complaint, or something time-sensitive. Default false.
+- action_items each as one imperative phrase ("Reply to @karina on the demo tweet").
+- For RSS items, summary should pull the most-relevant headlines, not all of them.
+- If there's nothing of substance, summary should say so plainly and action_items=[]/urgent=false.
 """
 
 
 def _anthropic_call(api_key: str, model: str, system: str,
-                    user_text: str, max_tokens: int = 600,
-                    timeout: float = 25.0) -> str:
+                    user_text: str, max_tokens: int = 800,
+                    timeout: float = 30.0) -> str:
     payload = json.dumps({
         "model": model,
         "max_tokens": max_tokens,
@@ -1022,7 +1018,7 @@ def _anthropic_call(api_key: str, model: str, system: str,
                 time.sleep(1 + attempt * 1.5)
                 continue
             raise RuntimeError(f"API error {e.code}: {e}") from e
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             last_err = e
             if attempt < 2:
                 time.sleep(1 + attempt * 1.5)
@@ -1031,23 +1027,24 @@ def _anthropic_call(api_key: str, model: str, system: str,
     raise RuntimeError(f"unexpected: {last_err}")
 
 
-def _summarize_platform(platform: str, items: list[dict],
-                        api_key: str) -> dict:
+def _summarize_platform(platform: str, items: list[dict], api_key: str) -> dict:
     if not items:
         return {"summary": "No activity.", "action_items": [],
                 "urgent": False, "key_topics": []}
-    trimmed = items[-DIGEST_MAX_PER_PLATFORM:]
+    trimmed = items[-DIGEST_MAX_ITEMS:]
     lines = []
     for it in trimmed:
         ts = _format_ts(it.get("timestamp"))
-        sender = it.get("from_handle") or it.get("from_name") or "?"
-        text = (it.get("text") or "").replace("\n", " ")[:400]
-        lines.append(f"[{ts}] {sender}: {text}")
+        author = it.get("author") or "(unknown)"
+        text = (it.get("text") or "").strip().replace("\n", " ")
+        kind = it.get("kind") or ""
+        flag = " [→you]" if it.get("directed_at_self") else ""
+        lines.append(f"[{ts}] ({kind}) {author}{flag}: {text}")
     transcript = "\n".join(lines)
     prompt = f"Platform: {platform}\nItems ({len(trimmed)}):\n\n{transcript}"
     try:
         raw = _anthropic_call(api_key, DIGEST_MODEL, DIGEST_SYSTEM, prompt,
-                               max_tokens=500, timeout=20)
+                               max_tokens=600, timeout=20)
     except Exception as e:
         return {"summary": f"Summary failed: {e}", "action_items": [],
                 "urgent": False, "key_topics": []}
@@ -1067,274 +1064,209 @@ def _summarize_platform(platform: str, items: list[dict],
     return parsed
 
 
-def social_digest(hours: int = 12) -> dict:
-    """Per-platform AI summary. Returns {ok, platforms: [{name, item_count,
-    summary, action_items, urgent, key_topics}]}."""
-    gate = _master_gate_check()
+def social_digest(hours: int = 12, platform: str | None = None) -> dict:
+    gate = _gate_check_master()
     if gate:
         return gate
+    targets = [platform] if platform else enabled_platforms()
+    if not targets:
+        return {"error": "no platforms enabled"}
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"error": "ANTHROPIC_API_KEY not set"}
-    targets = _enabled_platforms()
-    if not targets:
-        return {"ok": True, "platforms": [], "hours": hours,
-                "hint": "no social platforms configured"}
     since = time.time() - max(0, hours) * 3600
     out: list[dict] = []
     for p in targets:
-        items = _read_cache(p, since)
-        if not items:
+        cached = _read_cache(p, since)
+        if not cached:
             continue
-        summ = _summarize_platform(p, items, api_key)
+        prepped = [{
+            "kind": r.get("kind"),
+            "author": r.get("author"),
+            "text": r.get("text") or "",
+            "directed_at_self": r.get("directed_at_self", False),
+            "timestamp": r.get("timestamp"),
+        } for r in cached]
+        summary = _summarize_platform(p, prepped, api_key)
         out.append({
-            "name": p,
-            "item_count": len(items),
-            "summary": summ.get("summary") or "",
-            "action_items": summ.get("action_items") or [],
-            "urgent": bool(summ.get("urgent")),
-            "key_topics": summ.get("key_topics") or [],
+            "platform": p,
+            "item_count": len(cached),
+            "summary": summary.get("summary") or "",
+            "action_items": summary.get("action_items") or [],
+            "urgent": bool(summary.get("urgent")),
+            "key_topics": summary.get("key_topics") or [],
         })
-    out.sort(key=lambda b: (not b.get("urgent"), -b.get("item_count", 0)))
+    out.sort(key=lambda g: (not g.get("urgent"), -g.get("item_count", 0)))
     return {"ok": True, "platforms": out, "hours": hours}
 
 
-# ── Public: social_post ─────────────────────────────────────────────
-_POSTERS = {
-    "twitter": _twitter_post,
-    "linkedin": _linkedin_post,
-    "instagram": _instagram_post,
-}
+# ── Public: social_post / social_reply ──────────────────────────────
+def _maybe_apply_style(text: str, channel: str = "social") -> str:
+    """Best-effort pass through jarvis-style.apply_style. Returns the styled
+    text on success, original on any failure. Caller decides whether to
+    re-style after Watson approves the preview (don't — same convention as
+    send_telegram)."""
+    if os.environ.get("JARVIS_STYLE_AUTOAPPLY", "1") != "1":
+        return text
+    style_src = ASSISTANT_DIR / "bin" / "jarvis-style.py"
+    if not style_src.exists():
+        style_src = Path(__file__).parent / "jarvis-style.py"
+    if not style_src.exists():
+        return text
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_style_social", style_src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception as e:
+        _log(f"style load failed: {e}")
+        return text
+    try:
+        # jarvis-style only declares email/telegram channels — passing an
+        # unknown channel falls through to the "Mixed" register, which is
+        # fine for tweets/LI posts/IG captions.
+        res = mod.apply_style(text, channel=None)
+    except Exception as e:
+        _log(f"apply_style failed: {e}")
+        return text
+    if not isinstance(res, dict) or res.get("error"):
+        return text
+    return (res.get("styled") or text).strip() or text
 
 
-def _check_post_args(platform: str, content: str) -> dict | None:
-    if platform not in PLATFORMS:
-        return {"error": f"unknown platform {platform!r}"}
-    if platform == "rss":
-        return {"error": "rss is read-only"}
-    if not _platform_enabled(platform):
-        return {"error": f"{platform} not configured / disabled"}
-    if not content or not content.strip():
-        return {"error": "content is required"}
-    limit = CHAR_LIMITS.get(platform, 0)
-    if limit and len(content) > limit:
-        return {"error": f"content {len(content)} chars exceeds {platform} "
-                         f"limit of {limit}"}
-    return None
-
-
-def social_post(platform: str, content: str, confirm: bool = False) -> dict:
-    """Publish a new post. confirm=True required (preview-then-confirm
-    flow, same as send_email / send_telegram)."""
-    gate = _master_gate_check()
+def social_post(platform: str, message: str, confirm: bool = False) -> dict:
+    gate = _gate_check_platform(platform)
     if gate:
         return gate
-    err = _check_post_args(platform, content)
-    if err:
-        return err
+    if platform == "rss":
+        return {"error": "rss is read-only"}
+    if not message:
+        return {"error": "message required"}
     if not confirm:
+        styled = _maybe_apply_style(message)
         return {
             "sent": False,
             "needs_confirmation": True,
             "platform": platform,
-            "preview": content[:CHAR_LIMITS.get(platform, 280)],
-            "char_count": len(content),
-            "char_limit": CHAR_LIMITS.get(platform, 280),
-            "hint": ("Read the preview to Watson. After he says yes, "
-                     "re-call with confirm=true."),
+            "preview": styled[:280] if platform == "twitter" else styled[:1000],
+            "hint": (
+                "Read the preview to Watson. After he says yes, re-call "
+                "with confirm=true. The exact preview text will be posted."
+            ),
         }
-    token = _platform_token(platform) or ""
-    poster = _POSTERS.get(platform)
-    if not poster:
-        return {"error": f"{platform} posting not supported"}
-    res = poster(token, content)
-    if isinstance(res, dict) and res.get("sent"):
-        _log(f"posted to {platform}: {content[:80]}")
-    return res
-
-
-# ── Public: social_reply ────────────────────────────────────────────
-def _find_cached(platform: str, item_id: str) -> dict | None:
-    """Look up a cached record by id. Linear scan — caches stay small thanks
-    to retention pruning, so no index needed."""
-    path = _cache_path(platform)
-    if not path.exists():
-        return None
-    try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("id") == item_id or rec.get("raw_id") == item_id:
-                    return rec
-    except Exception as e:
-        _log(f"find cached failed ({platform}): {e}")
-    return None
+    if platform == "twitter":
+        return _twitter_post(message)
+    if platform == "linkedin":
+        return _linkedin_post(message)
+    if platform == "instagram":
+        return _instagram_post(message)
+    if platform == "rss":
+        return {"error": "rss is read-only"}
+    return {"error": f"unknown platform {platform!r}"}
 
 
 def social_reply(platform: str, item_id: str, message: str,
-                 confirm: bool = False) -> dict:
-    """Reply to a cached item. confirm=True required."""
-    gate = _master_gate_check()
+                  confirm: bool = False) -> dict:
+    gate = _gate_check_platform(platform)
     if gate:
         return gate
-    err = _check_post_args(platform, message)
-    if err:
-        return err
-    item = _find_cached(platform, item_id)
-    if item is None:
-        return {"error": f"no cached {platform} item with id {item_id!r}"}
-    target = item.get("from_handle") or item.get("from_name") or "?"
+    if platform == "rss":
+        return {"error": "rss is read-only"}
+    if not item_id or not message:
+        return {"error": "item_id and message required"}
     if not confirm:
-        # Style only the preview round so Watson can edit. Lazy-load.
-        styled = message
-        try:
-            styled = _maybe_apply_style(message, channel="social")
-        except Exception:
-            styled = message
+        styled = _maybe_apply_style(message)
         return {
             "sent": False,
             "needs_confirmation": True,
             "platform": platform,
-            "in_reply_to": target,
-            "original_text": (item.get("text") or "")[:240],
-            "preview": styled[:CHAR_LIMITS.get(platform, 280)],
-            "char_count": len(styled),
-            "char_limit": CHAR_LIMITS.get(platform, 280),
-            "hint": ("Read the preview and the original to Watson, then "
-                     "ask 'Should I send it, sir?' Re-call with confirm=true."),
+            "item_id": item_id,
+            "preview": styled[:280] if platform == "twitter" else styled[:1000],
+            "hint": "Read the preview to Watson. After he says yes, re-call with confirm=true.",
         }
-    token = _platform_token(platform) or ""
-    raw_id = item.get("raw_id") or item_id.split(":", 1)[-1]
     if platform == "twitter":
-        res = _twitter_post(token, message, reply_to_tweet_id=raw_id)
-    else:
-        # LinkedIn / Instagram replies need their own quirks; punt for now.
-        return {"error": f"{platform} reply not yet supported"}
-    if isinstance(res, dict) and res.get("sent"):
-        _log(f"replied on {platform} to {target}: {message[:80]}")
-        # Best-effort: bump the contact record so the relationship pulse
-        # learns about this exchange. Pass the sub-platform so the right
-        # social_handle field gets backfilled.
-        try:
-            _maybe_note_contact(channel=f"social:{platform}",
-                                handle=item.get("from_handle") or target,
-                                summary=f"Replied on {platform}: {message[:120]}")
-        except Exception:
-            pass
-    return res
+        return _twitter_post(message, reply_to=item_id)
+    if platform == "linkedin":
+        return _linkedin_post(message, reply_to=item_id)
+    if platform == "instagram":
+        return _instagram_post(message, reply_to=item_id)
+    if platform == "rss":
+        return {"error": "rss is read-only"}
+    return {"error": f"unknown platform {platform!r}"}
 
 
-# ── Style hook (lazy) ───────────────────────────────────────────────
-def _maybe_apply_style(text: str, channel: str = "social") -> str:
-    src = ASSISTANT_DIR / "bin" / "jarvis-style.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-style.py"
-    if not src.exists():
-        return text
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_style_social", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        res = mod.apply_style(text, channel=channel)
-    except Exception as e:
-        _log(f"style apply skipped: {e}")
-        return text
-    if isinstance(res, dict):
-        return res.get("styled") or res.get("text") or text
-    return text
-
-
-# ── Contact note hook (lazy) ────────────────────────────────────────
-def _maybe_note_contact(channel: str, handle: str, summary: str = "") -> None:
-    src = ASSISTANT_DIR / "bin" / "jarvis-contacts.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-contacts.py"
-    if not src.exists():
-        return
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_contacts_social", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        mod.note_interaction(channel=channel, handle=handle, summary=summary)
-    except Exception as e:
-        _log(f"contacts note skipped: {e}")
-
-
-# ── Hooks for jarvis-context / jarvis-notifications / wake-listener ─
+# ── Urgency / hint helpers (for context + wake-listener) ────────────
 _URGENT_RE = re.compile(
-    r"\b(urgent|asap|deadline|please respond|need (you|your)|"
-    r"hey watson|@watson|fire|critical)\b",
+    r"\b(urgent|asap|emergency|now|outage|down|breaking|"
+    r"please respond|@watson|hey watson|need (you|your)|"
+    r"customer complaint|complaint|refund)\b",
     re.I,
 )
 
 
 def recent_urgent(minutes: int = 10) -> list[dict]:
-    """Items in the last `minutes` that look urgent — DMs, @mentions, or
-    text that trips the urgency regex. Used by the wake-listener to drop
-    a notification when a conversation ends."""
-    if _master_gate_check():
+    """Cache items from the last `minutes` that look urgent. Direct mentions
+    auto-qualify. Cheap — pure local scan, no API call."""
+    if not _master_gate():
         return []
     since = time.time() - max(0, minutes) * 60
     out: list[dict] = []
-    for p in _enabled_platforms():
+    for p in enabled_platforms():
         for rec in _read_cache(p, since):
             text = rec.get("text") or ""
-            kind = rec.get("kind") or ""
-            is_urgent = (
-                rec.get("is_dm")
-                or kind in ("mention", "dm")
-                or _URGENT_RE.search(text)
-            )
-            if is_urgent:
-                out.append(rec)
+            if not (rec.get("directed_at_self") or _URGENT_RE.search(text)):
+                continue
+            out.append({
+                "platform": p,
+                "kind": rec.get("kind"),
+                "author": rec.get("author"),
+                "text": text,
+                "timestamp": rec.get("timestamp"),
+                "item_id": rec.get("item_id"),
+                "url": rec.get("url"),
+                "directed_at_self": rec.get("directed_at_self", False),
+            })
     out.sort(key=lambda r: r.get("timestamp") or 0)
     return out
 
 
-def unresponded_count() -> int:
-    """Best-effort count of @mentions / DMs in the last 24h that look
-    unresponded. Heuristic: any cached item whose kind is mention/dm AND
-    whose timestamp is the most recent for that thread."""
-    if _master_gate_check():
+def urgent_pending() -> int:
+    """Count of platforms with urgent items in the last hour. Used by
+    jarvis-context.context_hint for the system-prompt hint."""
+    if not _master_gate():
         return 0
-    since = time.time() - 24 * 3600
-    n = 0
-    for p in _enabled_platforms():
+    since = time.time() - 3600
+    flagged = 0
+    for p in enabled_platforms():
         for rec in _read_cache(p, since):
-            kind = rec.get("kind") or ""
-            if kind in ("mention", "dm") or rec.get("is_dm"):
-                n += 1
-    return n
+            text = rec.get("text") or ""
+            if rec.get("directed_at_self") or _URGENT_RE.search(text):
+                flagged += 1
+                break
+    return flagged
 
 
 def context_hint() -> str:
-    """One-liner for jarvis-context.py to inject when there's social
-    traffic Watson hasn't seen. Empty in the common case so the cache
-    breakpoint stays warm."""
-    if os.environ.get("JARVIS_SOCIAL", _master_gate_default()) != "1":
-        return ""
-    n = unresponded_count()
+    """One-line system-prompt hint when there's urgent social traffic. Empty
+    in the common case (keeps the cache warm). Same contract as
+    jarvis-telegram.context_hint."""
+    n = urgent_pending()
     if not n:
         return ""
     return (
-        f"**Social:** {n} mention{'s' if n != 1 else ''}/DM(s) on social "
-        "platforms in the last 24h. If Watson asks 'catch me up on "
-        "social' or similar, lead with `social_digest(hours=12)`."
+        f"**Social:** {n} platform{'s' if n != 1 else ''} has activity "
+        "in the last hour that looks urgent (direct mention, reply at you, "
+        "or urgency keywords). If Watson asks 'anything urgent online' or "
+        "similar, lead with `social_digest(hours=2)`."
     )
 
 
-# ── Status / setup helpers ──────────────────────────────────────────
+# ── Status / setup ──────────────────────────────────────────────────
 def status() -> dict:
+    cfg = _load_config()
     state = _load_state()
-    breakdown = []
+    out_platforms = []
     for p in PLATFORMS:
-        token = _platform_token(p)
         path = _cache_path(p)
         n = 0
         last_ts = 0
@@ -1347,42 +1279,61 @@ def status() -> dict:
                         n += 1
                         try:
                             rec = json.loads(line)
-                            if (rec.get("timestamp") or 0) > last_ts:
+                            if rec.get("timestamp", 0) > last_ts:
                                 last_ts = rec["timestamp"]
                         except json.JSONDecodeError:
                             continue
             except Exception:
                 pass
-        breakdown.append({
+        s = state.get(p, {})
+        out_platforms.append({
             "platform": p,
-            "configured": bool(token),
             "enabled": _platform_enabled(p),
+            "configured": _platform_default_gate(p) == "1",
             "cached_items": n,
             "last_item": _format_ts(last_ts) if last_ts else "",
-            "next_poll": _format_ts((state.get(p) or {}).get("next_poll") or 0),
-            "interval_s": POLL_INTERVALS_S.get(p, 300),
+            "last_poll": _format_ts(s.get("last_poll_ts")) if s.get("last_poll_ts") else "",
+            "rate_limit_remaining": s.get("rate_limit_remaining"),
         })
     return {
         "ok": True,
-        "master_enabled": os.environ.get("JARVIS_SOCIAL", _master_gate_default()) == "1",
-        "platforms": breakdown,
-        "feeds_count": len(_load_feeds()),
-        "feeds_path": str(FEEDS_FILE),
+        "master_gate": _master_gate(),
+        "platforms": out_platforms,
+        "config_path": str(CONFIG_FILE),
     }
 
 
-def add_rss_feed(url: str, name: str | None = None,
-                 priority: str = "normal") -> dict:
-    feeds = _load_feeds()
-    if any(f["url"] == url for f in feeds):
-        return {"error": f"feed already added: {url}"}
-    feeds.append({
-        "url": url,
-        "name": name or url,
-        "priority": priority if priority in ("high", "normal", "low") else "normal",
-    })
-    _save_feeds(feeds)
-    return {"ok": True, "feed": feeds[-1], "count": len(feeds)}
+SETUP_TEXT = """\
+=== Jarvis social setup ===
+
+Each platform is independent. Skip any you don't use.
+
+  Twitter    needs TWITTER_BEARER_TOKEN  (read-only with bearer; set
+                                          TWITTER_OAUTH_USER_TOKEN to enable
+                                          posting/replying)
+  LinkedIn   needs LINKEDIN_COOKIE      (full Cookie header from a logged-in
+                                          browser session — EXPERIMENTAL,
+                                          breaks if LinkedIn rotates schemas)
+  Instagram  needs INSTAGRAM_ACCESS_TOKEN (Graph API token from a Business or
+                                          Creator account linked to a FB Page)
+  RSS        no auth                    (just add feed URLs)
+
+Edit the watch lists in:
+  {cfg}
+
+Defaults wire up Twitter mentions on your handle and the user's own LinkedIn
+feed. RSS starts empty — add feeds as you go.
+
+After editing config, run --status to verify, then --poll-once to seed cache.
+"""
+
+
+def setup() -> int:
+    SOCIAL_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        _save_config(DEFAULT_CONFIG)
+    print(SETUP_TEXT.format(cfg=CONFIG_FILE))
+    return 0
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
@@ -1401,59 +1352,13 @@ def _cli() -> int:
                 return rest[i + 1]
         return default
 
+    if cmd == "--setup":
+        return setup()
     if cmd == "--status":
         print(json.dumps(status(), indent=2, ensure_ascii=False))
         return 0
-    if cmd == "--check":
-        platform = _flag("--platform")
-        hours = int(_flag("--hours", "4") or "4")
-        print(json.dumps(check_social(platform=platform, hours=hours),
-                         indent=2, ensure_ascii=False))
-        return 0
-    if cmd == "--digest":
-        hours = int(_flag("--hours", "12") or "12")
-        print(json.dumps(social_digest(hours=hours), indent=2, ensure_ascii=False))
-        return 0
-    if cmd == "--search":
-        if not rest or rest[0].startswith("--"):
-            print("usage: --search QUERY [--platform X] [--hours N]",
-                  file=sys.stderr)
-            return 2
-        query = rest[0]
-        platform = _flag("--platform")
-        hours = int(_flag("--hours", "48") or "48")
-        print(json.dumps(social_search(query=query, platform=platform,
-                                       hours=hours),
-                         indent=2, ensure_ascii=False))
-        return 0
-    if cmd == "--post":
-        if len(rest) < 2:
-            print("usage: --post PLATFORM 'content' [--confirm]",
-                  file=sys.stderr)
-            return 2
-        platform = rest[0]
-        content = rest[1]
-        confirm = "--confirm" in rest
-        print(json.dumps(social_post(platform=platform, content=content,
-                                     confirm=confirm),
-                         indent=2, ensure_ascii=False))
-        return 0
-    if cmd == "--reply":
-        if len(rest) < 3:
-            print("usage: --reply PLATFORM ITEM_ID 'message' [--confirm]",
-                  file=sys.stderr)
-            return 2
-        platform = rest[0]
-        item_id = rest[1]
-        message = rest[2]
-        confirm = "--confirm" in rest
-        print(json.dumps(social_reply(platform=platform, item_id=item_id,
-                                      message=message, confirm=confirm),
-                         indent=2, ensure_ascii=False))
-        return 0
     if cmd == "--poll-once":
-        platform = _flag("--platform")
-        print(json.dumps(poll_once(platform=platform), indent=2, ensure_ascii=False))
+        print(json.dumps(poll_once(), indent=2, ensure_ascii=False))
         return 0
     if cmd == "--poll-loop":
         try:
@@ -1461,22 +1366,55 @@ def _cli() -> int:
         except KeyboardInterrupt:
             return 0
         return 0
-    if cmd == "--rss-add":
+    if cmd == "--check":
+        platform = None
+        if rest and not rest[0].startswith("--"):
+            platform = rest[0]
+        hours = int(_flag("--hours", "4") or "4")
+        print(json.dumps(check_social(platform=platform, hours=hours),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--digest":
+        platform = _flag("--platform")
+        hours = int(_flag("--hours", "12") or "12")
+        print(json.dumps(social_digest(hours=hours, platform=platform),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--search":
         if not rest or rest[0].startswith("--"):
-            print("usage: --rss-add URL [--name X] [--priority high|normal|low]",
+            print("usage: --search QUERY [--platform X] [--hours N]", file=sys.stderr)
+            return 2
+        query = rest[0]
+        platform = _flag("--platform")
+        hours = int(_flag("--hours", "48") or "48")
+        print(json.dumps(social_search(query=query, platform=platform, hours=hours),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--reply":
+        if len(rest) < 3:
+            print("usage: --reply PLATFORM ITEM_ID 'message' [--confirm]",
                   file=sys.stderr)
             return 2
-        url = rest[0]
-        name = _flag("--name")
-        priority = _flag("--priority", "normal") or "normal"
-        print(json.dumps(add_rss_feed(url, name=name, priority=priority),
+        platform, item_id, message = rest[0], rest[1], rest[2]
+        confirm = "--confirm" in rest
+        print(json.dumps(social_reply(platform=platform, item_id=item_id,
+                                       message=message, confirm=confirm),
+                         indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "--post":
+        if len(rest) < 2:
+            print("usage: --post PLATFORM 'message' [--confirm]", file=sys.stderr)
+            return 2
+        platform, message = rest[0], rest[1]
+        confirm = "--confirm" in rest
+        print(json.dumps(social_post(platform=platform, message=message,
+                                      confirm=confirm),
                          indent=2, ensure_ascii=False))
         return 0
     if cmd == "--prune":
-        platform = _flag("--platform")
-        targets = [platform] if platform else list(PLATFORMS)
-        out = {p: _prune_cache(p) for p in targets}
-        print(json.dumps({"pruned": out}, indent=2))
+        days = int(_flag("--days", str(CACHE_RETENTION_DAYS)) or str(CACHE_RETENTION_DAYS))
+        n = _prune_cache(retention_days=days)
+        print(json.dumps({"pruned": n, "retention_days": days}, indent=2))
         return 0
     print(f"unknown command: {cmd}", file=sys.stderr)
     return 2

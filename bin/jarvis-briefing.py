@@ -273,44 +273,18 @@ def _pull_telegram(hours: int = 12) -> dict:
 
 
 def _pull_social(hours: int = 12) -> dict:
-    """Pull the per-platform social digest. Same soft-fail contract as
-    telegram — breakfast does not block on social."""
-    if _is_demo():
-        return _demo_mod.mock_social_digest(hours)
+    """Per-platform digest from jarvis-social. Soft-fails the same way as
+    telegram — social is optional and the briefing must never block on it."""
     mod = _social()
     if mod is None:
         return {"platforms": []}
     try:
         rec = mod.social_digest(hours=hours)
     except Exception as e:
-        return {"error": f"social: {e}"}
+        return {"platforms": [], "soft_error": str(e)}
     if isinstance(rec, dict) and rec.get("error"):
         return {"platforms": [], "soft_error": rec["error"]}
     return rec or {"platforms": []}
-
-
-def _pull_stripe() -> dict:
-    """Pull the Stripe revenue snapshot. Soft-fail — briefing must never
-    block on a Stripe outage."""
-    if _is_demo():
-        return _demo_mod.mock_briefing_stripe()
-    if os.environ.get("JARVIS_STRIPE", "1") == "0":
-        return {}
-    src = BIN_DIR / "jarvis-stripe.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-stripe.py"
-    if not src.exists():
-        return {}
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_stripe_brief_payload", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        snap = mod.stripe_dashboard()
-    except Exception as e:
-        return {"error": f"stripe: {e}"}
-    if isinstance(snap, dict) and snap.get("error"):
-        return {}  # silent — gate likely off, no need to clutter briefing
-    return snap or {}
 
 
 def _pull_weather() -> dict:
@@ -442,22 +416,20 @@ def _build_synth_prompt(payload: dict) -> str:
             )
         parts.append("GROUP CHATS (Telegram):\n" + "\n".join(lines))
 
-    social = payload.get("social") or {}
-    social_blocks = [
-        b for b in (social.get("platforms") or [])
-        if (b.get("item_count") or 0) > 0
-    ]
-    if social_blocks:
+    soc = payload.get("social") or {}
+    soc_platforms = [s for s in (soc.get("platforms") or [])
+                     if (s.get("item_count") or 0) > 0]
+    if soc_platforms:
         lines = []
-        for b in social_blocks[:6]:
-            urgency = "🔴 " if b.get("urgent") else ""
-            actions = b.get("action_items") or []
+        for s in soc_platforms[:4]:
+            urgency = "🔴 " if s.get("urgent") else ""
+            actions = s.get("action_items") or []
             action_blob = (" Actions: " + " | ".join(actions[:3])) if actions else ""
             lines.append(
-                f"- {urgency}{b.get('name')} ({b.get('item_count')} items): "
-                f"{(b.get('summary') or '').strip()}{action_blob}"
+                f"- {urgency}{s.get('platform')} ({s.get('item_count')} items): "
+                f"{(s.get('summary') or '').strip()}{action_blob}"
             )
-        parts.append("SOCIAL MEDIA:\n" + "\n".join(lines))
+        parts.append("SOCIAL:\n" + "\n".join(lines))
 
     pending = payload.get("pending_notifications") or []
     if pending:
@@ -554,13 +526,13 @@ def _fallback_synth(payload: dict) -> str:
             f"In Telegram: {len(tg_groups)} group{'s' if len(tg_groups) != 1 else ''} "
             f"with activity{urgent_phrase}."
         )
-    social_blocks = [b for b in ((payload.get("social") or {}).get("platforms") or [])
-                     if (b.get("item_count") or 0) > 0]
-    if social_blocks:
-        urgent_n = sum(1 for b in social_blocks if b.get("urgent"))
-        urgent_phrase = f", {urgent_n} flagged urgent" if urgent_n else ""
-        names = ", ".join(b.get("name", "") for b in social_blocks)
-        lines.append(f"On social ({names}): activity{urgent_phrase}.")
+    soc_platforms = [s for s in ((payload.get("social") or {}).get("platforms") or [])
+                     if (s.get("item_count") or 0) > 0]
+    if soc_platforms:
+        urgent_n = sum(1 for s in soc_platforms if s.get("urgent"))
+        urgent_phrase = f", {urgent_n} urgent" if urgent_n else ""
+        names = ", ".join(s.get("platform") for s in soc_platforms[:4])
+        lines.append(f"Online ({names}): activity{urgent_phrase}.")
     weather = payload.get("weather") or {}
     if weather.get("now_temp_f"):
         lines.append(

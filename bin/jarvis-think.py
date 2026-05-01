@@ -926,180 +926,6 @@ def _load_social_module():
         return None
 
 
-_network_mod = None
-
-
-def _load_network_module():
-    global _network_mod
-    if _network_mod is not None:
-        return _network_mod
-    src = BIN_DIR / "jarvis-network.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-network.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_network", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _network_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: network module load failed ({e})\n")
-        return None
-
-
-_linkedin_mod = None
-
-
-def _load_linkedin_module():
-    global _linkedin_mod
-    if _linkedin_mod is not None:
-        return _linkedin_mod
-    src = BIN_DIR / "jarvis-linkedin.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-linkedin.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_linkedin", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _linkedin_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: linkedin module load failed ({e})\n")
-        return None
-
-
-_commitments_mod = None
-_trello_mod = None
-_apple_mod = None
-_stripe_mod = None
-_meeting_prep_mod = None
-_workflows_mod = None
-
-
-def _load_commitments_module():
-    global _commitments_mod
-    if _commitments_mod is not None:
-        return _commitments_mod
-    src = BIN_DIR / "jarvis-commitments.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-commitments.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_commitments", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _commitments_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: commitments module load failed ({e})\n")
-        return None
-
-
-def _load_trello_module():
-    global _trello_mod
-    if _trello_mod is not None:
-        return _trello_mod
-    src = BIN_DIR / "jarvis-trello.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-trello.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_trello", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _trello_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: trello module load failed ({e})\n")
-        return None
-
-
-def _load_apple_module():
-    global _apple_mod
-    if _apple_mod is not None:
-        return _apple_mod
-    src = BIN_DIR / "jarvis-apple.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-apple.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_apple", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _apple_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: apple module load failed ({e})\n")
-        return None
-
-
-def _load_stripe_module():
-    global _stripe_mod
-    if _stripe_mod is not None:
-        return _stripe_mod
-    src = BIN_DIR / "jarvis-stripe.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-stripe.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_stripe", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _stripe_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: stripe module load failed ({e})\n")
-        return None
-
-
-def _load_meeting_prep_module():
-    global _meeting_prep_mod
-    if _meeting_prep_mod is not None:
-        return _meeting_prep_mod
-    src = BIN_DIR / "jarvis-meeting-prep.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-meeting-prep.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_meeting_prep", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _meeting_prep_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: meeting-prep module load failed ({e})\n")
-        return None
-
-
-def _load_workflows_module():
-    global _workflows_mod
-    if _workflows_mod is not None:
-        return _workflows_mod
-    src = BIN_DIR / "jarvis-workflows.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-workflows.py"
-    if not src.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("jarvis_workflows", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        _workflows_mod = mod
-        return mod
-    except Exception as e:
-        sys.stderr.write(f"jarvis-think: workflows module load failed ({e})\n")
-        return None
-
-
 def _maybe_apply_style(text: str, channel: str | None) -> tuple[str, dict | None]:
     """Run text through jarvis-style.apply_style if the module + profile
     are present. Returns (final_text, style_result) — style_result is None
@@ -1659,6 +1485,76 @@ def _tool_style_status(_args: dict, _mem: Memory) -> dict:
     if mod is None:
         return {"error": "jarvis-style module not installed"}
     return mod.status()
+
+
+def _tool_check_social(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    return mod.check_social(
+        platform=args.get("platform"),
+        hours=int(args.get("hours") or 4),
+    )
+
+
+def _tool_social_digest(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    return mod.social_digest(
+        hours=int(args.get("hours") or 12),
+        platform=args.get("platform"),
+    )
+
+
+def _tool_social_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    query = args.get("query") or ""
+    if not query:
+        return {"error": "query is required"}
+    return mod.social_search(
+        query=query,
+        platform=args.get("platform"),
+        hours=int(args.get("hours") or 48),
+    )
+
+
+def _tool_social_reply(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    platform = args.get("platform")
+    item_id = args.get("item_id")
+    message = args.get("message")
+    if not platform or not item_id or not message:
+        return {"error": "platform, item_id, and message required"}
+    confirm = bool(args.get("confirm"))
+    final_message = message
+    if not confirm:
+        final_message, _ = _maybe_apply_style(message, channel=None)
+    return mod.social_reply(
+        platform=platform, item_id=item_id,
+        message=final_message, confirm=confirm,
+    )
+
+
+def _tool_social_post(args: dict, _mem: Memory) -> dict:
+    mod = _load_social_module()
+    if mod is None:
+        return {"error": "jarvis-social module not installed"}
+    platform = args.get("platform")
+    message = args.get("message")
+    if not platform or not message:
+        return {"error": "platform and message required"}
+    confirm = bool(args.get("confirm"))
+    final_message = message
+    if not confirm:
+        final_message, _ = _maybe_apply_style(message, channel=None)
+    return mod.social_post(
+        platform=platform, message=final_message, confirm=confirm,
+    )
 
 
 def _tool_send_telegram(args: dict, _mem: Memory) -> dict:
@@ -3310,11 +3206,13 @@ TOOLS: dict[str, tuple[Any, dict]] = {
         {
             "name": "check_social",
             "description": (
-                "Pull recent activity (mentions, DMs, posts, articles) from "
-                "Watson's configured social platforms — Twitter/X, LinkedIn, "
-                "Instagram, RSS — out of the local cache. Returns raw items; "
-                "for a summarized read use social_digest. Pass `platform` to "
-                "scope to one platform."
+                "Pull recent items from Watson's social media monitoring "
+                "(Twitter, LinkedIn, Instagram, RSS). Reads the local "
+                "cache — instant, no network. Pass `platform` to filter "
+                "to one ('twitter' / 'linkedin' / 'instagram' / 'rss'); "
+                "leave empty for everything enabled. Returns raw items — "
+                "for a summarized read, use social_digest. Use this when "
+                "Watson wants the actual posts/tweets/headlines."
             ),
             "input_schema": {
                 "type": "object",
@@ -3322,11 +3220,11 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "platform": {
                         "type": "string",
                         "enum": ["twitter", "linkedin", "instagram", "rss"],
-                        "description": "Optional: limit to a single platform.",
+                        "description": "Optional platform filter.",
                     },
                     "hours": {
                         "type": "integer",
-                        "description": "Window in hours (default 4).",
+                        "description": "How far back to look (default 4).",
                     },
                 },
             },
@@ -3337,12 +3235,12 @@ TOOLS: dict[str, tuple[Any, dict]] = {
         {
             "name": "social_digest",
             "description": (
-                "AI-summarized digest of every configured social platform — "
-                "one block per platform with summary, action items directed "
-                "at Watson, urgency flag, and key topics. Prefer this when "
-                "Watson asks 'catch me up on social', 'what's happening on "
-                "Twitter / LinkedIn / Instagram', or 'anything I missed'. "
-                "Faster than several check_social calls."
+                "AI-summarized digest of Watson's social activity: one "
+                "block per platform with summary, action items, urgency "
+                "flag, and key topics. Prefer this over multiple "
+                "check_social calls when Watson asks 'what's happening "
+                "online', 'catch me up on Twitter', 'any RSS news', "
+                "'anything in my feeds'. Pass `platform` to scope to one."
             ),
             "input_schema": {
                 "type": "object",
@@ -3350,6 +3248,10 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "hours": {
                         "type": "integer",
                         "description": "Window in hours (default 12).",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "enum": ["twitter", "linkedin", "instagram", "rss"],
                     },
                 },
             },
@@ -3360,10 +3262,10 @@ TOOLS: dict[str, tuple[Any, dict]] = {
         {
             "name": "social_search",
             "description": (
-                "Substring search across recently cached social items "
-                "(text, sender handle, sender name). Use when Watson asks "
-                "'did anyone tweet about X', 'find that LinkedIn post about "
-                "Y', or 'what was that article on Z'."
+                "Substring search across recent social cache (matches "
+                "text and author). Use when Watson asks 'did anyone "
+                "tweet about X', 'is X mentioned in my feeds', "
+                "'search RSS for the term sheet', etc."
             ),
             "input_schema": {
                 "type": "object",
@@ -3375,7 +3277,6 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     "platform": {
                         "type": "string",
                         "enum": ["twitter", "linkedin", "instagram", "rss"],
-                        "description": "Optional platform to scope the search.",
                     },
                     "hours": {
                         "type": "integer",
@@ -3386,52 +3287,18 @@ TOOLS: dict[str, tuple[Any, dict]] = {
             },
         },
     ),
-    "social_post": (
-        _tool_social_post,
-        {
-            "name": "social_post",
-            "description": (
-                "Publish a NEW post to a social platform. REQUIRES "
-                "confirm=true. Same flow as send_email / send_telegram: "
-                "call with confirm=false, read the styled preview to "
-                "Watson, then re-call with confirm=true after a clear yes. "
-                "Per-platform char limits are enforced locally (Twitter "
-                "280, Instagram 2200, LinkedIn 3000). RSS is read-only. "
-                "Twitter posting works today; LinkedIn and Instagram "
-                "posting are not yet supported and will return an error."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "platform": {
-                        "type": "string",
-                        "enum": ["twitter", "linkedin", "instagram"],
-                        "description": "Where to post.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The text to publish.",
-                    },
-                    "confirm": {
-                        "type": "boolean",
-                        "description": "Must be true to actually post.",
-                    },
-                },
-                "required": ["platform", "content"],
-            },
-        },
-    ),
     "social_reply": (
         _tool_social_reply,
         {
             "name": "social_reply",
             "description": (
-                "Reply to a specific cached social item by id. REQUIRES "
-                "confirm=true. Style profile is auto-applied on the "
-                "preview round so Watson hears it in his own voice. "
-                "Currently only Twitter replies are supported — LinkedIn "
-                "and Instagram replies will return an error until we "
-                "build them."
+                "Reply to a specific tweet/post/comment. REQUIRES "
+                "confirm=true — without it, returns a styled preview "
+                "for Watson to approve. Workflow: call with confirm=false "
+                "first, read the preview to Watson, ask 'Should I send "
+                "it, sir?', re-call with confirm=true after a clear yes. "
+                "Pull item_id from check_social or social_digest. "
+                "RSS is read-only — never call this with platform='rss'."
             ),
             "input_schema": {
                 "type": "object",
@@ -3442,12 +3309,10 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                     },
                     "item_id": {
                         "type": "string",
-                        "description": "Item id from check_social / social_digest "
-                                       "(e.g. 'twitter:1234567890').",
+                        "description": "Tweet id / post URN / comment id.",
                     },
                     "message": {
                         "type": "string",
-                        "description": "The reply text.",
                     },
                     "confirm": {
                         "type": "boolean",
@@ -3458,916 +3323,35 @@ TOOLS: dict[str, tuple[Any, dict]] = {
             },
         },
     ),
-    "network_search": (
-        _tool_network_search,
+    "social_post": (
+        _tool_social_post,
         {
-            "name": "network_search",
+            "name": "social_post",
             "description": (
-                "Semantic search across Watson's professional network — "
-                "skills, expertise areas, intro paths, tags, and brief text. "
-                "Use when Watson asks 'who do I know who can do X', 'find "
-                "me a React dev', 'who in my network knows about fintech'. "
-                "Filterable by trust level, tag, minimum relationship "
-                "strength, and recency."
+                "Publish a new top-level post (tweet / LinkedIn share / "
+                "etc.). Same confirm=true safety as social_reply: preview "
+                "first, send only after Watson's clear yes. RSS is read-"
+                "only. Note: Twitter posting needs TWITTER_OAUTH_USER_TOKEN "
+                "(bearer-only is read-only); LinkedIn posting via the "
+                "Voyager cookie path is intentionally refused (TOS); "
+                "Instagram doesn't support text-only posts."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "query": {
+                    "platform": {
                         "type": "string",
-                        "description": "Skill, expertise, topic, or tag to match against.",
+                        "enum": ["twitter", "linkedin", "instagram"],
                     },
-                    "filters": {
-                        "type": "object",
-                        "description": "Optional filters: {trust: 'inner_circle' | "
-                                       "list, tag: 'austin' | list, min_strength: 0.5, "
-                                       "recent_within_days: 30}.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max results to return (default 8).",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    ),
-    "network_map": (
-        _tool_network_map,
-        {
-            "name": "network_map",
-            "description": (
-                "Overview of Watson's network. Without `focus`, returns "
-                "everyone bucketed by trust level (inner_circle / trusted / "
-                "professional / acquaintance / cold). With `focus` set to a "
-                "topic or skill, returns the relevant people plus their "
-                "connections (mutual contacts and intro paths). Use for "
-                "'show me my network', 'who's around the Forge tier work', "
-                "'who matters in fintech right now'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "focus": {
+                    "message": {
                         "type": "string",
-                        "description": "Optional topic / skill / project to scope the map.",
                     },
-                },
-            },
-        },
-    ),
-    "relationship_score": (
-        _tool_relationship_score,
-        {
-            "name": "relationship_score",
-            "description": (
-                "Deep analysis of a single relationship — pulls every "
-                "channel, computes strength (0-1), trust level, trajectory "
-                "(active / warm / cooling / dormant), responsiveness, and "
-                "suggests the next action with optimal channel and timing. "
-                "Use when Watson asks 'how am I doing with X', 'should I "
-                "reach out to Y', 'where do I stand with Z'. Heavier than "
-                "relationship_brief — use brief for context, score for "
-                "decision-making."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Contact name (fuzzy match).",
-                    },
-                },
-                "required": ["name"],
-            },
-        },
-    ),
-    "network_suggest": (
-        _tool_network_suggest,
-        {
-            "name": "network_suggest",
-            "description": (
-                "Given a goal, suggest who in Watson's network to leverage "
-                "and the approach sequence. Sonnet-backed — picks the "
-                "right combination of primary contacts, supporting "
-                "contacts, and intro paths, then orders the steps. Use for "
-                "'close the Forge deal', 'who should I tap for the React "
-                "rewrite', 'help me get this hire across the line'. "
-                "Slower than network_search; reach for it when the question "
-                "is 'what's the play' rather than 'who knows X'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "goal": {
-                        "type": "string",
-                        "description": "The goal Watson wants to advance.",
-                    },
-                },
-                "required": ["goal"],
-            },
-        },
-    ),
-    "enrich_network": (
-        _tool_enrich_network,
-        {
-            "name": "enrich_network",
-            "description": (
-                "Force-refresh Watson's network: recompute relationship "
-                "strength + trust levels for every contact, and call Haiku "
-                "to extract skills, expertise areas, and intro paths from "
-                "recent chat history. Normally runs weekly via the self-"
-                "improvement daemon — only invoke this on Watson's explicit "
-                "request ('refresh my network', 'rebuild contacts')."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "force": {
+                    "confirm": {
                         "type": "boolean",
-                        "description": "Bypass freshness check, re-extract everything.",
+                        "description": "Must be true to actually send.",
                     },
                 },
-            },
-        },
-    ),
-    "network_alerts": (
-        _tool_network_alerts,
-        {
-            "name": "network_alerts",
-            "description": (
-                "Proactive relationship signals — fading inner-circle / "
-                "trusted contacts, stale open follow-ups, and pending "
-                "intro opportunities. Use when Watson asks 'who am I "
-                "neglecting', 'anything I should reach out about', "
-                "'relationship status', or as part of a wrap-up. Cheap; "
-                "pulls from the cached alerts file."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "linkedin_enrich": (
-        _tool_linkedin_enrich,
-        {
-            "name": "linkedin_enrich",
-            "description": (
-                "Pull one LinkedIn profile via the Voyager API and merge "
-                "it into the matching contact (or store it as "
-                "linkedin_only when no contact matches). Use when Watson "
-                "says 'enrich Corbin with LinkedIn', 'pull Karina's "
-                "LinkedIn profile', or 'add LinkedIn data for X'. "
-                "Accepts a name OR a profile URL. Cached for 7 days "
-                "unless force=true."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_url": {
-                        "type": "string",
-                        "description": "Contact name (fuzzy match against "
-                                       "people.json) or a linkedin.com/in/... URL.",
-                    },
-                    "force": {
-                        "type": "boolean",
-                        "description": "Bypass the 7-day cache and re-scrape now.",
-                    },
-                },
-                "required": ["name_or_url"],
-            },
-        },
-    ),
-    "linkedin_sync": (
-        _tool_linkedin_sync,
-        {
-            "name": "linkedin_sync",
-            "description": (
-                "Walk Watson's LinkedIn connection list. Connections "
-                "matching a contact get a full profile fetch + merge; "
-                "the rest get a thin skeleton tagged linkedin_only. "
-                "Stateful — re-running picks up where the last run left "
-                "off (cursor in sync_state.json). Capped per run to "
-                "respect Voyager rate limits. Heavy — only invoke on "
-                "Watson's explicit ask ('sync my LinkedIn', 'pull my "
-                "connections')."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Hard cap on this run (default 50).",
-                    },
-                },
-            },
-        },
-    ),
-    "linkedin_monitor": (
-        _tool_linkedin_monitor,
-        {
-            "name": "linkedin_monitor",
-            "description": (
-                "Re-scrape LinkedIn profiles whose snapshot is overdue "
-                "and write change records (role moves, headline updates, "
-                "skill additions, location moves). Contacts re-scrape "
-                "every 7 days, linkedin_only every 30 days. Normally "
-                "runs weekly via the self-improvement daemon — invoke "
-                "directly only when Watson asks 'check LinkedIn for "
-                "updates' or similar."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "linkedin_changes": (
-        _tool_linkedin_changes,
-        {
-            "name": "linkedin_changes",
-            "description": (
-                "Report recent LinkedIn changes from the cached log. "
-                "Contacts-only by default — linkedin_only signals stay "
-                "hidden unless contacts_only=false. Use when Watson asks "
-                "'check LinkedIn changes', 'who in my network changed "
-                "jobs', 'any LinkedIn updates this week'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Window in days (default 7).",
-                    },
-                    "contacts_only": {
-                        "type": "boolean",
-                        "description": "Filter to contact-tier signals only "
-                                       "(default true).",
-                    },
-                },
-            },
-        },
-    ),
-    "linkedin_search": (
-        _tool_linkedin_search,
-        {
-            "name": "linkedin_search",
-            "description": (
-                "Search Watson's cached LinkedIn profiles by company, "
-                "title, skill, or location. Contact matches are boosted "
-                "above linkedin_only matches. Use for 'who works at "
-                "Google', 'who in my network knows Python', 'any "
-                "PMs in Denver'. Local — instant — no API call."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Free text — company, role, skill, location.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    ),
-    "extract_commitments": (
-        _tool_extract_commitments,
-        {
-            "name": "extract_commitments",
-            "description": (
-                "Haiku-extract commitments (concrete to-dos Watson or "
-                "someone else just agreed to) from a block of text. "
-                "Inserts each unique one into the canonical store. Use "
-                "after a meeting transcript, a long email, or when "
-                "Watson dictates plans. Idempotent — re-running on the "
-                "same text won't duplicate."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Block to scan."},
-                    "source": {"type": "string",
-                               "description": "Origin label (claude, email, "
-                                              "imessage, telegram, manual)."},
-                    "related_contact": {"type": "string",
-                                         "description": "Default contact name "
-                                                        "if the text doesn't "
-                                                        "name one."},
-                },
-                "required": ["text"],
-            },
-        },
-    ),
-    "add_commitment": (
-        _tool_add_commitment,
-        {
-            "name": "add_commitment",
-            "description": (
-                "Record one concrete commitment Watson said aloud — "
-                "'remind me to send the term sheet to Corbin tomorrow'. "
-                "Accepts natural-language `due` ('tomorrow', 'next monday', "
-                "'in 2 weeks', 'by Friday') or ISO dates. Use whenever "
-                "Watson asks to track or be reminded of a specific task."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "owner": {"type": "string",
-                              "description": "watson | other (who owes the action)"},
-                    "due": {"type": "string",
-                            "description": "ISO date or natural phrase, optional."},
-                    "priority": {"type": "string",
-                                  "description": "high | normal | low"},
-                    "related_contact": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["text"],
-            },
-        },
-    ),
-    "list_commitments": (
-        _tool_list_commitments,
-        {
-            "name": "list_commitments",
-            "description": (
-                "List Watson's commitments. Use for 'what's on my plate', "
-                "'what's due today', 'what do I owe Corbin', 'what's "
-                "overdue'. days_ahead=0 → today; days_ahead=7 → this "
-                "week; status='overdue' shows everything past due."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "status": {"description": "open|done|overdue|cancelled "
-                                              "or list of those"},
-                    "owner": {"type": "string",
-                              "description": "watson | other"},
-                    "related_contact": {"type": "string"},
-                    "days_ahead": {"type": "integer"},
-                    "limit": {"type": "integer"},
-                },
-            },
-        },
-    ),
-    "complete_commitment": (
-        _tool_complete_commitment,
-        {
-            "name": "complete_commitment",
-            "description": (
-                "Mark a commitment done. Resolves by id, id-prefix, or "
-                "fuzzy substring of text. Returns ambiguity errors when "
-                "more than one open commitment matches — read the "
-                "candidates back to Watson and ask which."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_id": {"type": "string"},
-                },
-                "required": ["name_or_id"],
-            },
-        },
-    ),
-    "commitment_report": (
-        _tool_commitment_report,
-        {
-            "name": "commitment_report",
-            "description": (
-                "Briefing-shaped summary: overdue, due today, due this "
-                "week, recently completed. Cheap — no API call. Use as "
-                "part of a wrap-up or when Watson asks 'how am I doing "
-                "on my list'."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "trello_sync": (
-        _tool_trello_sync,
-        {
-            "name": "trello_sync",
-            "description": (
-                "Bidirectional sync between the commitment store and the "
-                "configured Trello board. Pushes new commitments as cards, "
-                "pulls completed cards back as done commitments. Run on "
-                "Watson's explicit ask ('sync my Trello') or as part of "
-                "the self-improvement pass."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "trello_boards": (
-        _tool_trello_boards,
-        {
-            "name": "trello_boards",
-            "description": (
-                "List Trello boards (no args) or drill into one board's "
-                "lists with `board_id`. Set include_cards=true to also "
-                "return the cards on each list."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "board_id": {"type": "string"},
-                    "include_cards": {"type": "boolean"},
-                },
-            },
-        },
-    ),
-    "trello_add": (
-        _tool_trello_add,
-        {
-            "name": "trello_add",
-            "description": (
-                "Create a card on a Trello list. Use list_name='todo' / "
-                "'doing' / 'done' to hit the configured role mapping, or "
-                "pass list_id directly. Watson voice path: 'add a card "
-                "for X' goes here."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "list_id": {"type": "string"},
-                    "list_name": {"type": "string"},
-                    "due": {"type": "string"},
-                    "desc": {"type": "string"},
-                },
-                "required": ["name"],
-            },
-        },
-    ),
-    "trello_move": (
-        _tool_trello_move,
-        {
-            "name": "trello_move",
-            "description": (
-                "Move a Trello card between lists. Useful when Watson "
-                "says 'move that card to doing' / 'mark X done on Trello'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "card_id": {"type": "string"},
-                    "list_id": {"type": "string"},
-                    "list_name": {"type": "string"},
-                },
-                "required": ["card_id"],
-            },
-        },
-    ),
-    "apple_add_reminder": (
-        _tool_apple_add_reminder,
-        {
-            "name": "apple_add_reminder",
-            "description": (
-                "Create a reminder in the 'Jarvis' list in Apple "
-                "Reminders. Use when Watson says 'remind me to X' and "
-                "wants the iOS reminder cascade (lock-screen, watch, "
-                "notification). For a tracked commitment that should "
-                "also feed reports + Trello, use add_commitment instead."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "due": {"type": "string",
-                            "description": "ISO date / datetime, optional."},
-                    "notes": {"type": "string"},
-                },
-                "required": ["text"],
-            },
-        },
-    ),
-    "apple_list_reminders": (
-        _tool_apple_list_reminders,
-        {
-            "name": "apple_list_reminders",
-            "description": (
-                "List pending reminders in the 'Jarvis' list. Pair with "
-                "list_commitments when Watson asks 'what reminders do I "
-                "have' to cover both surfaces."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "include_completed": {"type": "boolean"},
-                    "limit": {"type": "integer"},
-                },
-            },
-        },
-    ),
-    "apple_complete_reminder": (
-        _tool_apple_complete_reminder,
-        {
-            "name": "apple_complete_reminder",
-            "description": (
-                "Mark a reminder in the 'Jarvis' list completed. Fuzzy "
-                "matches by name when an exact id isn't provided."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_id": {"type": "string"},
-                },
-                "required": ["name_or_id"],
-            },
-        },
-    ),
-    "apple_save_note": (
-        _tool_apple_save_note,
-        {
-            "name": "apple_save_note",
-            "description": (
-                "Create or update a note in the 'Jarvis' folder of Apple "
-                "Notes. Use for 'save this to notes', 'jot this down', "
-                "'add to my notes'. append=true tacks on to an existing "
-                "note instead of replacing."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "body": {"type": "string"},
-                    "append": {"type": "boolean"},
-                },
-                "required": ["title"],
-            },
-        },
-    ),
-    "apple_read_note": (
-        _tool_apple_read_note,
-        {
-            "name": "apple_read_note",
-            "description": (
-                "Read a note from the 'Jarvis' folder by title (case-"
-                "insensitive substring). Returns plain-text body."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                },
-                "required": ["title"],
-            },
-        },
-    ),
-    "apple_contacts_search": (
-        _tool_apple_contacts_search,
-        {
-            "name": "apple_contacts_search",
-            "description": (
-                "Search Apple Contacts for a name fragment. Returns "
-                "phones + emails + organization, useful for backfilling "
-                "a Jarvis contact record before drafting a message."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-                "required": ["query"],
-            },
-        },
-    ),
-    "imessage_check": (
-        _tool_imessage_check,
-        {
-            "name": "imessage_check",
-            "description": (
-                "Recent inbound iMessages, grouped by handle. Use when "
-                "Watson asks 'check my messages', 'any new texts', "
-                "'anything from Karina on iMessage'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "hours": {"type": "integer",
-                              "description": "Lookback window (default 24)."},
-                },
-            },
-        },
-    ),
-    "imessage_read": (
-        _tool_imessage_read,
-        {
-            "name": "imessage_read",
-            "description": (
-                "Read recent message history with one handle (phone OR "
-                "email). Returns oldest→newest so it reads like a "
-                "transcript. Useful before drafting a reply."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "handle": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-                "required": ["handle"],
-            },
-        },
-    ),
-    "imessage_send": (
-        _tool_imessage_send,
-        {
-            "name": "imessage_send",
-            "description": (
-                "Send an iMessage. Two-stage: confirm=false returns a "
-                "preview Watson reads aloud, confirm=true actually sends. "
-                "Use the same flow as send_email / send_telegram."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "handle": {"type": "string",
-                               "description": "Phone (+15551234567) or email."},
-                    "message": {"type": "string"},
-                    "confirm": {"type": "boolean"},
-                },
-                "required": ["handle", "message"],
-            },
-        },
-    ),
-    "imessage_search_contacts": (
-        _tool_imessage_search_contacts,
-        {
-            "name": "imessage_search_contacts",
-            "description": (
-                "Resolve a name fragment to an iMessage handle by "
-                "searching the local chat history. Use when Watson says "
-                "'send Karina an iMessage' and the contact record "
-                "doesn't have a phone on file."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-                "required": ["query"],
-            },
-        },
-    ),
-    "stripe_dashboard": (
-        _tool_stripe_dashboard,
-        {
-            "name": "stripe_dashboard",
-            "description": (
-                "Quick revenue snapshot — MRR, new subscribers in the "
-                "last 7 days, 30-day revenue trend, churn, outstanding "
-                "invoices, failed payments. Use for 'how's revenue', "
-                "'what's MRR', 'how's the business doing', or as part "
-                "of a wrap-up. Cached for 2 minutes so repeated asks "
-                "don't burn rate limit."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "stripe_customers": (
-        _tool_stripe_customers,
-        {
-            "name": "stripe_customers",
-            "description": (
-                "List customers ranked by MRR contribution. Use for "
-                "'who are my customers', 'who pays the most', 'who's "
-                "past due'. status ∈ active|past_due|canceled|trialing|all."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-            },
-        },
-    ),
-    "stripe_customer": (
-        _tool_stripe_customer,
-        {
-            "name": "stripe_customer",
-            "description": (
-                "Single-customer deep dive — subscriptions, payments, "
-                "refunds, disputes, lifetime value, reliability score. "
-                "Fuzzy matches by name or email. Use when Watson asks "
-                "about a specific customer's subscription or history."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_email": {"type": "string"},
-                },
-                "required": ["name_or_email"],
-            },
-        },
-    ),
-    "stripe_revenue": (
-        _tool_stripe_revenue,
-        {
-            "name": "stripe_revenue",
-            "description": (
-                "Revenue report bucketed by period — daily/weekly/"
-                "monthly aggregation, plan breakdown, growth rate. "
-                "Use for 'show me revenue', 'how did we do last "
-                "month', 'revenue by plan'. period ∈ day|week|month."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "period": {"type": "string"},
-                },
-            },
-        },
-    ),
-    "stripe_alerts": (
-        _tool_stripe_alerts,
-        {
-            "name": "stripe_alerts",
-            "description": (
-                "Proactive revenue alerts — failed payments, expiring "
-                "subscriptions, signup spikes/drops, at-risk customers. "
-                "Pushes high-signal items into the notification bus "
-                "(idempotent — already-alerted items are skipped). Use "
-                "for 'anything wrong with revenue', 'who's at risk', "
-                "or as part of a wrap-up scan."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "meeting_prep": (
-        _tool_meeting_prep,
-        {
-            "name": "meeting_prep",
-            "description": (
-                "Manually prep a meeting. Pulls attendees, relationship "
-                "briefs, open commitments, recent emails/iMessages, "
-                "LinkedIn changes, and Stripe customer status; calls the "
-                "orchestrator to synthesize a voice-ready brief; saves "
-                "it to Apple Notes under the 'Jarvis/Meeting Prep' "
-                "folder. Use for 'prep me for the next meeting', 'prep "
-                "for my 2pm', or when the auto-poller hasn't fired yet. "
-                "With no event_id_or_time, preps the next upcoming "
-                "today; pass an event id for a specific event."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "event_id_or_time": {"type": "string"},
-                },
-            },
-        },
-    ),
-    "meeting_prep_settings": (
-        _tool_meeting_prep_settings,
-        {
-            "name": "meeting_prep_settings",
-            "description": (
-                "Read or update meeting-prep settings. Pass nothing to "
-                "see current state. lead_time_minutes controls how "
-                "early to fire (default 15). auto=false disables the "
-                "background poller without removing the module."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "lead_time_minutes": {"type": "integer"},
-                    "auto": {"type": "boolean"},
-                },
-            },
-        },
-    ),
-    "create_workflow": (
-        _tool_create_workflow,
-        {
-            "name": "create_workflow",
-            "description": (
-                "Create a recurring workflow. The goal is handed to the "
-                "orchestrator's execute_plan on every fire — same as a "
-                "voice command. schedule accepts a 5-field cron "
-                "expression OR natural language ('every Monday at 8am', "
-                "'daily at 6pm', 'first of each month'). Use when "
-                "Watson says 'every Monday do X', 'every morning Y', "
-                "'remind me to Z monthly'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "schedule": {"type": "string"},
-                    "notify_on_complete": {"type": "boolean"},
-                },
-                "required": ["name", "goal", "schedule"],
-            },
-        },
-    ),
-    "list_workflows": (
-        _tool_list_workflows,
-        {
-            "name": "list_workflows",
-            "description": (
-                "List Watson's recurring workflows. status filter ∈ "
-                "all|enabled|disabled|failed|succeeded. Use for 'what "
-                "automations do I have', 'what's running on a "
-                "schedule', 'any workflows failing'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "status": {"type": "string"},
-                },
-            },
-        },
-    ),
-    "run_workflow": (
-        _tool_run_workflow,
-        {
-            "name": "run_workflow",
-            "description": (
-                "Manually fire a workflow now. Resolves by id, exact "
-                "name, or unique substring. Use for 'run my weekly "
-                "review', 'fire the metrics workflow'. Doesn't change "
-                "the cron cadence — the next scheduled run still fires."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_id": {"type": "string"},
-                },
-                "required": ["name_or_id"],
-            },
-        },
-    ),
-    "update_workflow": (
-        _tool_update_workflow,
-        {
-            "name": "update_workflow",
-            "description": (
-                "Modify a workflow. Use for 'pause the weekly review', "
-                "'change the schedule to Tuesday', 'tweak the goal'. "
-                "Pass only the fields that should change."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_id": {"type": "string"},
-                    "enabled": {"type": "boolean"},
-                    "schedule": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "notify_on_complete": {"type": "boolean"},
-                },
-                "required": ["name_or_id"],
-            },
-        },
-    ),
-    "delete_workflow": (
-        _tool_delete_workflow,
-        {
-            "name": "delete_workflow",
-            "description": (
-                "Remove a workflow. Two-stage: confirm=false returns "
-                "the would-delete record so Watson can confirm out "
-                "loud, confirm=true actually removes it. Same flow as "
-                "delete_event."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name_or_id": {"type": "string"},
-                    "confirm": {"type": "boolean"},
-                },
-                "required": ["name_or_id"],
-            },
-        },
-    ),
-    "model_status": (
-        _tool_model_status,
-        {
-            "name": "model_status",
-            "description": (
-                "Probe the local Jarvis Core inference server. Returns "
-                "whether the local model is enabled (JARVIS_LOCAL_MODEL=1), "
-                "whether the /healthz endpoint is reachable, and which "
-                "Tier 1/Tier 2 models are loaded. Use when the user asks "
-                "if the local model is online or why a turn fell back to "
-                "the API."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ),
-    "model_stats": (
-        _tool_model_stats,
-        {
-            "name": "model_stats",
-            "description": (
-                "Routing distribution + accuracy metrics for the local "
-                "model over the last `hours` (default 24). Reports counts "
-                "per backend (tier1_local / tier2_local / api_fallback), "
-                "escalation rate, and p95 latency by tier."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "hours": {"type": "number",
-                              "description": "Look-back window in hours (default 24)."}
-                },
+                "required": ["platform", "message"],
             },
         },
     ),
