@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
+import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
 import { trackEvent } from '../../../../lib/events'
 import type { IntelligenceInsight } from '../../../../lib/types'
@@ -67,7 +68,20 @@ export async function POST(request: Request) {
   const newStatus = action === 'act' ? 'acted_on' : 'dismissed'
   const nowIso = new Date().toISOString()
 
-  const { data, error } = await supabase
+  // intelligence_insights has no user-side UPDATE policy — RLS would silently
+  // block the write. Authenticate via the session client (above), then update
+  // with the service-role client. Defense-in-depth: still scope to user_id.
+  const service = getServiceClient()
+  if (!service) {
+    return apiError(
+      500,
+      'Service role key not configured',
+      undefined,
+      'no_service_key',
+    )
+  }
+
+  const { data, error } = await service
     .from('intelligence_insights')
     .update({
       status: newStatus,
