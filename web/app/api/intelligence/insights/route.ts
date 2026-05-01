@@ -7,30 +7,54 @@ import type { IntelligenceInsight } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
+// Mirrors proxy.ts: malformed/expired auth cookies can make getUser() throw.
+// The route handler ran without a try/catch around it, so any throw bubbled
+// up as an unhandled 500 — which is exactly what the dashboard surfaced as
+// "Couldn't load insights — insights 500".
+async function getAuthedUser() {
+  const supabase = await createClient()
+  try {
+    const { data } = await supabase.auth.getUser()
+    return { supabase, user: data.user }
+  } catch (err) {
+    console.error('[insights] getUser threw', err)
+    return { supabase, user: null }
+  }
+}
+
 // GET — returns the user's pending insights, ordered priority + recency.
 export async function GET() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
+  try {
+    const { supabase, user } = await getAuthedUser()
+    if (!user) {
+      return apiError(401, 'Unauthorized', undefined, 'unauthorized')
+    }
+
+    const { data, error } = await supabase
+      .from('intelligence_insights')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('status', 'pending')
+      .order('priority', { ascending: true })
+      .order('created_at', { ascending: false })
+      .limit(50)
+
+    if (error) {
+      console.error('[insights] query failed', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      })
+      return apiError(500, error.message, { code: error.code }, 'query_failed')
+    }
+
+    return NextResponse.json({ insights: (data ?? []) as IntelligenceInsight[] })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Internal error'
+    console.error('[insights] GET unhandled', err)
+    return apiError(500, message, undefined, 'unhandled')
   }
-
-  const { data, error } = await supabase
-    .from('intelligence_insights')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('status', 'pending')
-    .order('priority', { ascending: true })
-    .order('created_at', { ascending: false })
-    .limit(50)
-
-  if (error) {
-    return apiError(500, error.message, undefined, 'query_failed')
-  }
-
-  return NextResponse.json({ insights: (data ?? []) as IntelligenceInsight[] })
 }
 
 // POST — act on or dismiss an insight.
@@ -38,79 +62,88 @@ export async function GET() {
 type PostBody = { id?: unknown; action?: unknown }
 
 export async function POST(request: Request) {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
-  }
-
-  let body: PostBody
   try {
-    body = (await request.json()) as PostBody
-  } catch {
-    return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
-  }
+    const { user } = await getAuthedUser()
+    if (!user) {
+      return apiError(401, 'Unauthorized', undefined, 'unauthorized')
+    }
 
-  const id = typeof body.id === 'string' ? body.id : null
-  const action = body.action
-  if (!id) return apiError(400, 'id is required', undefined, 'missing_id')
-  if (action !== 'act' && action !== 'dismiss') {
-    return apiError(
-      400,
-      "action must be 'act' or 'dismiss'",
-      undefined,
-      'invalid_action',
-    )
-  }
+    let body: PostBody
+    try {
+      body = (await request.json()) as PostBody
+    } catch {
+      return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
+    }
 
-  const newStatus = action === 'act' ? 'acted_on' : 'dismissed'
-  const nowIso = new Date().toISOString()
+    const id = typeof body.id === 'string' ? body.id : null
+    const action = body.action
+    if (!id) return apiError(400, 'id is required', undefined, 'missing_id')
+    if (action !== 'act' && action !== 'dismiss') {
+      return apiError(
+        400,
+        "action must be 'act' or 'dismiss'",
+        undefined,
+        'invalid_action',
+      )
+    }
 
-  // intelligence_insights has no user-side UPDATE policy — RLS would silently
-  // block the write. Authenticate via the session client (above), then update
-  // with the service-role client. Defense-in-depth: still scope to user_id.
-  const service = getServiceClient()
-  if (!service) {
-    return apiError(
-      500,
-      'Service role key not configured',
-      undefined,
-      'no_service_key',
-    )
-  }
+    const newStatus = action === 'act' ? 'acted_on' : 'dismissed'
+    const nowIso = new Date().toISOString()
 
-  const { data, error } = await service
-    .from('intelligence_insights')
-    .update({
-      status: newStatus,
-      acted_on_at: action === 'act' ? nowIso : null,
+    // intelligence_insights has no user-side UPDATE policy — RLS would silently
+    // block the write. Authenticate via the session client (above), then update
+    // with the service-role client. Defense-in-depth: still scope to user_id.
+    const service = getServiceClient()
+    if (!service) {
+      return apiError(
+        500,
+        'Service role key not configured',
+        undefined,
+        'no_service_key',
+      )
+    }
+
+    const { data, error } = await service
+      .from('intelligence_insights')
+      .update({
+        status: newStatus,
+        acted_on_at: action === 'act' ? nowIso : null,
+      })
+      .eq('id', id)
+      .eq('user_id', user.id)
+      .eq('status', 'pending')
+      .select('id, insight_type, insight_key, capsule_id')
+      .maybeSingle()
+
+    if (error) {
+      console.error('[insights] update failed', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      })
+      return apiError(500, error.message, { code: error.code }, 'update_failed')
+    }
+    if (!data) {
+      return apiError(404, 'Insight not found or already resolved', undefined, 'not_found')
+    }
+
+    // Fire-and-forget feedback event to feed the self-improvement loop.
+    void trackEvent({
+      userId: user.id,
+      eventType: action === 'act' ? 'insight_acted_on' : 'insight_dismissed',
+      metadata: {
+        insight_id: data.id,
+        insight_type: data.insight_type,
+        insight_key: data.insight_key,
+        capsule_id: data.capsule_id,
+      },
     })
-    .eq('id', id)
-    .eq('user_id', user.id)
-    .eq('status', 'pending')
-    .select('id, insight_type, insight_key, capsule_id')
-    .maybeSingle()
 
-  if (error) {
-    return apiError(500, error.message, undefined, 'update_failed')
+    return NextResponse.json({ ok: true, status: newStatus })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Internal error'
+    console.error('[insights] POST unhandled', err)
+    return apiError(500, message, undefined, 'unhandled')
   }
-  if (!data) {
-    return apiError(404, 'Insight not found or already resolved', undefined, 'not_found')
-  }
-
-  // Fire-and-forget feedback event to feed the self-improvement loop.
-  void trackEvent({
-    userId: user.id,
-    eventType: action === 'act' ? 'insight_acted_on' : 'insight_dismissed',
-    metadata: {
-      insight_id: data.id,
-      insight_type: data.insight_type,
-      insight_key: data.insight_key,
-      capsule_id: data.capsule_id,
-    },
-  })
-
-  return NextResponse.json({ ok: true, status: newStatus })
 }
