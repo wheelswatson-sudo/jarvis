@@ -1,5 +1,6 @@
-import { NextResponse } from 'next/server'
+import * as Sentry from '@sentry/nextjs'
 import { createClient } from '../../../lib/supabase/server'
+import { apiError } from '../../../lib/api-errors'
 import {
   DEFAULT_MODEL_ID,
   getModel,
@@ -320,23 +321,25 @@ export async function POST(request: Request) {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   let body: { message?: unknown; messages?: unknown }
   try {
     body = (await request.json()) as { message?: unknown; messages?: unknown }
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+    return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
   }
 
   let messages = parseMessages(body.messages)
   if (!messages) {
     const single = typeof body.message === 'string' ? body.message.trim() : ''
     if (!single) {
-      return NextResponse.json(
-        { error: 'messages array (with final user turn) or message required' },
-        { status: 400 },
+      return apiError(
+        400,
+        'messages array (with final user turn) or message required',
+        undefined,
+        'missing_message',
       )
     }
     messages = [{ role: 'user', content: single }]
@@ -344,7 +347,7 @@ export async function POST(request: Request) {
 
   const resolved = await loadModelAndKey(supabase, user.id)
   if ('error' in resolved) {
-    return NextResponse.json({ error: resolved.error }, { status: 400 })
+    return apiError(400, resolved.error, undefined, 'no_api_key')
   }
 
   const meta = (user.user_metadata ?? {}) as Record<string, unknown>
@@ -374,6 +377,7 @@ export async function POST(request: Request) {
           controller.enqueue(encoder.encode(chunk))
         }
       } catch (err) {
+        Sentry.captureException(err)
         const msg = err instanceof Error ? err.message : 'Stream error'
         controller.enqueue(encoder.encode(`\n\n[error: ${msg}]`))
       } finally {

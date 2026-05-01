@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
+import { apiError } from '../../../../lib/api-errors'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,7 +10,7 @@ export async function POST() {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) {
-    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
   const { error } = await supabase
@@ -20,7 +21,7 @@ export async function POST() {
     )
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return apiError(500, error.message, undefined, 'db_error')
   }
   return NextResponse.json({ ok: true })
 }
