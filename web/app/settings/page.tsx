@@ -3,6 +3,11 @@ import Link from 'next/link'
 import { createClient } from '../../lib/supabase/server'
 import { DEFAULT_MODEL_ID, MODELS, PROVIDERS, type Provider } from '../../lib/providers'
 import { SettingsClient } from './SettingsClient'
+import {
+  GoogleContactsCard,
+  type GoogleContactsBanner,
+  type GoogleContactsState,
+} from './GoogleContactsCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,14 +23,35 @@ function maskKey(key: string): string {
   return `${key.slice(0, 4)}${'•'.repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`
 }
 
-export default async function SettingsPage() {
+type SearchParams = Record<string, string | string[] | undefined>
+
+function parseGoogleBanner(sp: SearchParams): GoogleContactsBanner | null {
+  const status = sp.google_contacts
+  if (typeof status !== 'string') return null
+  if (status === 'connected') return { kind: 'connected' }
+  if (status === 'error') {
+    const reason = sp.reason
+    return {
+      kind: 'error',
+      reason: typeof reason === 'string' ? reason : 'unknown',
+    }
+  }
+  return null
+}
+
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>
+}) {
+  const sp = await searchParams
   const supabase = await createClient()
   const {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [profileRes, keysRes] = await Promise.all([
+  const [profileRes, keysRes, integrationRes] = await Promise.all([
     supabase
       .from('profiles')
       .select('preferred_model')
@@ -35,6 +61,12 @@ export default async function SettingsPage() {
       .from('user_api_keys')
       .select('provider, api_key, is_active, updated_at')
       .eq('user_id', user.id),
+    supabase
+      .from('user_integrations')
+      .select('account_email, last_synced_at')
+      .eq('user_id', user.id)
+      .eq('provider', 'google_contacts')
+      .maybeSingle(),
   ])
 
   const preferredModel = profileRes.data?.preferred_model ?? DEFAULT_MODEL_ID
@@ -52,6 +84,13 @@ export default async function SettingsPage() {
       is_active: k.is_active,
       updated_at: k.updated_at,
     }))
+
+  const googleContacts: GoogleContactsState = {
+    connected: !!integrationRes.data,
+    account_email: integrationRes.data?.account_email ?? null,
+    last_synced_at: integrationRes.data?.last_synced_at ?? null,
+  }
+  const googleBanner = parseGoogleBanner(sp)
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -80,6 +119,17 @@ export default async function SettingsPage() {
           preferredModel={preferredModel}
           existingKeys={keys}
         />
+
+        <section className="mt-12">
+          <div className="mb-4">
+            <h2 className="text-base font-medium text-zinc-100">Integrations</h2>
+            <p className="mt-1 text-sm text-zinc-500">
+              Connect external accounts to pull data into your relationship
+              graph.
+            </p>
+          </div>
+          <GoogleContactsCard state={googleContacts} banner={googleBanner} />
+        </section>
       </div>
     </div>
   )
