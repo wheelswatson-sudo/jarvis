@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '../lib/supabase/client'
+import { trackEventClient } from '../lib/events-client'
 
 export function AddCommitmentForm({
   contacts,
@@ -38,6 +39,14 @@ export function AddCommitmentForm({
       if (error) {
         setError(error.message)
       } else {
+        trackEventClient({
+          eventType: 'commitment_created',
+          contactId: contactId || null,
+          metadata: {
+            description: desc,
+            has_due_date: !!dueAt,
+          },
+        })
         setDescription('')
         setDueAt('')
         setContactId('')

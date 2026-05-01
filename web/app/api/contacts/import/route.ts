@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { apiError } from '../../../../lib/api-errors'
+import { trackImport } from '../../../../lib/events'
 
 export const dynamic = 'force-dynamic'
 
@@ -170,8 +171,16 @@ export async function POST(req: Request) {
     )
   }
 
+  const insertedCount = data?.length ?? 0
+  if (insertedCount > 0) {
+    void trackImport(user.id, {
+      inserted: insertedCount,
+      skipped: skipped.length,
+    })
+  }
+
   return NextResponse.json({
-    inserted: data?.length ?? 0,
+    inserted: insertedCount,
     skipped: skipped.length,
     errors: skipped,
   })

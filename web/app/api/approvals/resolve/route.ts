@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { apiError } from '../../../../lib/api-errors'
+import { trackContactUpdate } from '../../../../lib/events'
 import type { PendingChange } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -92,6 +93,10 @@ export async function POST(request: Request) {
         return apiError(500, upErr.message, undefined, 'db_error')
       }
       applied += list.length
+      void trackContactUpdate(user.id, contactId, {
+        source: 'approval',
+        fields: list.map((c) => c.field_name),
+      })
     }
   }
 

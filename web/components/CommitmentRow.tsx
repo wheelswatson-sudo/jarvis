@@ -4,6 +4,7 @@ import { useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '../lib/supabase/client'
+import { trackEventClient } from '../lib/events-client'
 import { formatDate } from '../lib/format'
 import type { Commitment } from '../lib/types'
 
@@ -26,6 +27,17 @@ export function CommitmentRow({
         .from('commitments')
         .update(patch)
         .eq('id', commitment.id)
+      if (patch.status === 'done') {
+        trackEventClient({
+          eventType: 'commitment_completed',
+          contactId: commitment.contact_id ?? null,
+          metadata: {
+            commitment_id: commitment.id,
+            description: commitment.description,
+            was_overdue: !!overdue,
+          },
+        })
+      }
       router.refresh()
     })
   }

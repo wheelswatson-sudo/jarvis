@@ -7,6 +7,7 @@ import {
   TierSelector,
 } from '../../../../components/ContactEditor'
 import { HealthChart } from '../../../../components/HealthChart'
+import { PageViewTracker } from '../../../../components/PageViewTracker'
 import {
   formatDate,
   formatRelative,
@@ -64,6 +65,7 @@ export default async function ContactDetailPage({
 
   return (
     <div className="space-y-8">
+      <PageViewTracker eventType="contact_viewed" contactId={contact.id} />
       <Link
         href="/"
         className="inline-block text-sm text-zinc-500 hover:text-zinc-900"

@@ -20,20 +20,47 @@ type HealthResponse = {
   env: string | null
 }
 
+type IntelligenceHealth = {
+  capsules: {
+    total: number
+    by_status: Record<string, number>
+    by_type: Record<string, number>
+  }
+  insights: {
+    total: number
+    by_status: Record<string, number>
+    acceptance_rate_30d: number | null
+  }
+  events_30d: number
+  last_analysis: { at: string; details: Record<string, unknown> } | null
+  recent_log: {
+    event_type: string
+    details: Record<string, unknown>
+    created_at: string
+  }[]
+}
+
 const REFRESH_MS = 30_000
 const SENTRY_URL = process.env.NEXT_PUBLIC_SENTRY_DASHBOARD_URL ?? null
 
 export default function StatusPage() {
   const [data, setData] = useState<HealthResponse | null>(null)
+  const [intel, setIntel] = useState<IntelligenceHealth | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [lastFetched, setLastFetched] = useState<Date | null>(null)
 
   async function fetchHealth() {
     try {
-      const res = await fetch('/api/health', { cache: 'no-store' })
-      const json = (await res.json()) as HealthResponse
+      const [sysRes, intelRes] = await Promise.all([
+        fetch('/api/health', { cache: 'no-store' }),
+        fetch('/api/intelligence/health', { cache: 'no-store' }),
+      ])
+      const json = (await sysRes.json()) as HealthResponse
       setData(json)
+      if (intelRes.ok) {
+        setIntel((await intelRes.json()) as IntelligenceHealth)
+      }
       setError(null)
       setLastFetched(new Date())
     } catch (err) {
@@ -44,6 +71,7 @@ export default function StatusPage() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchHealth()
     const id = setInterval(fetchHealth, REFRESH_MS)
     return () => clearInterval(id)
@@ -95,6 +123,8 @@ export default function StatusPage() {
             )}
           </div>
         </section>
+
+        <IntelligenceStatusPanel intel={intel} />
 
         <section className="rounded-xl border border-white/5 bg-zinc-900/40 p-5">
           <h2 className="text-sm font-medium text-zinc-300">Recent incidents</h2>
@@ -313,4 +343,210 @@ function formatTime(d: Date): string {
     minute: '2-digit',
     second: '2-digit',
   })
+}
+
+// ---------------------------------------------------------------------------
+// Intelligence self-monitoring panel — capsule counts, acceptance rate,
+// and the recent system_health_log entries.
+// ---------------------------------------------------------------------------
+
+function IntelligenceStatusPanel({ intel }: { intel: IntelligenceHealth | null }) {
+  if (!intel) {
+    return (
+      <section className="rounded-xl border border-white/5 bg-zinc-900/40 p-5">
+        <h2 className="text-sm font-medium text-zinc-300">Intelligence</h2>
+        <p className="mt-2 text-sm text-zinc-500">Loading…</p>
+      </section>
+    )
+  }
+
+  const accepted = intel.insights.acceptance_rate_30d
+  const acceptedPct = accepted == null ? null : Math.round(accepted * 100)
+  const acceptedLabel =
+    acceptedPct == null ? '—' : `${acceptedPct}%`
+  const acceptedTone =
+    acceptedPct == null
+      ? 'text-zinc-400'
+      : acceptedPct < 20
+        ? 'text-amber-300'
+        : 'text-emerald-300'
+
+  const lastAnalysisAt = intel.last_analysis?.at ?? null
+
+  return (
+    <section className="rounded-xl border border-white/5 bg-zinc-900/40 p-5">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-medium text-zinc-300">Intelligence</h2>
+        <span className="text-xs text-zinc-500">
+          {lastAnalysisAt ? `Last run ${formatRelativeShort(lastAnalysisAt)}` : 'Never analyzed'}
+        </span>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Stat
+          label="Capsules"
+          value={intel.capsules.total.toString()}
+          hint={`${intel.capsules.by_status.confirmed ?? 0} confirmed`}
+        />
+        <Stat
+          label="Insights"
+          value={(intel.insights.by_status.pending ?? 0).toString()}
+          hint="pending"
+        />
+        <Stat
+          label="Events 30d"
+          value={intel.events_30d.toString()}
+          hint="signals captured"
+        />
+        <Stat
+          label="Acceptance"
+          value={acceptedLabel}
+          hint="last 30d"
+          valueClassName={acceptedTone}
+        />
+      </div>
+
+      {Object.keys(intel.capsules.by_type).length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {Object.entries(intel.capsules.by_type).map(([type, count]) => (
+            <span
+              key={type}
+              className="rounded-full border border-violet-500/20 bg-violet-500/5 px-2.5 py-0.5 text-xs text-violet-200"
+            >
+              {prettyPattern(type)} · {count}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-5">
+        <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500">
+          Recent activity
+        </h3>
+        {intel.recent_log.length === 0 ? (
+          <p className="mt-2 text-sm text-zinc-500">No analysis events yet.</p>
+        ) : (
+          <ul className="mt-2 divide-y divide-white/5 overflow-hidden rounded-lg border border-white/5">
+            {intel.recent_log.slice(0, 8).map((l, i) => (
+              <li
+                key={`${l.created_at}-${i}`}
+                className="flex items-center justify-between gap-3 bg-zinc-950/30 px-3 py-2 text-xs"
+              >
+                <span className={`shrink-0 font-mono ${logTone(l.event_type)}`}>
+                  {l.event_type}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-zinc-400">
+                  {summarizeLog(l.event_type, l.details)}
+                </span>
+                <span className="shrink-0 font-mono text-zinc-500">
+                  {formatRelativeShort(l.created_at)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  hint,
+  valueClassName,
+}: {
+  label: string
+  value: string
+  hint?: string
+  valueClassName?: string
+}) {
+  return (
+    <div className="rounded-lg border border-white/5 bg-zinc-950/40 p-3">
+      <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+        {label}
+      </div>
+      <div
+        className={`mt-1 text-2xl font-medium tabular-nums ${
+          valueClassName ?? 'text-zinc-100'
+        }`}
+      >
+        {value}
+      </div>
+      {hint && <div className="mt-0.5 text-[11px] text-zinc-500">{hint}</div>}
+    </div>
+  )
+}
+
+function prettyPattern(type: string): string {
+  return type
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function logTone(eventType: string): string {
+  if (
+    eventType === 'degradation_detected' ||
+    eventType === 'rollback_triggered' ||
+    eventType === 'low_acceptance_rate' ||
+    eventType === 'capsule_staled'
+  ) {
+    return 'text-amber-300'
+  }
+  if (eventType === 'capsule_promoted' || eventType === 'insight_generated') {
+    return 'text-emerald-300'
+  }
+  return 'text-violet-300'
+}
+
+function summarizeLog(
+  eventType: string,
+  details: Record<string, unknown>,
+): string {
+  switch (eventType) {
+    case 'analysis_run': {
+      const d = details as {
+        patterns_found?: number
+        capsules_inserted?: number
+        capsules_promoted?: number
+      }
+      return `${d.patterns_found ?? 0} patterns · ${d.capsules_promoted ?? 0} promoted`
+    }
+    case 'capsule_promoted':
+    case 'capsule_staled': {
+      const d = details as { pattern_type?: string; pattern_key?: string }
+      return `${d.pattern_type ?? '—'}/${d.pattern_key ?? '—'}`
+    }
+    case 'insight_generated': {
+      const d = details as { insight_type?: string; insight_key?: string }
+      return `${d.insight_type ?? '—'} · ${d.insight_key ?? ''}`
+    }
+    case 'low_acceptance_rate': {
+      const d = details as { acceptance_rate?: number }
+      const rate =
+        typeof d.acceptance_rate === 'number'
+          ? Math.round(d.acceptance_rate * 100)
+          : null
+      return rate != null ? `${rate}% — throttling generation` : 'throttling'
+    }
+    case 'parameter_tuned': {
+      const d = details as { parameter?: string; from?: unknown; to?: unknown }
+      return `${d.parameter ?? '—'}: ${String(d.from)} → ${String(d.to)}`
+    }
+    default:
+      return JSON.stringify(details).slice(0, 80)
+  }
+}
+
+function formatRelativeShort(iso: string): string {
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return '—'
+  const diff = Date.now() - t
+  const m = Math.round(diff / 60_000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.round(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.round(h / 24)
+  return `${d}d ago`
 }
