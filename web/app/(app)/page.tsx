@@ -221,6 +221,14 @@ export default async function DashboardPage() {
         <SectionHeader
           title="Contacts"
           subtitle="Click a card to drill in."
+          action={
+            <Link
+              href="/contacts/import"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-3.5 py-1.5 text-sm font-medium text-white shadow-sm shadow-violet-500/20 transition-opacity hover:opacity-90"
+            >
+              <span className="text-base leading-none">+</span> Import contacts
+            </Link>
+          }
         />
         {enriched.length === 0 ? (
           <Card>

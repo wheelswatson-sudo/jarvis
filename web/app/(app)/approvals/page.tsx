@@ -1,64 +1,100 @@
 import { createClient } from '../../../lib/supabase/server'
-import { Card } from '../../../components/cards'
-import { ApprovalCard } from '../../../components/ApprovalCard'
-import type { Approval, Contact } from '../../../lib/types'
+import { PendingChangesQueue } from '../../../components/PendingChangesQueue'
+import type { Contact, PendingChange } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
 export default async function ApprovalsPage() {
   const supabase = await createClient()
-  const { data } = await supabase
-    .from('approvals')
-    .select('*')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: false })
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
 
-  const approvals = (data ?? []) as Approval[]
-  const contactIds = Array.from(
-    new Set(approvals.map((a) => a.contact_id).filter((x): x is string => !!x)),
-  )
+  const { data: changesData } = user
+    ? await supabase
+        .from('pending_changes')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false })
+    : { data: [] }
 
-  let nameById = new Map<string, string>()
+  const changes = (changesData ?? []) as PendingChange[]
+  const contactIds = Array.from(new Set(changes.map((c) => c.contact_id)))
+
+  let contactById = new Map<string, Pick<Contact, 'id' | 'name'>>()
   if (contactIds.length > 0) {
     const { data: contacts } = await supabase
       .from('contacts')
       .select('id, name')
       .in('id', contactIds)
-    nameById = new Map(
+    contactById = new Map(
       ((contacts ?? []) as Pick<Contact, 'id' | 'name'>[]).map((c) => [
         c.id,
-        c.name,
+        c,
       ]),
     )
   }
 
-  const enriched = approvals.map((a) => ({
-    ...a,
-    contact_name: a.contact_id ? (nameById.get(a.contact_id) ?? null) : null,
-  }))
+  const groupMap = new Map<
+    string,
+    {
+      contactId: string
+      contactName: string
+      changes: (PendingChange & { contact_name: string | null })[]
+    }
+  >()
+  for (const c of changes) {
+    const contactName = contactById.get(c.contact_id)?.name ?? 'Unknown contact'
+    const enriched = { ...c, contact_name: contactName }
+    const existing = groupMap.get(c.contact_id)
+    if (existing) {
+      existing.changes.push(enriched)
+    } else {
+      groupMap.set(c.contact_id, {
+        contactId: c.contact_id,
+        contactName,
+        changes: [enriched],
+      })
+    }
+  }
+
+  const groups = Array.from(groupMap.values()).sort((a, b) =>
+    a.contactName.localeCompare(b.contactName),
+  )
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-medium tracking-tight">Approval queue</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Messages Jarvis drafted, waiting on your call.
-        </p>
-      </header>
-
-      {enriched.length === 0 ? (
-        <Card>
-          <p className="text-sm text-zinc-400">
-            Inbox zero. No drafts pending approval.
+    <div className="-mx-4 -my-8 min-h-[calc(100vh-3.5rem)] bg-zinc-950 px-4 py-10 sm:-mx-6 sm:px-6">
+      <div className="mx-auto max-w-5xl space-y-8">
+        <header>
+          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400" />
+            Relationship Intelligence
+          </div>
+          <h1 className="mt-3 bg-gradient-to-r from-indigo-200 via-violet-200 to-fuchsia-200 bg-clip-text text-3xl font-semibold tracking-tight text-transparent">
+            Approval queue
+          </h1>
+          <p className="mt-2 text-sm text-zinc-400">
+            Sync sources can&apos;t silently overwrite your edits. Review each
+            field change and decide what gets through.
           </p>
-        </Card>
-      ) : (
-        <div className="space-y-4">
-          {enriched.map((a) => (
-            <ApprovalCard key={a.id} approval={a} />
-          ))}
-        </div>
-      )}
+        </header>
+
+        {groups.length === 0 ? (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-6 py-12 text-center backdrop-blur">
+            <div className="mx-auto h-10 w-10 rounded-full bg-gradient-to-br from-indigo-500/20 via-violet-500/20 to-fuchsia-500/20" />
+            <h2 className="mt-4 text-base font-medium text-zinc-100">
+              Nothing pending
+            </h2>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-zinc-400">
+              Your contact data is in sync. Conflicting auto-sync changes will
+              show up here for you to review.
+            </p>
+          </div>
+        ) : (
+          <PendingChangesQueue groups={groups} />
+        )}
+      </div>
     </div>
   )
 }
