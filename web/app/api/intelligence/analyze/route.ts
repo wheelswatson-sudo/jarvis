@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { timingSafeEqual } from 'crypto'
-import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import { createClient } from '../../../../lib/supabase/server'
+import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
 import { runEngineForUser } from '../../../../lib/intelligence/experience-engine'
 import { generateInsightsForUser } from '../../../../lib/intelligence/insight-generator'
@@ -38,15 +38,6 @@ function safeEqual(a: string, b: string): boolean {
   const bufB = Buffer.from(b)
   if (bufA.length !== bufB.length) return false
   return timingSafeEqual(bufA, bufB)
-}
-
-function getServiceClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url || !key) return null
-  return createSupabaseClient(url, key, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  })
 }
 
 export async function POST(request: Request) {
@@ -125,6 +116,10 @@ export async function POST(request: Request) {
   }
 
   // -- Authenticated user path -------------------------------------------
+  // Auth comes from the cookie-bound session client; writes go through the
+  // service-role client because the intelligence tables have no user-side
+  // INSERT/UPDATE policies. The engine functions scope every query by
+  // user.id internally.
   const supabase = await createClient()
   const {
     data: { user },
@@ -133,8 +128,18 @@ export async function POST(request: Request) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
-  const engineRun = await runEngineForUser(supabase, user.id)
-  const generatorRun = await generateInsightsForUser(supabase, user.id)
+  const service = getServiceClient()
+  if (!service) {
+    return apiError(
+      500,
+      'Service role key not configured',
+      undefined,
+      'no_service_key',
+    )
+  }
+
+  const engineRun = await runEngineForUser(service, user.id)
+  const generatorRun = await generateInsightsForUser(service, user.id)
 
   return NextResponse.json({
     ok: true,
