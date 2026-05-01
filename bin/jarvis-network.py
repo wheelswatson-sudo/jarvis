@@ -392,300 +392,82 @@ def _infer_channels(rec: dict) -> dict:
     return out
 
 
-# ── Network search ──────────────────────────────────────────────────
-_TOKENIZE_RE = re.compile(r"[a-z0-9]+")
-
-
-def _tokens(text: str | None) -> list[str]:
-    return _TOKENIZE_RE.findall((text or "").lower())
-
-
-def _record_corpus(rec: dict) -> str:
-    """Concatenate every searchable field into one string for substring scoring."""
-    parts: list[str] = []
-    for key in ("name", "relationship", "brief", "notes",
-                "communication_preference", "sentiment_trend"):
-        v = rec.get(key)
-        if isinstance(v, str):
-            parts.append(v)
-        elif isinstance(v, list):
-            parts.append(" ".join(str(x) for x in v))
-    for key in ("skills", "expertise_areas", "can_intro_to", "tags",
-                "topics_discussed", "open_threads", "talking_points"):
-        v = rec.get(key) or []
-        if isinstance(v, list):
-            parts.append(" ".join(str(x) for x in v))
-    ih = rec.get("interaction_history") or {}
-    for t in ih.get("topics_discussed") or []:
-        if isinstance(t, dict):
-            parts.append(str(t.get("topic") or ""))
-        else:
-            parts.append(str(t))
-    return " ".join(parts).lower()
-
-
-def _match_score(query: str, rec: dict) -> tuple[float, list[str]]:
-    """Return (score, reasons). Reasons explain why this record matched —
-    used to surface the 'why' in the response so Watson knows what we keyed on."""
-    if not query:
-        return 0.0, []
-    q = query.lower().strip()
-    q_tokens = [t for t in _tokens(q) if len(t) > 2]
-    score = 0.0
-    reasons: list[str] = []
-
-    skills = [s.lower() for s in (rec.get("skills") or [])]
-    expertise = [s.lower() for s in (rec.get("expertise_areas") or [])]
-    intros = [s.lower() for s in (rec.get("can_intro_to") or [])]
-    tags = [s.lower() for s in (rec.get("tags") or [])]
-    topics = []
-    for t in rec.get("topics_discussed") or []:
-        topics.append(str(t).lower())
-    for t in (rec.get("interaction_history") or {}).get("topics_discussed") or []:
-        if isinstance(t, dict):
-            topics.append(str(t.get("topic") or "").lower())
-        else:
-            topics.append(str(t).lower())
-
-    for label, weight, bag in (
-        ("skill", 3.0, skills),
-        ("expertise", 3.0, expertise),
-        ("intro_target", 2.5, intros),
-        ("tag", 2.0, tags),
-        ("topic", 1.5, topics),
-    ):
-        for entry in bag:
-            if not entry:
-                continue
-            if q in entry or entry in q:
-                score += weight
-                reasons.append(f"{label}: {entry}")
-                continue
-            ent_tokens = set(_tokens(entry))
-            shared = ent_tokens & set(q_tokens)
-            if shared:
-                score += weight * 0.5 * (len(shared) / max(1, len(set(q_tokens))))
-                reasons.append(f"{label}~{entry}")
-
-    corpus = _record_corpus(rec)
-    if q in corpus:
-        score += 1.0
-        reasons.append("brief/notes match")
-    else:
-        hits = sum(1 for t in q_tokens if t in corpus)
-        if hits:
-            score += 0.5 * (hits / max(1, len(q_tokens)))
-            reasons.append(f"{hits}/{len(q_tokens)} term hits")
-
-    # Boost by relationship strength so a weak connection that name-matches
-    # doesn't outrank a strong one.
-    strength = float(rec.get("relationship_strength") or 0.0)
-    score *= 1.0 + 0.6 * strength
-    return round(score, 3), reasons[:5]
-
-
-def _result_card(key: str, rec: dict, score: float | None = None,
-                 reasons: list[str] | None = None) -> dict:
-    return {
-        "key": key,
-        "name": rec.get("name"),
-        "trust_level": rec.get("trust_level"),
-        "relationship": rec.get("relationship"),
-        "relationship_strength": rec.get("relationship_strength"),
-        "skills": rec.get("skills") or [],
-        "expertise_areas": rec.get("expertise_areas") or [],
-        "can_intro_to": rec.get("can_intro_to") or [],
-        "last_interaction": rec.get("last_interaction"),
-        "last_channel": rec.get("last_channel"),
-        "communication_preference": rec.get("communication_preference"),
-        "brief": rec.get("brief"),
-        "tags": rec.get("tags") or [],
-        "match_score": score,
-        "match_reasons": reasons or [],
-    }
-
-
-def network_search(query: str, filters: dict | None = None,
-                   limit: int = 10) -> dict:
-    """Semantic search across the network. Returns ranked candidates with
-    reasoning. `filters` keys: trust_level (str | list), tags (list),
-    min_strength (float), channel (str), recency_days (int)."""
-    gate = _gate_check()
-    if gate:
-        return gate
-    started = time.monotonic()
-    people = _load_people()
-    if not people:
-        _emit("network_search", "skipped",
-              context={"query": query[:80], "reason": "no contacts"})
-        return {"ok": True, "query": query, "results": [],
-                "count": 0, "reason": "no contacts on file"}
-
-    filt = filters or {}
-    desired_tiers = filt.get("trust_level")
-    if isinstance(desired_tiers, str):
-        desired_tiers = [desired_tiers]
-    desired_tags = [t.lower() for t in (filt.get("tags") or [])]
-    min_strength = float(filt.get("min_strength") or 0.0)
-    channel = (filt.get("channel") or "").lower() or None
-    recency_days = filt.get("recency_days")
+def _imessage_history_for(rec: dict, hours: float = 24 * 90,
+                          limit: int = 50) -> list[dict]:
+    """Pull recent iMessages with this contact via jarvis-apple. Best-
+    effort: returns [] if Full Disk Access isn't granted or jarvis-apple
+    isn't installed."""
+    candidates: list[str] = []
+    for k in ("phone", "phone_number", "imessage", "imessage_handle"):
+        v = (rec.get(k) or "").strip()
+        if v:
+            candidates.append(v)
+    em = (rec.get("email") or "").strip()
+    if em:
+        candidates.append(em)
+    if not candidates:
+        return []
+    src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        src = ASSISTANT_DIR / "bin" / "jarvis-apple.py"
+    if not src.exists():
+        return []
     try:
-        recency_days = float(recency_days) if recency_days is not None else None
-    except (TypeError, ValueError):
-        recency_days = None
-
-    scored: list[tuple[float, str, dict, list[str]]] = []
-    for key, rec in people.items():
-        rec = _ensure_network_fields(rec)
-        if desired_tiers and (rec.get("trust_level") not in desired_tiers):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("jarvis_apple_net", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    except Exception:
+        return []
+    for handle in candidates:
+        try:
+            out = mod.imessage_check(contact=handle, hours=hours, limit=limit)
+        except Exception:
             continue
-        if desired_tags:
-            tags = [t.lower() for t in (rec.get("tags") or [])]
-            if not all(t in tags for t in desired_tags):
-                continue
-        strength = float(rec.get("relationship_strength") or 0.0)
-        if strength < min_strength:
-            continue
-        if channel:
-            ih_channels = (rec.get("interaction_history") or {}).get("channels") or {}
-            last_ch = (rec.get("last_channel") or "").split(":", 1)[0]
-            if not (channel in ih_channels or last_ch == channel):
-                continue
-        if recency_days is not None:
-            d = _days_since(rec.get("last_interaction"))
-            if d is None or d > recency_days:
-                continue
-
-        if query.strip():
-            score, reasons = _match_score(query, rec)
-            if score <= 0.0:
-                continue
-        else:
-            # No query → rank by relationship_strength (filter-only mode).
-            score = strength * 5.0
-            reasons = [f"strength {strength:.2f}"]
-        scored.append((score, key, rec, reasons))
-
-    scored.sort(key=lambda t: (-t[0], -float(t[2].get("relationship_strength") or 0.0)))
-    top = scored[:max(1, int(limit))]
-    results = [_result_card(k, r, score=s, reasons=rs) for s, k, r, rs in top]
-    latency = (time.monotonic() - started) * 1000
-    _emit("network_search", "success",
-          context={"query": query[:80], "filters": filt, "hits": len(results)},
-          latency_ms=int(latency))
-    return {
-        "ok": True,
-        "query": query,
-        "filters": filt,
-        "count": len(results),
-        "results": results,
-    }
+        if out and out.get("ok") and out.get("messages"):
+            return out["messages"]
+    return []
 
 
-# ── Network map ─────────────────────────────────────────────────────
-def network_map(focus: str | None = None, limit: int = 20) -> dict:
-    """Network overview. With no focus, returns top contacts grouped by
-    trust tier — `the lay of my network`. With focus, returns who's
-    relevant to that focus + how to approach them."""
-    gate = _gate_check()
-    if gate:
-        return gate
-    people = _load_people()
-    if not people:
-        return {"ok": True, "focus": focus, "summary": "no contacts on file",
-                "sections": []}
-
-    if focus and focus.strip():
-        # Focus mode — search + structure with suggested order
-        search_res = network_search(focus, limit=limit)
-        results = search_res.get("results") or []
-        if not results:
-            return {
-                "ok": True,
-                "focus": focus,
-                "summary": f"No one in your network maps to {focus!r} yet.",
-                "sections": [],
-            }
-        # Sort the matches by a blended score (match * strength) for the
-        # suggested approach order.
-        approach_order = sorted(
-            results,
-            key=lambda r: (r.get("match_score") or 0)
-                          * (1 + float(r.get("relationship_strength") or 0)),
-            reverse=True,
-        )
-        section = {
-            "title": f"Relevant to {focus!r}",
-            "count": len(results),
-            "people": approach_order,
-        }
-        summary = (
-            f"{len(results)} contact{'s' if len(results) != 1 else ''} match {focus!r}. "
-            f"Strongest fit: {approach_order[0].get('name')} "
-            f"({approach_order[0].get('trust_level')}, "
-            f"strength {approach_order[0].get('relationship_strength')})."
-        )
-        return {"ok": True, "focus": focus, "summary": summary, "sections": [section]}
-
-    # No focus: stratify by trust tier.
-    tiers: dict[str, list[dict]] = {t: [] for t in VALID_TIERS}
-    for key, rec in people.items():
-        rec = _ensure_network_fields(rec)
-        tier = rec.get("trust_level") or "acquaintance"
-        if tier not in tiers:
-            tier = "acquaintance"
-        tiers[tier].append(_result_card(key, rec))
-    for tier in tiers:
-        tiers[tier].sort(
-            key=lambda r: -(float(r.get("relationship_strength") or 0)),
-        )
-    sections = []
-    total = 0
-    for tier in VALID_TIERS:
-        people_in_tier = tiers[tier][:limit]
-        if not people_in_tier:
-            continue
-        sections.append({
-            "title": tier.replace("_", " ").title(),
-            "tier": tier,
-            "count": len(tiers[tier]),
-            "people": people_in_tier,
-        })
-        total += len(tiers[tier])
-    summary = (
-        f"{total} contact{'s' if total != 1 else ''} on file across "
-        f"{len(sections)} tier{'s' if len(sections) != 1 else ''}."
-    )
-    return {"ok": True, "focus": None, "summary": summary, "sections": sections}
-
-
-# ── Relationship score (single-person deep dive) ────────────────────
-def _trajectory(rec: dict, history: dict | None) -> str:
-    """growing | stable | fading — heuristic on recency vs older activity."""
-    days = _days_since(rec.get("last_interaction"))
-    tier = rec.get("trust_level") or "acquaintance"
-    threshold = FADING_THRESHOLDS_DAYS.get(tier, 90)
-    if days is None:
-        return "stable"
-    if days > threshold:
-        return "fading"
-    history = history or {}
+def _rebuild_interaction_history(rec: dict, history: dict) -> None:
+    """Update rec['interaction_history'] in place from the raw history dict
+    (whatever shape jarvis-contacts returned). Sentiment is set to neutral
+    here — Haiku enrichment overwrites with a real label later."""
     em = history.get("email") or []
     tg = history.get("telegram") or []
-    msgs = sorted(
-        [m for m in em + tg if m.get("ts")],
-        key=lambda m: m.get("ts") or 0,
-        reverse=True,
-    )
-    if len(msgs) < 4:
-        return "stable"
-    half = len(msgs) // 2
-    recent_avg = sum(m["ts"] for m in msgs[:half]) / max(1, half)
-    older_avg = sum(m["ts"] for m in msgs[half:]) / max(1, len(msgs) - half)
-    # Compare gaps between consecutive messages — shorter recent gap → growing.
-    if recent_avg - older_avg > 30 * 86400:
-        return "growing"
-    return "stable"
+    so = history.get("social") or []
+    im = history.get("imessage") or _imessage_history_for(rec)
+
+    em_chars = sum(len((e.get("snippet") or "")) for e in em)
+    tg_chars = sum(len((t.get("text") or "")) for t in tg)
+    so_chars = sum(len((s.get("text") or "")) for s in so)
+    im_chars = sum(len((m.get("text") or "")) for m in im)
+
+    rec.setdefault("interaction_history", {})
+    rec["interaction_history"]["email"] = {
+        "count": len(em),
+        "topics": _topics_from_subjects(e.get("subject", "") for e in em),
+        "sentiment": (rec.get("interaction_history") or {}).get("email", {}).get("sentiment") or "neutral",
+        "avg_chars": int(em_chars / len(em)) if em else 0,
+    }
+    rec["interaction_history"]["telegram"] = {
+        "count": len(tg),
+        "topics": [],  # no subjects in TG — left to Haiku enrichment
+        "sentiment": (rec.get("interaction_history") or {}).get("telegram", {}).get("sentiment") or "neutral",
+        "avg_chars": int(tg_chars / len(tg)) if tg else 0,
+    }
+    rec["interaction_history"]["social"] = {
+        "count": len(so),
+        "topics": [],
+        "sentiment": (rec.get("interaction_history") or {}).get("social", {}).get("sentiment") or "neutral",
+        "avg_chars": int(so_chars / len(so)) if so else 0,
+    }
+    rec["interaction_history"]["imessage"] = {
+        "count": len(im),
+        "topics": [],
+        "sentiment": (rec.get("interaction_history") or {}).get("imessage", {}).get("sentiment") or "neutral",
+        "avg_chars": int(im_chars / len(im)) if im else 0,
+    }
 
 
 def _suggested_action(rec: dict, trajectory: str) -> dict:

@@ -2,3 +2,4 @@ config/.env
 cache/
 *.mp3
 dist/
+__pycache__/

@@ -1,44 +1,36 @@
 #!/usr/bin/env python3
-"""Trello integration — bidirectional sync between commitments and a board.
+"""Trello mirror — sync Jarvis commitments to a Trello board, pull
+completion signals back.
 
-The commitment store at ~/.jarvis/commitments/items.json stays canonical;
-Trello is a secondary surface so Watson can drag cards on his phone and
-have those state changes reflect back in Jarvis. This module:
+Trello is a peripheral, not a source of truth. items.json is canonical.
+This module pushes new commitments into a "To Do" list and listens for
+cards moved to "Done" so Jarvis can mark the underlying commitment
+complete. Sync state lives in ~/.jarvis/commitments/sync_state.json so
+we don't repeatedly create the same card.
 
-  * fetches all cards on the configured board(s),
-  * pushes every open commitment that isn't on Trello yet,
-  * pulls 'done'-list cards back into the store as completed,
-  * lets Watson add / move cards directly from the voice surface.
+Stdlib only — urllib + json — so it works on any clean Python install.
 
-Stdlib only — urllib + json + html.parser. Auth is two env vars:
+Auth (from env, falls back to ~/.jarvis/config/.env if loaded already):
+    TRELLO_API_KEY    https://trello.com/app-key
+    TRELLO_TOKEN      Personal token from the same page
 
-    TRELLO_API_KEY      from https://trello.com/app-key
-    TRELLO_TOKEN        OAuth token from the same page
+Setup:
+    bin/jarvis-trello.py setup      one-time interactive board pick
+    bin/jarvis-trello.py boards     list boards (debug)
 
-Setup wizard (`--setup`) walks Watson through:
-  1. listing his boards,
-  2. picking the default board,
-  3. mapping his lists to the three statuses Jarvis cares about
-     (todo / doing / done),
-  4. writing config to ~/.jarvis/trello/config.json.
+Daily ops:
+    bin/jarvis-trello.py sync       bidirectional reconciliation
+    bin/jarvis-trello.py add "Send proposal" --list todo --due 2026-05-01
+    bin/jarvis-trello.py move <card_id> doing
+    bin/jarvis-trello.py complete <card_id>
 
-Public tools (returned by jarvis-think):
+Config file: ~/.jarvis/trello/config.json
+    {"board_id": "...", "lists": {"todo": "...", "doing": "...", "done": "..."}}
 
-    trello_sync()        bidirectional pass over the configured board
-    trello_boards()      list boards (and optionally the cards on one)
-    trello_add(...)      create a card on a specific list
-    trello_move(...)     move a card to a different list
-
-Files:
-    ~/.jarvis/trello/config.json     {api_key, token, board_id, list_map}
-    ~/.jarvis/logs/trello.log        diagnostic log
-
-Gate: JARVIS_TRELLO=1 (defaults on iff TRELLO_API_KEY + TRELLO_TOKEN both
-present).
+Gate: JARVIS_TRELLO=1 (also requires TRELLO_API_KEY + TRELLO_TOKEN).
 """
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
 import os
@@ -47,23 +39,28 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
-BIN_DIR = ASSISTANT_DIR / "bin"
-LIB_DIR = ASSISTANT_DIR / "lib"
 TRELLO_DIR = ASSISTANT_DIR / "trello"
 CONFIG_FILE = TRELLO_DIR / "config.json"
 LOG_DIR = ASSISTANT_DIR / "logs"
 TRELLO_LOG = LOG_DIR / "trello.log"
+BIN_DIR = Path(__file__).resolve().parent
 
-TRELLO_API = "https://api.trello.com/1"
-HTTP_TIMEOUT_S = float(os.environ.get("JARVIS_TRELLO_HTTP_TIMEOUT_S", "12"))
+API_BASE = "https://api.trello.com/1"
+DEFAULT_LIST_NAMES = {
+    "todo": ["To Do", "Todo", "Backlog", "Up Next"],
+    "doing": ["Doing", "In Progress", "Active"],
+    "done": ["Done", "Complete", "Completed"],
+}
+
+JARVIS_MARKER = "jarvis-id:"  # we embed this in card descriptions
 
 
-# ── logging + gate ────────────────────────────────────────────────────
+# ── logging / IO ─────────────────────────────────────────────────────
 def _log(msg: str) -> None:
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,612 +71,493 @@ def _log(msg: str) -> None:
         pass
 
 
-def _gate_default() -> str:
-    return "1" if (os.environ.get("TRELLO_API_KEY")
-                   and os.environ.get("TRELLO_TOKEN")) else "0"
+def _gate_enabled() -> bool:
+    return os.environ.get("JARVIS_TRELLO", "1") not in ("0", "false", "no", "off")
 
 
-def _gate_check() -> dict | None:
-    if os.environ.get("JARVIS_TRELLO", _gate_default()) != "1":
-        return {"error": "trello disabled (JARVIS_TRELLO=0 or no keys)"}
-    if not (os.environ.get("TRELLO_API_KEY") and os.environ.get("TRELLO_TOKEN")):
-        return {"error": "TRELLO_API_KEY + TRELLO_TOKEN env vars required"}
-    return None
-
-
-# ── module loaders ────────────────────────────────────────────────────
-def _load_module(mod_id: str, filename: str, search_dirs: list[Path]) -> Any:
-    for d in search_dirs:
-        src = d / filename
-        if src.exists():
-            try:
-                spec = importlib.util.spec_from_file_location(mod_id, src)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                return mod
-            except Exception as e:
-                _log(f"load {filename} failed: {e}")
-                return None
-    return None
-
-
-_BIN_SEARCH = [BIN_DIR, Path(__file__).parent]
-_LIB_SEARCH = [LIB_DIR, Path(__file__).parent.parent / "lib"]
-
-_cache: dict[str, Any] = {}
-
-
-def _commitments():
-    if "commitments" not in _cache:
-        _cache["commitments"] = _load_module(
-            "jarvis_commitments_for_trello",
-            "jarvis-commitments.py", _BIN_SEARCH)
-    return _cache["commitments"]
-
-
-def _primitive():
-    if "primitive" not in _cache:
-        _cache["primitive"] = _load_module("primitive", "primitive.py", _LIB_SEARCH)
-    return _cache["primitive"]
-
-
-def _emit(action: str, status: str, **ctx) -> None:
-    p = _primitive()
-    if p is None:
-        return
+def _read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
     try:
-        p.emit(cap="commitments", action=action, status=status, context=ctx)
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _write_json(path: Path, data: Any) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except Exception as e:
+        _log(f"write {path.name} failed: {e}")
+        return False
+
+
+def _credentials() -> tuple[str, str] | None:
+    key = os.environ.get("TRELLO_API_KEY", "").strip()
+    tok = os.environ.get("TRELLO_TOKEN", "").strip()
+    if key and tok:
+        return key, tok
+    return None
+
+
+def _emit(action: str, status: str, context: dict | None = None,
+          latency_ms: int | None = None) -> None:
+    try:
+        sys.path.insert(0, str(ASSISTANT_DIR / "lib"))
+        sys.path.insert(0, str(BIN_DIR.parent / "lib"))
+        from outcome_ledger import emit  # type: ignore
+        emit("trello", action, status, context=context, latency_ms=latency_ms)
     except Exception:
         pass
 
 
-# ── config I/O ────────────────────────────────────────────────────────
+# ── HTTP ─────────────────────────────────────────────────────────────
+def _api(method: str, path: str, params: dict | None = None,
+         body: dict | None = None, timeout: float = 15.0) -> Any:
+    creds = _credentials()
+    if creds is None:
+        raise RuntimeError("TRELLO_API_KEY / TRELLO_TOKEN not set")
+    key, token = creds
+    qp = dict(params or {})
+    qp["key"] = key
+    qp["token"] = token
+    url = f"{API_BASE}{path}?{urllib.parse.urlencode(qp)}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method.upper())
+    req.add_header("Accept", "application/json")
+    if body:
+        req.add_header("Content-Type", "application/json")
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                if not raw:
+                    return None
+                return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(1 + attempt * 1.5)
+                continue
+            try:
+                detail = e.read().decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"Trello API {e.code}: {detail[:200]}") from e
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1 + attempt * 1.5)
+                continue
+            raise RuntimeError(f"Trello network: {e}") from e
+    raise RuntimeError(f"Trello unexpected: {last_err}")
+
+
+# ── config ───────────────────────────────────────────────────────────
 def _load_config() -> dict:
-    if not CONFIG_FILE.exists():
-        return {}
+    cfg = _read_json(CONFIG_FILE, {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _save_config(cfg: dict) -> bool:
+    return _write_json(CONFIG_FILE, cfg)
+
+
+def trello_boards() -> dict:
+    """List Watson's boards. Used by setup and by 'what's on my Trello'."""
+    if not _gate_enabled():
+        return {"error": "JARVIS_TRELLO=0"}
+    if _credentials() is None:
+        return {"error": "TRELLO_API_KEY / TRELLO_TOKEN not set"}
     try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        boards = _api("GET", "/members/me/boards",
+                      params={"fields": "name,closed,url,shortUrl",
+                              "filter": "open"})
+    except RuntimeError as e:
+        return {"error": str(e)}
+    rows = [{"id": b["id"], "name": b.get("name"), "url": b.get("shortUrl") or b.get("url")}
+            for b in (boards or []) if not b.get("closed")]
+    return {"ok": True, "boards": rows}
+
+
+def _board_lists(board_id: str) -> list[dict]:
+    return _api("GET", f"/boards/{board_id}/lists",
+                params={"fields": "name,closed", "cards": "none"}) or []
+
+
+def trello_setup(board_id: str | None = None,
+                 board_name: str | None = None) -> dict:
+    """Pick the default board and map todo/doing/done lists. Without
+    args, returns the choice menu Watson can pick from."""
+    if not _gate_enabled():
+        return {"error": "JARVIS_TRELLO=0"}
+    if _credentials() is None:
+        return {"error": "TRELLO_API_KEY / TRELLO_TOKEN not set"}
+
+    boards = trello_boards()
+    if not boards.get("ok"):
+        return boards
+    if not board_id and not board_name:
+        return {"ok": True, "needs_choice": True, "boards": boards["boards"]}
+    if not board_id and board_name:
+        match = next((b for b in boards["boards"]
+                      if board_name.lower() in (b["name"] or "").lower()), None)
+        if not match:
+            return {"error": f"no board matched {board_name!r}"}
+        board_id = match["id"]
+
+    try:
+        lists = _board_lists(board_id)
+    except RuntimeError as e:
+        return {"error": str(e)}
+    open_lists = [l for l in lists if not l.get("closed")]
+    mapping: dict[str, str] = {}
+    for key, candidates in DEFAULT_LIST_NAMES.items():
+        for cand in candidates:
+            hit = next((l for l in open_lists
+                        if (l.get("name") or "").strip().lower() == cand.lower()),
+                       None)
+            if hit:
+                mapping[key] = hit["id"]
+                break
+    # Fall back to position order: 1st = todo, 2nd = doing, 3rd = done.
+    if "todo" not in mapping and open_lists:
+        mapping["todo"] = open_lists[0]["id"]
+    if "doing" not in mapping and len(open_lists) >= 2:
+        mapping["doing"] = open_lists[1]["id"]
+    if "done" not in mapping and len(open_lists) >= 3:
+        mapping["done"] = open_lists[-1]["id"]
+
+    cfg = _load_config()
+    cfg["board_id"] = board_id
+    cfg["lists"] = mapping
+    cfg["lists_full"] = [{"id": l["id"], "name": l["name"]} for l in open_lists]
+    cfg["configured_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    _save_config(cfg)
+    _log(f"setup board={board_id} lists={mapping}")
+    return {"ok": True, "board_id": board_id, "lists": mapping,
+            "available_lists": cfg["lists_full"]}
+
+
+# ── commitments bridge ───────────────────────────────────────────────
+def _load_commitments_module():
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = ASSISTANT_DIR / "bin" / "jarvis-commitments.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_commitments_t", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
     except Exception:
-        return {}
+        return None
 
 
-def _save_config(cfg: dict) -> None:
-    TRELLO_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
-                   encoding="utf-8")
-    os.replace(tmp, CONFIG_FILE)
-    # Trello tokens grant read/write to all the boards Watson authorized;
-    # keep the file user-only so a misconfigured backup tool doesn't
-    # leak it.
-    try:
-        os.chmod(CONFIG_FILE, 0o600)
-    except OSError:
-        pass
-
-
-# ── HTTP ──────────────────────────────────────────────────────────────
-def _auth_params() -> dict:
-    return {
-        "key": os.environ.get("TRELLO_API_KEY", ""),
-        "token": os.environ.get("TRELLO_TOKEN", ""),
-    }
-
-
-def _build_url(path: str, **params) -> str:
-    qs = {**_auth_params(), **{k: v for k, v in params.items() if v is not None}}
-    return f"{TRELLO_API}{path}?{urllib.parse.urlencode(qs)}"
-
-
-def _http_get(path: str, **params) -> tuple[int, Any]:
-    url = _build_url(path, **params)
-    try:
-        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_S) as r:
-            body = r.read()
-            try:
-                return r.status, json.loads(body)
-            except json.JSONDecodeError:
-                return r.status, body.decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        try:
-            err = e.read().decode("utf-8", "replace")
-        except Exception:
-            err = str(e)
-        return e.code, err
-    except (urllib.error.URLError, TimeoutError) as e:
-        _log(f"GET {path} -> {e}")
-        return -1, str(e)
-
-
-def _http_send(path: str, method: str, body: dict | None = None,
-               **params) -> tuple[int, Any]:
-    url = _build_url(path, **params)
-    data = None
-    headers = {}
-    if body is not None:
-        data = json.dumps(body).encode()
-        headers["content-type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as r:
-            raw = r.read()
-            try:
-                return r.status, json.loads(raw)
-            except json.JSONDecodeError:
-                return r.status, raw.decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        try:
-            err = e.read().decode("utf-8", "replace")
-        except Exception:
-            err = str(e)
-        return e.code, err
-    except (urllib.error.URLError, TimeoutError) as e:
-        _log(f"{method} {path} -> {e}")
-        return -1, str(e)
-
-
-# ── PUBLIC: trello_boards ─────────────────────────────────────────────
-def trello_boards(board_id: str | None = None,
-                  include_cards: bool = False) -> dict:
-    """List boards. With board_id, drill into one board's lists (and
-    optionally cards) so Watson can see what's queued without leaving
-    voice."""
-    gate = _gate_check()
-    if gate:
-        _emit("trello_boards", "skipped", reason="gate")
-        return gate
-    if board_id:
-        status, lists = _http_get(f"/boards/{board_id}/lists",
-                                  fields="name,closed", filter="open")
-        if status != 200 or not isinstance(lists, list):
-            _emit("trello_boards", "failed", reason=f"lists: {status}")
-            return {"error": f"trello lists fetch: {status}",
-                    "raw": (lists if isinstance(lists, str) else "")[:200]}
-        out_lists: list[dict] = []
-        for lst in lists:
-            entry: dict = {"id": lst.get("id"), "name": lst.get("name")}
-            if include_cards:
-                cstatus, cards = _http_get(f"/lists/{lst['id']}/cards",
-                                            fields="name,due,dateLastActivity,closed")
-                if cstatus == 200 and isinstance(cards, list):
-                    entry["cards"] = [{
-                        "id": c.get("id"), "name": c.get("name"),
-                        "due": c.get("due"),
-                    } for c in cards if not c.get("closed")]
-            out_lists.append(entry)
-        _emit("trello_boards", "success", board_id=board_id,
-              lists_count=len(out_lists))
-        return {"ok": True, "board_id": board_id, "lists": out_lists}
-
-    status, boards = _http_get("/members/me/boards",
-                                fields="name,url,closed", filter="open")
-    if status != 200 or not isinstance(boards, list):
-        _emit("trello_boards", "failed", reason=f"boards: {status}")
-        return {"error": f"trello boards fetch: {status}",
-                "raw": (boards if isinstance(boards, str) else "")[:200]}
-    out = [{"id": b.get("id"), "name": b.get("name"), "url": b.get("url")}
-           for b in boards if not b.get("closed")]
-    _emit("trello_boards", "success", count=len(out))
-    return {"ok": True, "boards": out, "count": len(out)}
-
-
-# ── PUBLIC: trello_add ────────────────────────────────────────────────
-def trello_add(name: str, list_id: str | None = None,
-               list_name: str | None = None,
-               due: str | None = None,
-               desc: str | None = None) -> dict:
-    """Create a card on a specific list. If list_id is omitted, falls
-    back to list_name lookup against the configured board, then to the
-    'todo' mapping in config."""
-    gate = _gate_check()
-    if gate:
-        _emit("trello_add", "skipped", reason="gate")
-        return gate
-    if not name or not name.strip():
-        return {"error": "name is required"}
-
-    target_id = list_id
-    if not target_id:
-        target_id = _resolve_list(list_name=list_name, default_role="todo")
-    if not target_id:
-        return {"error": "no list_id resolved — pass list_id or run --setup"}
-
-    body = {"name": name.strip(), "idList": target_id}
-    if due:
-        body["due"] = due
-    if desc:
-        body["desc"] = desc
-    status, card = _http_send("/cards", method="POST", body=body)
-    if status not in (200, 201) or not isinstance(card, dict):
-        _emit("trello_add", "failed", reason=f"create: {status}")
-        return {"error": f"trello card create: {status}",
-                "raw": (card if isinstance(card, str) else "")[:200]}
-    _emit("trello_add", "success", card_id=card.get("id"),
-          list_id=target_id)
-    _log(f"add card {card.get('id')} list={target_id} name={name[:80]!r}")
-    return {"ok": True, "card": {
-        "id": card.get("id"), "name": card.get("name"),
-        "list_id": card.get("idList"), "url": card.get("url"),
-        "due": card.get("due"),
-    }}
-
-
-# ── PUBLIC: trello_move ───────────────────────────────────────────────
-def trello_move(card_id: str, list_id: str | None = None,
-                list_name: str | None = None) -> dict:
-    """Move a card to a different list. Either list_id (exact) or
-    list_name (looked up against the configured board) must resolve."""
-    gate = _gate_check()
-    if gate:
-        _emit("trello_move", "skipped", reason="gate")
-        return gate
-    if not card_id:
-        return {"error": "card_id is required"}
-    target_id = list_id
-    if not target_id:
-        target_id = _resolve_list(list_name=list_name)
-    if not target_id:
-        return {"error": "no list resolved"}
-    status, card = _http_send(f"/cards/{card_id}", method="PUT",
-                               body={"idList": target_id})
-    if status != 200 or not isinstance(card, dict):
-        _emit("trello_move", "failed", reason=f"move: {status}")
-        return {"error": f"trello move: {status}",
-                "raw": (card if isinstance(card, str) else "")[:200]}
-    _emit("trello_move", "success", card_id=card_id, list_id=target_id)
-    _log(f"move card {card_id} -> {target_id}")
-    return {"ok": True, "card_id": card_id, "list_id": target_id}
-
-
-# ── helpers shared across tools ───────────────────────────────────────
-def _resolve_list(list_name: str | None = None,
-                  default_role: str | None = None) -> str | None:
-    """Resolve a list to an id. Lookup order:
-       1. Exact-id match in config.list_map values
-       2. Role match (todo/doing/done) when list_name is one of those
-       3. Name match against open lists on the configured board
-       4. Role default (default_role) from config.list_map
-    """
-    cfg = _load_config()
-    list_map = cfg.get("list_map") or {}
-    board_id = cfg.get("board_id")
-
-    if list_name:
-        ln = list_name.strip().lower()
-        if ln in ("todo", "doing", "done") and ln in list_map:
-            return list_map[ln]
-        # By id?
-        if list_name in list_map.values():
-            return list_name
-        if board_id:
-            status, lists = _http_get(f"/boards/{board_id}/lists",
-                                      fields="name", filter="open")
-            if status == 200 and isinstance(lists, list):
-                for lst in lists:
-                    if (lst.get("name") or "").strip().lower() == ln:
-                        return lst.get("id")
-    if default_role and default_role in list_map:
-        return list_map[default_role]
-    return None
-
-
-def _list_role_for(list_id: str, list_map: dict) -> str | None:
-    """Inverse — given a list id, return the role it maps to ('todo' /
-    'doing' / 'done'), or None when the list isn't part of the sync."""
-    for role, lid in list_map.items():
-        if lid == list_id:
-            return role
-    return None
-
-
-# ── PUBLIC: trello_sync (bidirectional) ───────────────────────────────
-def trello_sync() -> dict:
-    """Bidirectional sync between the commitment store and the
-    configured board.
-
-    Push: every commitment with status open/overdue and no
-          synced_to.trello_card_id gets a new card on the 'todo' list.
-    Pull: every card on the 'done' list whose id matches a tracked
-          commitment marks that commitment as completed in the store.
-    Move: when a commitment is completed inside Jarvis but its card is
-          still on todo/doing, move the card to 'done' to keep Trello
-          in sync.
-
-    Returns a structured tally so the briefing layer can mention what
-    moved without re-running the call."""
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("trello_sync", "skipped", reason="gate")
-        return gate
-    cfg = _load_config()
-    if not cfg.get("board_id") or not cfg.get("list_map"):
-        return {"error": "trello not set up — run "
-                         "`bin/jarvis-trello.py --setup`"}
-    board_id = cfg["board_id"]
-    list_map = cfg["list_map"]
-    todo_id = list_map.get("todo")
-    done_id = list_map.get("done")
-    if not todo_id or not done_id:
-        return {"error": "list_map missing 'todo' or 'done' role"}
-
-    cmt = _commitments()
-    if cmt is None:
-        return {"error": "jarvis-commitments module not installed"}
-    items = cmt._load_items()  # type: ignore[attr-defined]
-
-    # Pull all cards once — saves N round trips when looking up by id.
-    cards_status, cards = _http_get(f"/boards/{board_id}/cards",
-                                     fields="name,idList,due,closed,desc",
-                                     filter="open")
-    if cards_status != 200 or not isinstance(cards, list):
-        return {"error": f"trello cards fetch: {cards_status}",
-                "raw": (cards if isinstance(cards, str) else "")[:200]}
-    by_id = {c.get("id"): c for c in cards}
-
-    pushed: list[str] = []
-    pulled_done: list[str] = []
-    moved_done: list[str] = []
-    errors: list[str] = []
-
-    # Pass 1 — push open/overdue commitments that aren't on Trello yet.
-    for rec in items:
-        if rec.get("status") not in ("open", "overdue"):
-            continue
-        synced = (rec.get("synced_to") or {}).get("trello_card_id")
-        if synced and synced in by_id:
-            continue  # already on the board
-        # Push
-        body = {"name": rec.get("text") or "(untitled)",
-                "idList": todo_id,
-                "desc": _format_card_desc(rec)}
-        if rec.get("due"):
-            body["due"] = rec["due"]
-        cstatus, card = _http_send("/cards", method="POST", body=body)
-        if cstatus in (200, 201) and isinstance(card, dict):
-            rec.setdefault("synced_to", {})["trello_card_id"] = card.get("id")
-            rec["updated_at"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds")
-            pushed.append(rec["id"])
-            by_id[card.get("id")] = card  # keep local mirror current
-        else:
-            errors.append(f"push {rec['id']}: {cstatus}")
-
-    # Pass 2 — pull cards on the 'done' list back into the store.
-    for card in cards:
-        if card.get("idList") != done_id:
-            continue
-        cid = card.get("id")
-        rec = next((r for r in items
-                    if (r.get("synced_to") or {}).get("trello_card_id") == cid),
-                   None)
-        if rec is None:
-            # Untracked card — skip (it predates sync, or someone added
-            # it directly on Trello). We could also auto-add it as a
-            # done commitment, but that's noisier than helpful.
-            continue
-        if rec.get("status") in ("done", "cancelled"):
-            continue
-        rec["status"] = "done"
-        rec["completed_at"] = datetime.now(timezone.utc).isoformat(
-            timespec="seconds")
-        rec["updated_at"] = rec["completed_at"]
-        pulled_done.append(rec["id"])
-
-    # Pass 3 — push completions back: commitments marked done in Jarvis
-    # whose Trello card hasn't been moved yet.
-    for rec in items:
-        if rec.get("status") != "done":
-            continue
-        cid = (rec.get("synced_to") or {}).get("trello_card_id")
-        if not cid or cid not in by_id:
-            continue
-        if by_id[cid].get("idList") == done_id:
-            continue
-        mstatus, _ = _http_send(f"/cards/{cid}", method="PUT",
-                                 body={"idList": done_id})
-        if mstatus == 200:
-            moved_done.append(rec["id"])
-        else:
-            errors.append(f"move {cid}: {mstatus}")
-
-    # Persist whatever changed.
-    if pushed or pulled_done or moved_done:
-        cmt._save_items(items)  # type: ignore[attr-defined]
-
-    elapsed = int((time.monotonic() - started) * 1000)
-    _emit("trello_sync",
-          "success" if not errors else "failed",
-          pushed=len(pushed), pulled_done=len(pulled_done),
-          moved_done=len(moved_done), errors_count=len(errors),
-          latency_ms=elapsed)
-    _log(f"sync pushed={len(pushed)} pulled_done={len(pulled_done)} "
-         f"moved_done={len(moved_done)} errors={len(errors)} ({elapsed}ms)")
-    return {
-        "ok": True,
-        "pushed": pushed,
-        "pulled_done": pulled_done,
-        "moved_done": moved_done,
-        "errors": errors,
-    }
-
-
-def _format_card_desc(rec: dict) -> str:
-    """Human-readable description on the Trello card. Includes the
-    Jarvis id so a future reverse-lookup doesn't depend solely on
-    synced_to."""
-    parts = [f"jarvis:{rec.get('id', '?')}"]
-    if rec.get("priority") and rec["priority"] != "normal":
-        parts.append(f"priority: {rec['priority']}")
-    if rec.get("related_contact"):
-        parts.append(f"with: {rec['related_contact']}")
-    if rec.get("tags"):
-        parts.append("tags: " + ", ".join(rec["tags"]))
+def _commitment_card_desc(commitment: dict) -> str:
+    """Embed the canonical id in the card description so we can
+    correlate card → commitment on subsequent syncs."""
+    parts = [f"{JARVIS_MARKER} {commitment['id']}"]
+    if commitment.get("priority") and commitment["priority"] != "medium":
+        parts.append(f"priority: {commitment['priority']}")
+    if commitment.get("related_contact"):
+        parts.append(f"contact: {commitment['related_contact']}")
+    if commitment.get("source"):
+        src = commitment["source"]
+        ctx = src.get("context")
+        if ctx:
+            parts.append(f"context: {ctx[:200]}")
+    if commitment.get("notes"):
+        parts.append(f"notes: {commitment['notes'][:300]}")
     return "\n".join(parts)
 
 
-# ── setup wizard ──────────────────────────────────────────────────────
-def setup() -> int:
-    """Interactive — only runs from a TTY. Walks Watson through picking
-    the board and mapping his lists to (todo / doing / done)."""
-    gate = _gate_check()
-    if gate:
-        print(gate["error"], file=sys.stderr)
-        return 2
-    if not sys.stdin.isatty():
-        print("--setup requires a TTY (interactive prompts).", file=sys.stderr)
-        return 2
-
-    print("\n— Jarvis Trello setup —\n")
-    res = trello_boards()
-    if not res.get("ok"):
-        print(f"Failed to fetch boards: {res.get('error')}", file=sys.stderr)
-        return 2
-    boards = res.get("boards") or []
-    if not boards:
-        print("No open boards found on this account.", file=sys.stderr)
-        return 2
-    for i, b in enumerate(boards, 1):
-        print(f"  {i}. {b['name']}  ({b['url']})")
-    pick_idx = input("\nWhich board? (number) ").strip()
-    try:
-        i = int(pick_idx) - 1
-        board = boards[i]
-    except (ValueError, IndexError):
-        print("Invalid selection.", file=sys.stderr)
-        return 2
-
-    lres = trello_boards(board_id=board["id"])
-    if not lres.get("ok"):
-        print(f"Failed to fetch lists: {lres.get('error')}", file=sys.stderr)
-        return 2
-    lists = lres.get("lists") or []
-    if not lists:
-        print("Board has no open lists.", file=sys.stderr)
-        return 2
-    print(f"\nLists on {board['name']}:")
-    for i, lst in enumerate(lists, 1):
-        print(f"  {i}. {lst['name']}")
-
-    list_map: dict[str, str] = {}
-    for role, label in (("todo", "to-do (new commitments land here)"),
-                        ("doing", "in-progress (optional, press Enter to skip)"),
-                        ("done", "done (completed commitments end up here)")):
-        while True:
-            choice = input(f"\nWhich list is your {role} list — {label}? "
-                           "(number, or blank to skip) ").strip()
-            if not choice:
-                if role in ("todo", "done"):
-                    print("  Required — please choose a list.")
-                    continue
-                break
-            try:
-                idx = int(choice) - 1
-                lst = lists[idx]
-                list_map[role] = lst["id"]
-                break
-            except (ValueError, IndexError):
-                print("  Invalid selection — try again.")
-
-    cfg = {
-        "board_id": board["id"],
-        "board_name": board["name"],
-        "list_map": list_map,
-        "configured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    _save_config(cfg)
-    print(f"\nSaved {CONFIG_FILE}.\nRun `bin/jarvis-trello.py sync` "
-          "to push your existing commitments to the board.")
-    return 0
+def _extract_jarvis_id(desc: str) -> str | None:
+    if not desc or JARVIS_MARKER not in desc:
+        return None
+    line = next((l for l in desc.splitlines() if JARVIS_MARKER in l), "")
+    after = line.split(JARVIS_MARKER, 1)[1].strip()
+    cid = after.split()[0] if after else ""
+    return cid if cid.startswith("cmt_") else None
 
 
-# ── main entrypoint (jarvis-improve hook) ─────────────────────────────
-def main() -> int:
-    """Tier-1 entrypoint. One bidirectional sync per pass when the board
-    is configured. Always exits 0."""
-    if _gate_check() is not None:
-        return 0
+# ── card ops ─────────────────────────────────────────────────────────
+def _create_card(list_id: str, name: str, desc: str = "",
+                 due: str | None = None) -> dict:
+    body: dict = {"idList": list_id, "name": name, "desc": desc, "pos": "bottom"}
+    if due:
+        body["due"] = due + "T17:00:00.000Z"  # pin to 5pm so Trello doesn't
+                                              # show it as overdue at midnight
+    return _api("POST", "/cards", body=body)
+
+
+def _move_card(card_id: str, list_id: str) -> dict:
+    return _api("PUT", f"/cards/{card_id}", body={"idList": list_id})
+
+
+def _close_card(card_id: str) -> dict:
+    return _api("PUT", f"/cards/{card_id}", body={"dueComplete": True})
+
+
+def trello_add(text: str, list_name: str = "todo",
+               due: str | None = None,
+               labels: list[str] | None = None,
+               commitment_id: str | None = None) -> dict:
+    """Create one card. Optional label binding to a commitment id so
+    later syncs can find it. Returns the created card."""
+    if not _gate_enabled():
+        return {"error": "JARVIS_TRELLO=0"}
+    if _credentials() is None:
+        return {"error": "TRELLO_API_KEY / TRELLO_TOKEN not set"}
     cfg = _load_config()
-    if not cfg.get("board_id"):
-        return 0
+    lists = cfg.get("lists") or {}
+    list_id = lists.get(list_name) or lists.get("todo")
+    if not list_id:
+        return {"error": "Trello not configured — run `jarvis-trello.py setup`"}
+    desc = ""
+    if commitment_id:
+        desc = f"{JARVIS_MARKER} {commitment_id}"
     try:
-        trello_sync()
-    except Exception as e:
-        _log(f"main sync: {e}")
-    return 0
+        card = _create_card(list_id, text, desc=desc, due=due)
+    except RuntimeError as e:
+        _emit("add", "failed", context={"error": str(e)})
+        return {"error": str(e)}
+    _emit("add", "success", context={"card_id": card.get("id")})
+    return {"ok": True, "card": card}
 
 
-# ── CLI ────────────────────────────────────────────────────────────────
-def _cli() -> int:
-    p = argparse.ArgumentParser(description="Jarvis Trello sync")
+def trello_move(card_id: str, list_name: str = "doing") -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_TRELLO=0"}
+    cfg = _load_config()
+    lists = cfg.get("lists") or {}
+    list_id = lists.get(list_name)
+    if not list_id:
+        return {"error": f"no list mapped for {list_name!r}"}
+    try:
+        card = _move_card(card_id, list_id)
+    except RuntimeError as e:
+        _emit("move", "failed", context={"error": str(e)})
+        return {"error": str(e)}
+    _emit("move", "success", context={"card_id": card_id, "list": list_name})
+    return {"ok": True, "card": card}
+
+
+def complete_card(card_id: str) -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_TRELLO=0"}
+    cfg = _load_config()
+    done_id = (cfg.get("lists") or {}).get("done")
+    try:
+        if done_id:
+            _move_card(card_id, done_id)
+        _close_card(card_id)
+    except RuntimeError as e:
+        _emit("complete", "failed", context={"card_id": card_id, "error": str(e)})
+        return {"error": str(e)}
+    _emit("complete", "success", context={"card_id": card_id})
+    return {"ok": True, "card_id": card_id}
+
+
+# ── sync ─────────────────────────────────────────────────────────────
+def _board_cards(board_id: str) -> list[dict]:
+    return _api("GET", f"/boards/{board_id}/cards",
+                params={"fields": "name,desc,due,dueComplete,idList,closed,shortUrl",
+                        "filter": "open"}) or []
+
+
+def trello_sync() -> dict:
+    """Bidirectional reconciliation:
+
+    1. For every open commitment with no Trello card, create one in
+       the 'todo' list and store the card id back on the commitment.
+    2. For every Trello card whose dueComplete=True or whose list is
+       the 'done' list, mark the matching commitment complete.
+    3. For every Trello card with a due date and no matching local
+       commitment (i.e. Watson made it directly in Trello), import as
+       a new commitment so list_commitments shows it.
+
+    Returns a summary dict: {created, completed, imported, errors}."""
+    started = time.time()
+    if not _gate_enabled():
+        return {"error": "JARVIS_TRELLO=0"}
+    if _credentials() is None:
+        return {"skipped": "TRELLO_API_KEY / TRELLO_TOKEN not set"}
+    cfg = _load_config()
+    board_id = cfg.get("board_id")
+    lists = cfg.get("lists") or {}
+    if not board_id or not lists.get("todo"):
+        return {"skipped": "Trello not configured — run `jarvis-trello.py setup`"}
+    cmt_mod = _load_commitments_module()
+    if cmt_mod is None:
+        return {"error": "jarvis-commitments not installed"}
+
+    summary = {"created": 0, "completed": 0, "imported": 0, "errors": []}
+
+    # 1. Push new commitments → cards.
+    items_data = cmt_mod._load_items()
+    items = items_data["items"]
+    todo_list = lists["todo"]
+    for c in items:
+        if c.get("status") != "open":
+            continue
+        if (c.get("synced_to") or {}).get("trello"):
+            continue
+        try:
+            card = _create_card(todo_list, c["text"],
+                                desc=_commitment_card_desc(c),
+                                due=c.get("due"))
+        except RuntimeError as e:
+            summary["errors"].append({"phase": "create", "id": c["id"],
+                                      "error": str(e)})
+            continue
+        c.setdefault("synced_to", {})["trello"] = card.get("id")
+        summary["created"] += 1
+    if summary["created"]:
+        cmt_mod._save_items(items_data)
+
+    # 2. + 3. Pull Trello state.
+    try:
+        cards = _board_cards(board_id)
+    except RuntimeError as e:
+        summary["errors"].append({"phase": "fetch", "error": str(e)})
+        _emit("sync", "failed", context=summary,
+              latency_ms=int((time.time() - started) * 1000))
+        return {"ok": False, "summary": summary}
+
+    done_list = lists.get("done")
+    by_id = {c.get("synced_to", {}).get("trello"): c for c in items
+             if c.get("synced_to", {}).get("trello")}
+
+    items_data = cmt_mod._load_items()  # reload after step 1
+    items = items_data["items"]
+    by_id = {c.get("synced_to", {}).get("trello"): c for c in items
+             if c.get("synced_to", {}).get("trello")}
+    by_jarvis_id = {c["id"]: c for c in items}
+
+    dirty = False
+    for card in cards:
+        cid = card.get("id")
+        in_done = (done_list and card.get("idList") == done_list)
+        is_complete = bool(card.get("dueComplete")) or in_done
+        # Map card → local commitment by stored id, falling back to the
+        # marker line in description.
+        local = by_id.get(cid)
+        if local is None:
+            jarvis_id = _extract_jarvis_id(card.get("desc") or "")
+            if jarvis_id and jarvis_id in by_jarvis_id:
+                local = by_jarvis_id[jarvis_id]
+                local.setdefault("synced_to", {})["trello"] = cid
+                dirty = True
+
+        if local is not None:
+            if is_complete and local.get("status") != "done":
+                local["status"] = "done"
+                local["completed"] = datetime.now().astimezone().isoformat(
+                    timespec="seconds")
+                summary["completed"] += 1
+                dirty = True
+            continue
+
+        # Untracked card with a due date — import.
+        if card.get("due"):
+            due_iso = (card["due"] or "")[:10]
+            new_rec = cmt_mod._build_record(
+                text=card.get("name") or "(untitled)",
+                owner="watson",
+                due=due_iso if due_iso else None,
+                priority="medium",
+                contact=None,
+                tags=["trello-import"],
+                source={"type": "trello", "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+                        "context": card.get("shortUrl") or ""},
+            )
+            new_rec["synced_to"] = {"trello": cid}
+            if is_complete:
+                new_rec["status"] = "done"
+                new_rec["completed"] = new_rec["created"]
+            items.append(new_rec)
+            summary["imported"] += 1
+            dirty = True
+
+    if dirty:
+        cmt_mod._save_items(items_data)
+
+    latency_ms = int((time.time() - started) * 1000)
+    _emit("sync", "success", context={k: v for k, v in summary.items() if k != "errors"},
+          latency_ms=latency_ms)
+    _log(f"sync created={summary['created']} completed={summary['completed']} "
+         f"imported={summary['imported']} errors={len(summary['errors'])}")
+    return {"ok": True, "summary": summary, "latency_ms": latency_ms}
+
+
+# ── CLI ──────────────────────────────────────────────────────────────
+def _cli(argv: list[str]) -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(description="Jarvis Trello mirror")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("--setup", help="interactive setup wizard")
-    pl = sub.add_parser("boards", help="list boards / lists / cards")
-    pl.add_argument("--board", default=None)
-    pl.add_argument("--cards", action="store_true",
-                    help="include cards on each list (with --board)")
-    pa = sub.add_parser("add", help="add a card")
-    pa.add_argument("name")
-    pa.add_argument("--list", default=None,
-                    help="list id, list name, or role (todo/doing/done)")
+
+    sub.add_parser("boards")
+
+    psetup = sub.add_parser("setup")
+    psetup.add_argument("--board-id", default=None)
+    psetup.add_argument("--board-name", default=None)
+
+    sub.add_parser("sync")
+
+    pa = sub.add_parser("add")
+    pa.add_argument("text")
+    pa.add_argument("--list", dest="list_name", default="todo",
+                    choices=("todo", "doing", "done"))
     pa.add_argument("--due", default=None)
-    pa.add_argument("--desc", default=None)
-    pm = sub.add_parser("move", help="move a card to another list")
+    pa.add_argument("--commitment-id", default=None)
+
+    pm = sub.add_parser("move")
     pm.add_argument("card_id")
-    pm.add_argument("--list", default=None)
-    sub.add_parser("sync", help="bidirectional sync with commitments store")
-    sub.add_parser("status", help="config + last sync info")
+    pm.add_argument("list_name", choices=("todo", "doing", "done"))
 
-    # argparse doesn't allow --setup as a subcommand cleanly — fall back
-    # to a manual flag parse.
-    if len(sys.argv) >= 2 and sys.argv[1] == "--setup":
-        return setup()
+    pc = sub.add_parser("complete")
+    pc.add_argument("card_id")
 
-    args = p.parse_args()
-
+    args = p.parse_args(argv)
     if args.cmd == "boards":
-        print(json.dumps(trello_boards(board_id=args.board,
-                                        include_cards=args.cards),
+        print(json.dumps(trello_boards(), ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "setup":
+        print(json.dumps(trello_setup(board_id=args.board_id,
+                                      board_name=args.board_name),
                          ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "add":
-        # Heuristic: does --list look like an id? Trello ids are 24 hex
-        # chars. Otherwise treat as name/role.
-        list_arg = args.list or ""
-        if len(list_arg) == 24 and all(c in "0123456789abcdef" for c in list_arg):
-            print(json.dumps(trello_add(args.name, list_id=list_arg,
-                                         due=args.due, desc=args.desc),
-                             ensure_ascii=False, indent=2))
-        else:
-            print(json.dumps(trello_add(args.name, list_name=list_arg or None,
-                                         due=args.due, desc=args.desc),
-                             ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "move":
-        list_arg = args.list or ""
-        if len(list_arg) == 24 and all(c in "0123456789abcdef" for c in list_arg):
-            print(json.dumps(trello_move(args.card_id, list_id=list_arg),
-                             ensure_ascii=False, indent=2))
-        else:
-            print(json.dumps(trello_move(args.card_id, list_name=list_arg or None),
-                             ensure_ascii=False, indent=2))
         return 0
     if args.cmd == "sync":
         print(json.dumps(trello_sync(), ensure_ascii=False, indent=2))
         return 0
-    if args.cmd == "status":
-        cfg = _load_config()
-        print(json.dumps({
-            "ok": True,
-            "configured": bool(cfg.get("board_id")),
-            "board_name": cfg.get("board_name"),
-            "list_map_roles": list((cfg.get("list_map") or {}).keys()),
-            "config_file": str(CONFIG_FILE),
-            "enabled": _gate_check() is None,
-        }, ensure_ascii=False, indent=2))
+    if args.cmd == "add":
+        print(json.dumps(trello_add(args.text, list_name=args.list_name,
+                                    due=args.due,
+                                    commitment_id=args.commitment_id),
+                         ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "move":
+        print(json.dumps(trello_move(args.card_id, args.list_name),
+                         ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "complete":
+        print(json.dumps(complete_card(args.card_id),
+                         ensure_ascii=False, indent=2))
         return 0
     return 2
 
 
 if __name__ == "__main__":
-    sys.exit(_cli() if len(sys.argv) > 1 else main())
+    try:
+        sys.exit(_cli(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

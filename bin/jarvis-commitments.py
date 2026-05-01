@@ -1,107 +1,114 @@
 #!/usr/bin/env python3
-"""Commitment tracker — Watson's promises and to-dos as a queryable system.
+"""Commitment tracker — Jarvis owns Watson's "I'll do X" promises.
 
-Every "I'll send the term sheet to Corbin tomorrow", every "I owe Karina
-a reply by Friday", every "remind me to call the lawyer Monday" lands
-here. The module is the canonical store; jarvis-trello and jarvis-apple
-are lossy mirrors that sync into Trello cards and Apple Reminders.
+Watson tells Jarvis (or someone over email/iMessage) "I'll send the
+proposal Friday" and the commitment is logged, surfaced when due, and
+synced to Trello + Apple Reminders so it shows up wherever Watson looks.
+This module is the canonical store. Trello and Apple Reminders are
+mirrors that sync back; if they disagree with items.json, items.json
+wins.
 
-Data model — single record per commitment:
+Storage:
+    ~/.jarvis/commitments/items.json       canonical commitments
+    ~/.jarvis/commitments/extracted.jsonl  audit log of every Haiku
+                                           extraction (kept/rejected)
+    ~/.jarvis/commitments/sync_state.json  per-system last-sync ts
+    ~/.jarvis/logs/commitments.log         diagnostic log
 
+Item shape (one entry in items.json["items"]):
     {
-      "id":              "c_a1b2c3d4",
-      "text":            "send the term sheet to Corbin",
-      "owner":           "watson" | "other",
-      "source":          "manual" | "claude" | "trello" | "reminders"
-                         | "imessage" | "email" | "telegram",
-      "due":             "2026-05-02"          (ISO date, optional)
-      "priority":        "high" | "normal" | "low",
-      "status":          "open" | "done" | "overdue" | "cancelled",
-      "related_contact": "Corbin Smith"        (optional)
-      "tags":            ["forge", "fundraising"],
-      "synced_to":       {"trello_card_id": "...", "reminders_id": "..."},
-      "created_at":      "2026-04-28T20:00:00Z",
-      "completed_at":    null,
-      "updated_at":      "2026-04-28T20:00:00Z",
-      "extracted_from":  "...short snippet of source text..." (optional)
+      "id":             "cmt_<12-hex>",
+      "text":           "Send Corbin the proposal",
+      "owner":          "watson" | contact-name,
+      "source":         {"type": "conversation"|"email"|"imessage"|"manual",
+                         "ts": "...", "context": "discussing Forge pricing"},
+      "due":            "2026-05-01" | null,
+      "priority":       "high" | "medium" | "low",
+      "status":         "open" | "done" | "overdue" | "cancelled",
+      "related_contact": "Corbin" | null,
+      "tags":           [...],
+      "synced_to":      {"trello": "<card_id>", "apple_reminders": "<id>"},
+      "created":        ISO,
+      "completed":      ISO | null,
+      "notes":          ""
     }
 
-Public functions (all return JSON-serializable dicts):
+Public functions (callable from jarvis-think.py tool handlers):
 
-    extract_commitments(text, source="claude", related_contact=None)
-        Haiku-extract commitments from a block of text. Inserts each
-        unique one as a new record. Returns the list of new IDs. Falls
-        through silently when ANTHROPIC_API_KEY is missing.
+    extract_commitments(text, source_type="conversation",
+                        context=None, dry_run=False) -> dict
+        Haiku-extracts candidate commitments from a chunk of text. Logs
+        every candidate to extracted.jsonl. Saves immediately when
+        dry_run=False (default for cron / non-interactive callers); the
+        think-loop hook saves only on implicit confirmation.
 
-    add_commitment(text, owner="watson", due=None, priority="normal",
-                   related_contact=None, tags=None, source="manual")
-        Add one explicit commitment. Accepts natural-language `due`
-        ("tomorrow", "Friday", "in 2 weeks") or an ISO date.
+    add_commitment(text, due=None, priority="medium",
+                   contact=None, tags=None, owner="watson",
+                   source_type="manual") -> dict
+        Manual add. Parses freeform date strings via _parse_due.
 
-    list_commitments(status=None, owner=None, related_contact=None,
-                     days_ahead=None, limit=50)
-        Filterable listing. days_ahead=0 → due today; days_ahead=7 →
-        due within the next week; None → no due filter.
+    list_commitments(status="open", owner=None, contact=None,
+                     days_ahead=7, limit=50) -> dict
+        Sorted by due date, overdue first. status="all" returns every
+        bucket.
 
-    complete_commitment(name_or_id)
-        Fuzzy match by ID, or by substring of text. Marks done +
-        completed_at, ready for downstream sync to mirror the change.
+    complete_commitment(id_or_text) -> dict
+        Fuzzy match on text if id not given. Triggers sync to Trello
+        and Apple Reminders so the cards/reminders close too.
 
-    commitment_report()
-        Briefing-shaped summary: overdue, due today, due this week,
-        recently completed. Voice-ready prose plus structured groups.
+    commitment_report(days=7) -> dict
+        Snapshot for the morning briefing — overdue, due today, due
+        this week, recently completed, items others owe Watson.
 
-CLI mirror — see `jarvis-commitments --help`.
+    briefing_section() -> str
+        Markdown block for jarvis-briefing.
 
-Files:
-    ~/.jarvis/commitments/items.json           canonical store
-    ~/.jarvis/commitments/extracted.jsonl      audit trail (every Haiku
-                                               extraction call's raw output)
-    ~/.jarvis/commitments/sync_state.json      shared by trello/apple syncers
-    ~/.jarvis/logs/commitments.log             diagnostic log
+    context_hint() -> str
+        One-liner for jarvis-context's system-prompt block.
 
-Gate: JARVIS_COMMITMENTS=1 (default 1).
+CLI:
+    bin/jarvis-commitments.py extract "I'll send Corbin the proposal"
+    bin/jarvis-commitments.py add "Email mom" --due tomorrow
+    bin/jarvis-commitments.py list [--status open|done|all]
+    bin/jarvis-commitments.py complete cmt_abc123
+    bin/jarvis-commitments.py report
+    bin/jarvis-commitments.py sync             # trello + apple reminders
+    bin/jarvis-commitments.py briefing-section
+
+Gate: JARVIS_COMMITMENTS=1 (default).
 """
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
 import os
 import re
 import sys
 import time
-import unicodedata
 import urllib.error
 import urllib.request
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
-BIN_DIR = ASSISTANT_DIR / "bin"
-LIB_DIR = ASSISTANT_DIR / "lib"
 COMMIT_DIR = ASSISTANT_DIR / "commitments"
 ITEMS_FILE = COMMIT_DIR / "items.json"
-EXTRACTED_FILE = COMMIT_DIR / "extracted.jsonl"
+EXTRACTED_LOG = COMMIT_DIR / "extracted.jsonl"
 SYNC_STATE_FILE = COMMIT_DIR / "sync_state.json"
 LOG_DIR = ASSISTANT_DIR / "logs"
 COMMIT_LOG = LOG_DIR / "commitments.log"
+BIN_DIR = Path(__file__).resolve().parent
 
-EXTRACT_MODEL = os.environ.get(
-    "JARVIS_COMMIT_MODEL", "claude-haiku-4-5-20251001")
-
-VALID_OWNERS = {"watson", "other"}
-VALID_PRIORITIES = {"high", "normal", "low"}
-VALID_STATUSES = {"open", "done", "overdue", "cancelled"}
-VALID_SOURCES = {
-    "manual", "claude", "trello", "reminders",
-    "imessage", "email", "telegram",
-}
+EXTRACTION_MODEL = os.environ.get("JARVIS_COMMITMENTS_MODEL",
+                                  "claude-haiku-4-5-20251001")
+EXTRACT_MAX_TEXT = int(os.environ.get("JARVIS_COMMITMENTS_MAX_TEXT", "8000"))
+PRIORITY_VALUES = {"high", "medium", "low"}
+STATUS_VALUES = {"open", "done", "overdue", "cancelled"}
 
 
-# ── logging + gate ────────────────────────────────────────────────────
+# ── logging / IO ─────────────────────────────────────────────────────
 def _log(msg: str) -> None:
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -112,241 +119,223 @@ def _log(msg: str) -> None:
         pass
 
 
-def _gate_check() -> dict | None:
-    if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
-        return {"error": "commitment tracker disabled (JARVIS_COMMITMENTS=0)"}
-    return None
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-# ── module loaders ────────────────────────────────────────────────────
-def _load_module(mod_id: str, filename: str, search_dirs: list[Path]) -> Any:
-    for d in search_dirs:
-        src = d / filename
-        if src.exists():
-            try:
-                spec = importlib.util.spec_from_file_location(mod_id, src)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                return mod
-            except Exception as e:
-                _log(f"load {filename} failed: {e}")
-                return None
-    return None
+def _gate_enabled() -> bool:
+    return os.environ.get("JARVIS_COMMITMENTS", "1") not in ("0", "false", "no", "off")
 
 
-_BIN_SEARCH = [BIN_DIR, Path(__file__).parent]
-_LIB_SEARCH = [LIB_DIR, Path(__file__).parent.parent / "lib"]
-
-_cache: dict[str, Any] = {}
-
-
-def _primitive():
-    if "primitive" not in _cache:
-        _cache["primitive"] = _load_module("primitive", "primitive.py", _LIB_SEARCH)
-    return _cache["primitive"]
-
-
-def _emit(action: str, status: str, **ctx) -> None:
-    p = _primitive()
-    if p is None:
-        return
+def _read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
     try:
-        p.emit(cap="commitments", action=action, status=status, context=ctx)
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        pass
+        return default
 
 
-# ── store I/O (atomic) ────────────────────────────────────────────────
-def _load_items() -> list[dict]:
-    if not ITEMS_FILE.exists():
-        return []
+def _write_json(path: Path, data: Any) -> bool:
     try:
-        data = json.loads(ITEMS_FILE.read_text(encoding="utf-8"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(path)
+        return True
     except Exception as e:
-        _log(f"items read failed: {e}")
-        return []
-    if not isinstance(data, list):
-        return []
+        _log(f"write {path.name} failed: {e}")
+        return False
+
+
+def _load_items() -> dict:
+    data = _read_json(ITEMS_FILE, {"items": []})
+    if not isinstance(data, dict) or "items" not in data:
+        data = {"items": []}
     return data
 
 
-def _save_items(items: list[dict]) -> None:
-    COMMIT_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = ITEMS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, indent=2, ensure_ascii=False),
-                   encoding="utf-8")
-    os.replace(tmp, ITEMS_FILE)
+def _save_items(data: dict) -> None:
+    _write_json(ITEMS_FILE, data)
 
 
 def _append_extracted(rec: dict) -> None:
-    COMMIT_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        with EXTRACTED_FILE.open("a", encoding="utf-8") as f:
+        EXTRACTED_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with EXTRACTED_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception as e:
-        _log(f"extracted append failed: {e}")
-
-
-def _load_sync_state() -> dict:
-    if not SYNC_STATE_FILE.exists():
-        return {}
-    try:
-        return json.loads(SYNC_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {}
+        pass
 
 
-def _save_sync_state(state: dict) -> None:
-    COMMIT_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SYNC_STATE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False),
-                   encoding="utf-8")
-    os.replace(tmp, SYNC_STATE_FILE)
+# ── lazy siblings ─────────────────────────────────────────────────────
+_cache: dict[str, Any] = {}
 
 
-# ── canonical helpers ─────────────────────────────────────────────────
-_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+def _load_sibling(name: str) -> Any:
+    """Load bin/<name> as a python module. Cached."""
+    if name in _cache:
+        return _cache[name]
+    src = BIN_DIR / name
+    if not src.exists():
+        src = ASSISTANT_DIR / "bin" / name
+    if not src.exists():
+        _cache[name] = None
+        return None
+    try:
+        mod_name = name.replace("-", "_").replace(".py", "")
+        spec = importlib.util.spec_from_file_location(mod_name, src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _cache[name] = mod
+        return mod
+    except Exception as e:
+        _log(f"load {name} failed: {e}")
+        _cache[name] = None
+        return None
 
 
-def _canonical(s: str) -> str:
-    if not s:
-        return ""
-    norm = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    norm = _PUNCT_RE.sub(" ", norm.lower()).strip()
-    return " ".join(norm.split())
+def _emit(action: str, status: str, context: dict | None = None,
+          latency_ms: int | None = None) -> None:
+    """Push to the outcome ledger if available — best effort."""
+    try:
+        sys.path.insert(0, str(ASSISTANT_DIR / "lib"))
+        sys.path.insert(0, str(BIN_DIR.parent / "lib"))
+        from outcome_ledger import emit  # type: ignore
+        emit("commitments", action, status, context=context, latency_ms=latency_ms)
+    except Exception:
+        pass
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _new_id() -> str:
-    return "c_" + uuid.uuid4().hex[:8]
-
-
-# ── due-date parser ───────────────────────────────────────────────────
-_WEEKDAYS = {
+# ── date parsing ──────────────────────────────────────────────────────
+_REL_DAYS = {
+    "today": 0, "tonight": 0,
+    "tomorrow": 1, "tmrw": 1,
+    "next week": 7,
+    "next monday": None, "next tuesday": None, "next wednesday": None,
+    "next thursday": None, "next friday": None, "next saturday": None,
+    "next sunday": None,
+    "monday": None, "tuesday": None, "wednesday": None, "thursday": None,
+    "friday": None, "saturday": None, "sunday": None,
+}
+_WEEKDAY_INDEX = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
     "friday": 4, "saturday": 5, "sunday": 6,
-    "mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3, "thurs": 3,
-    "fri": 4, "sat": 5, "sun": 6,
 }
+_REL_RE = re.compile(r"\bin\s+(\d+)\s*(day|days|week|weeks|month|months)\b", re.I)
+_EOW_RE = re.compile(r"\b(end of (this )?week|by friday|eow)\b", re.I)
+_EOD_RE = re.compile(r"\b(end of (the )?day|eod|by tonight)\b", re.I)
 
 
-def _parse_due(text: str | None,
-               base: date | None = None) -> str | None:
-    """Normalize a free-form date phrase into ISO 'YYYY-MM-DD'. Returns
-    None when the input is empty or unparseable. `base` defaults to
-    today."""
-    if not text or not str(text).strip():
+def _parse_due(text: str | None) -> str | None:
+    """Best-effort natural language → YYYY-MM-DD. Returns None on failure
+    so the caller can leave `due` null rather than guess."""
+    if not text:
         return None
-    raw = str(text).strip()
-    base = base or date.today()
+    raw = str(text).strip().lower()
+    if not raw:
+        return None
+    today = datetime.now().astimezone().date()
 
-    # ISO date already?
+    # ISO YYYY-MM-DD wins outright.
     try:
-        return datetime.fromisoformat(raw).date().isoformat()
-    except ValueError:
-        pass
-    # ISO datetime?
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
+        return date.fromisoformat(raw[:10]).isoformat()
     except ValueError:
         pass
 
-    s = raw.lower().strip()
-    if s in ("today", "tonight"):
-        return base.isoformat()
-    if s == "tomorrow":
-        return (base + timedelta(days=1)).isoformat()
-    if s in ("yesterday",):
-        return (base - timedelta(days=1)).isoformat()
-    if s in ("eow", "end of week", "end-of-week"):
-        days_to_fri = (4 - base.weekday()) % 7 or 7
-        return (base + timedelta(days=days_to_fri)).isoformat()
-    if s in ("eom", "end of month"):
-        # First of next month minus one day
-        if base.month == 12:
-            next_first = date(base.year + 1, 1, 1)
-        else:
-            next_first = date(base.year, base.month + 1, 1)
-        return (next_first - timedelta(days=1)).isoformat()
+    if raw in _REL_DAYS and _REL_DAYS[raw] is not None:
+        return (today + timedelta(days=_REL_DAYS[raw])).isoformat()
 
-    # "next monday", "this friday", "monday"
-    m = re.match(r"(?:next|this)?\s*(monday|tuesday|wednesday|thursday|"
-                 r"friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|"
-                 r"fri|sat|sun)\b", s)
-    if m:
-        target = _WEEKDAYS[m.group(1)]
-        delta = (target - base.weekday()) % 7
-        if delta == 0:
-            delta = 7  # "monday" said on a monday means next monday
-        if s.startswith("next"):
-            # "next monday" → at least a week out
-            if delta < 7:
-                delta += 7
-        return (base + timedelta(days=delta)).isoformat()
+    if _EOD_RE.search(raw):
+        return today.isoformat()
+    if _EOW_RE.search(raw):
+        days = (4 - today.weekday()) % 7  # next Friday (or today if Friday)
+        return (today + timedelta(days=days or 7 if today.weekday() > 4 else days)).isoformat()
 
-    # "in N days|weeks|months"
-    m = re.match(r"in\s+(\d+)\s*(day|days|week|weeks|month|months)", s)
+    m = _REL_RE.search(raw)
     if m:
         n = int(m.group(1))
-        unit = m.group(2)
-        if "week" in unit:
-            return (base + timedelta(weeks=n)).isoformat()
-        if "month" in unit:
-            # Approximate: 30-day months
-            return (base + timedelta(days=30 * n)).isoformat()
-        return (base + timedelta(days=n)).isoformat()
+        unit = m.group(2).lower()
+        if unit.startswith("day"):
+            return (today + timedelta(days=n)).isoformat()
+        if unit.startswith("week"):
+            return (today + timedelta(days=n * 7)).isoformat()
+        if unit.startswith("month"):
+            return (today + timedelta(days=n * 30)).isoformat()
 
-    # "N days|weeks from now"
-    m = re.match(r"(\d+)\s+(day|days|week|weeks|month|months)\s+from\s+now", s)
-    if m:
-        n = int(m.group(1))
-        unit = m.group(2)
-        if "week" in unit:
-            return (base + timedelta(weeks=n)).isoformat()
-        if "month" in unit:
-            return (base + timedelta(days=30 * n)).isoformat()
-        return (base + timedelta(days=n)).isoformat()
-
-    # "by Friday" / "by next week"
-    m = re.match(r"by\s+(.+)$", s)
-    if m:
-        return _parse_due(m.group(1), base=base)
+    # bare weekday name → next occurrence (Monday → next Monday if today
+    # is Monday, else this week's Monday).
+    for key, idx in _WEEKDAY_INDEX.items():
+        if raw == key or raw == f"next {key}" or raw == f"this {key}":
+            delta = (idx - today.weekday()) % 7
+            if raw.startswith("next ") and delta == 0:
+                delta = 7
+            if delta == 0 and not raw.startswith("this "):
+                delta = 7
+            return (today + timedelta(days=delta)).isoformat()
 
     return None
 
 
-# ── overdue refresh ───────────────────────────────────────────────────
-def _refresh_overdue(items: list[dict]) -> bool:
-    """Promote any open commitment past its due date into status=overdue.
-    Idempotent. Returns True iff anything changed (so caller knows to
-    save). Cancelled and done commitments are never demoted."""
-    today = date.today().isoformat()
-    dirty = False
-    for rec in items:
-        if rec.get("status") != "open":
-            continue
-        due = rec.get("due")
-        if not due:
-            continue
-        if due < today:
-            rec["status"] = "overdue"
-            rec["updated_at"] = _now_iso()
-            dirty = True
-    return dirty
+def _is_overdue(due: str | None, status: str) -> bool:
+    if status not in ("open",):
+        return False
+    if not due:
+        return False
+    try:
+        return date.fromisoformat(due) < datetime.now().astimezone().date()
+    except ValueError:
+        return False
 
 
-# ── Anthropic call (slim, blocking — used by extract_commitments) ─────
-def _anthropic_call(api_key: str, model: str, system: str,
-                    user_text: str, max_tokens: int = 800,
-                    timeout: float = 25.0) -> str:
+# ── extraction (Haiku) ────────────────────────────────────────────────
+EXTRACT_SYSTEM = """You extract commitments from text. A commitment is a
+specific promise to do something — "I'll send the proposal", "let me
+know by Friday", "can you forward me the deck". You ignore vague
+intentions ("we should chat sometime"), questions, and statements about
+the past.
+
+Return ONLY JSON, no prose, no fences:
+
+{"commitments": [
+  {
+    "text": "<commitment as a short imperative phrase>",
+    "owner": "watson" | "<other-person-name>",
+    "due": "<YYYY-MM-DD or null>",
+    "priority": "high" | "medium" | "low",
+    "related_contact": "<name or null>",
+    "tags": ["<tag>", ...]
+  }
+]}
+
+Rules:
+- "I'll", "I will", "let me" → owner = "watson"
+- "Can you", "could you" (asked of Watson) → owner = "watson"
+- "<other> will", "<other> said they'd" → owner = "<that person>"
+- Resolve relative dates against {today_iso} (today's date).
+- priority: high if a deadline word appears (urgent, asap, today, by Friday);
+  low if soft ("eventually", "at some point"); else medium.
+- related_contact: the person the commitment touches. Often the same
+  as `owner` for non-Watson commitments; for Watson commitments it's
+  who he's promising it TO.
+- tags: 0-3 short kebab-case keywords drawn from the topic (e.g.
+  ["proposal", "forge"]) — leave [] if nothing obvious.
+- If the text contains no real commitments, return {"commitments": []}."""
+
+
+def _haiku_extract(api_key: str, text: str, today_iso: str,
+                   timeout: float = 15.0) -> list[dict]:
+    """Call Haiku, return parsed commitment dicts. Empty list on any
+    parse failure so the hook can no-op safely."""
+    if not api_key:
+        return []
+    sys_prompt = EXTRACT_SYSTEM.replace("{today_iso}", today_iso)
     payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": user_text}],
+        "model": EXTRACTION_MODEL,
+        "max_tokens": 600,
+        "system": sys_prompt,
+        "messages": [{"role": "user", "content": text[:EXTRACT_MAX_TEXT]}],
     }).encode()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -357,765 +346,638 @@ def _anthropic_call(api_key: str, model: str, system: str,
             "content-type": "application/json",
         },
     )
-    last_err: Exception | None = None
-    for attempt in range(3):
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+        _log(f"haiku error: {e}")
+        return []
+    blocks = data.get("content") or []
+    raw_text = "\n".join(b.get("text", "") for b in blocks
+                         if b.get("type") == "text").strip()
+    if not raw_text:
+        return []
+    # Tolerate code fences just in case.
+    if raw_text.startswith("```"):
+        raw_text = re.sub(r"^```[a-zA-Z]*\n", "", raw_text)
+        raw_text = re.sub(r"\n```\s*$", "", raw_text)
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        # Try to find a bare JSON object inside the text.
+        m = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if not m:
+            return []
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read())
-            blocks = data.get("content") or []
-            return "\n".join(b.get("text", "")
-                             for b in blocks if b.get("type") == "text").strip()
-        except urllib.error.HTTPError as e:
-            last_err = e
-            if e.code in (429, 500, 502, 503, 504) and attempt < 2:
-                time.sleep(1 + attempt * 1.5)
-                continue
-            raise RuntimeError(f"API error {e.code}: {e}") from e
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            last_err = e
-            if attempt < 2:
-                time.sleep(1 + attempt * 1.5)
-                continue
-            raise RuntimeError(f"network: {e}") from e
-    raise RuntimeError(f"unexpected: {last_err}")
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+    candidates = parsed.get("commitments")
+    return candidates if isinstance(candidates, list) else []
 
 
-# ── action-language pre-filter ────────────────────────────────────────
-_ACTION_TOKENS = re.compile(
-    r"\b(i'?ll|i will|i'?ve|i have|let me|i'?m going to|i'?m gonna|"
-    r"i need to|i should|i must|i can|i'?ll get|by\s+(?:tomorrow|today|monday|"
-    r"tuesday|wednesday|thursday|friday|saturday|sunday|next|this)|"
-    r"remind me|owe(?:d)?|follow up|send|call|email|text|reply|reach out|"
-    r"deadline|due\s+(?:today|tomorrow|monday|tuesday|wednesday|thursday|"
-    r"friday|saturday|sunday)|tonight|first thing|by eod|asap)\b",
-    re.I,
-)
+def extract_commitments(text: str, source_type: str = "conversation",
+                        context: str | None = None,
+                        dry_run: bool = False) -> dict:
+    """Extract commitments from `text` via Haiku.
 
-
-def has_action_language(text: str) -> bool:
-    """True iff `text` looks like it might contain a commitment. Keeps
-    Watson from spending Haiku tokens on chit-chat. Generous on
-    purpose — false positives waste a few tokens, false negatives drop
-    real commitments."""
-    if not text or not text.strip():
-        return False
-    return bool(_ACTION_TOKENS.search(text))
-
-
-# ── extract_commitments (Haiku) ───────────────────────────────────────
-EXTRACT_SYSTEM = """You extract commitments from a block of text Watson \
-either said, wrote, or just heard.
-
-A commitment is a concrete action that someone has agreed to do. \
-"I'll send the term sheet to Corbin tomorrow" is one. "Karina said \
-she'll get back to me Friday" is another. \
-General intent ("I should focus more"), opinions, and questions are NOT.
-
-Return ONE valid JSON object — no prose, no fences. Schema:
-
-{
-  "commitments": [
-    {
-      "text": "concrete imperative — 'send Corbin the term sheet'",
-      "owner": "watson" | "other",
-      "due": "YYYY-MM-DD or natural phrase ('tomorrow', 'Friday', 'next week') or null",
-      "priority": "high" | "normal" | "low",
-      "related_contact": "name if a specific person is involved, else null",
-      "tags": ["short", "lowercase", "tags"]
-    }
-  ]
-}
-
-Rules:
-- Empty list is fine — better than fabrication.
-- owner=watson when Watson agreed to the action; owner=other when \
-someone else owes Watson the action.
-- Be concrete. Drop hedges ("maybe I'll"), keep firm verbs ("send", \
-"call", "review").
-- priority=high when text uses 'urgent', 'asap', 'critical', 'today'; \
-priority=low for casual asides; otherwise normal.
-- Dedupe — never return two commitments for the same action.
-"""
-
-
-def extract_commitments(text: str, source: str = "claude",
-                        related_contact: str | None = None) -> dict:
-    """Haiku-extract commitments from `text` and insert any new ones.
-
-    `source` flags the origin in each new record. `related_contact` is
-    used as a default when the model didn't surface one.
-
-    Returns {ok, added: [ids], skipped_duplicates: int, raw}."""
-    started = time.monotonic()
-    gate = _gate_check()
-    if gate:
-        _emit("extract", "skipped", reason="gate")
-        return gate
+    `dry_run=True` returns candidates without persisting — used by the
+    think.py hook so the orchestrator can choose to confirm before
+    saving. `dry_run=False` saves anything Haiku surfaced (cron / batch
+    paths)."""
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
     text = (text or "").strip()
-    if not text:
-        return {"ok": True, "added": [], "skipped_duplicates": 0,
-                "reason": "empty input"}
-    if not has_action_language(text):
-        return {"ok": True, "added": [], "skipped_duplicates": 0,
-                "reason": "no action language"}
+    if not text or len(text) < 10:
+        return {"ok": True, "candidates": [], "saved": []}
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        _emit("extract", "skipped", reason="no_api_key")
-        return {"ok": True, "added": [], "skipped_duplicates": 0,
-                "reason": "ANTHROPIC_API_KEY not set"}
+        return {"error": "ANTHROPIC_API_KEY not set"}
 
-    snippet = text[:4000]
-    user_text = (
-        "Extract commitments from this passage. "
-        + (f"Default related_contact: {related_contact}\n\n"
-           if related_contact else "")
-        + f"Passage:\n{snippet}"
-    )
-    try:
-        raw = _anthropic_call(api_key, EXTRACT_MODEL, EXTRACT_SYSTEM,
-                              user_text, max_tokens=900, timeout=25)
-    except Exception as e:
-        _emit("extract", "failed", reason=f"api: {e}")
-        return {"error": f"extract call failed: {e}"}
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
-        return {"error": "model did not return JSON", "raw": raw[:300]}
-    try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        return {"error": f"json parse: {e}", "raw": raw[:300]}
+    started = time.time()
+    today_iso = datetime.now().astimezone().date().isoformat()
+    candidates = _haiku_extract(api_key, text, today_iso)
+    latency_ms = int((time.time() - started) * 1000)
 
-    commitments = parsed.get("commitments") or []
-    if not isinstance(commitments, list):
-        commitments = []
-
-    _append_extracted({
+    audit = {
         "ts": _now_iso(),
-        "source": source,
-        "snippet": snippet[:500],
-        "raw_response": raw[:2000],
-        "extracted_count": len(commitments),
-    })
+        "source_type": source_type,
+        "context": (context or "")[:500],
+        "input_hash": uuid.uuid5(uuid.NAMESPACE_OID, text).hex,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "saved": False,
+        "dry_run": dry_run,
+        "latency_ms": latency_ms,
+    }
 
-    items = _load_items()
-    existing_canon = {_canonical(rec.get("text") or "") for rec in items
-                      if rec.get("status") in ("open", "overdue")}
-    added: list[str] = []
-    skipped = 0
-    for c in commitments:
-        if not isinstance(c, dict):
-            continue
-        ctext = (c.get("text") or "").strip()
-        if not ctext:
-            continue
-        canon = _canonical(ctext)
-        if canon in existing_canon:
-            skipped += 1
-            continue
-        existing_canon.add(canon)
-        owner = c.get("owner") or "watson"
-        if owner not in VALID_OWNERS:
-            owner = "watson"
-        priority = c.get("priority") or "normal"
-        if priority not in VALID_PRIORITIES:
-            priority = "normal"
-        due = _parse_due(c.get("due"))
-        rec = _new_record(
-            text=ctext, owner=owner, source=source,
-            due=due, priority=priority,
-            related_contact=c.get("related_contact") or related_contact,
-            tags=[t for t in (c.get("tags") or []) if isinstance(t, str)],
-            extracted_from=snippet[:300],
-        )
-        items.append(rec)
-        added.append(rec["id"])
+    saved: list[dict] = []
+    if not dry_run and candidates:
+        items = _load_items()
+        for c in candidates:
+            rec = _build_record(
+                text=c.get("text") or "",
+                owner=(c.get("owner") or "watson"),
+                due=_parse_due(c.get("due")) or c.get("due"),
+                priority=(c.get("priority") or "medium"),
+                contact=c.get("related_contact"),
+                tags=c.get("tags") or [],
+                source={"type": source_type, "ts": _now_iso(),
+                        "context": context or ""},
+            )
+            if not rec["text"]:
+                continue
+            # Drop near-duplicates (same text, open status).
+            if any(_text_similar(rec["text"], x["text"])
+                   and x["status"] == "open" for x in items["items"]):
+                continue
+            items["items"].append(rec)
+            saved.append(rec)
+        if saved:
+            _save_items(items)
+            audit["saved"] = True
+        _emit("extract", "success",
+              context={"source_type": source_type, "saved": len(saved),
+                       "candidates": len(candidates)},
+              latency_ms=latency_ms)
+    elif dry_run:
+        _emit("extract", "skipped",
+              context={"source_type": source_type, "candidates": len(candidates),
+                       "dry_run": True},
+              latency_ms=latency_ms)
+    else:
+        _emit("extract", "success",
+              context={"source_type": source_type, "candidates": 0},
+              latency_ms=latency_ms)
 
-    if added:
-        _save_items(items)
+    _append_extracted(audit)
+    return {"ok": True, "candidates": candidates, "saved": saved,
+            "latency_ms": latency_ms}
 
-    elapsed = int((time.monotonic() - started) * 1000)
-    _emit("extract", "success", source=source, added=len(added),
-          skipped=skipped, latency_ms=elapsed)
-    _log(f"extract source={source} added={len(added)} skipped={skipped} "
-         f"({elapsed}ms)")
+
+# ── helpers ───────────────────────────────────────────────────────────
+def _build_record(text: str, owner: str = "watson", due: str | None = None,
+                  priority: str = "medium", contact: str | None = None,
+                  tags: list[str] | None = None,
+                  source: dict | None = None) -> dict:
     return {
-        "ok": True,
-        "added": added,
-        "skipped_duplicates": skipped,
-        "raw_count": len(commitments),
-    }
-
-
-# ── add_commitment (manual entry) ─────────────────────────────────────
-def _new_record(*, text: str, owner: str = "watson", source: str = "manual",
-                due: str | None = None, priority: str = "normal",
-                related_contact: str | None = None,
-                tags: list[str] | None = None,
-                extracted_from: str | None = None) -> dict:
-    rec = {
-        "id": _new_id(),
-        "text": text.strip(),
-        "owner": owner if owner in VALID_OWNERS else "watson",
-        "source": source if source in VALID_SOURCES else "manual",
-        "due": due,
-        "priority": priority if priority in VALID_PRIORITIES else "normal",
+        "id": "cmt_" + uuid.uuid4().hex[:12],
+        "text": (text or "").strip(),
+        "owner": (owner or "watson").strip() or "watson",
+        "source": source or {"type": "manual", "ts": _now_iso(), "context": ""},
+        "due": due if (due and re.match(r"^\d{4}-\d{2}-\d{2}$", str(due))) else None,
+        "priority": priority if priority in PRIORITY_VALUES else "medium",
         "status": "open",
-        "related_contact": (related_contact or "").strip() or None,
-        "tags": [t.strip().lower() for t in (tags or []) if t and t.strip()][:8],
+        "related_contact": (contact or "").strip() or None,
+        "tags": [str(t).strip() for t in (tags or []) if t][:8],
         "synced_to": {},
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-        "completed_at": None,
+        "created": _now_iso(),
+        "completed": None,
+        "notes": "",
     }
-    if extracted_from:
-        rec["extracted_from"] = extracted_from
-    return rec
 
 
-def add_commitment(text: str, owner: str = "watson", due: str | None = None,
-                   priority: str = "normal",
-                   related_contact: str | None = None,
+_NORMALIZE_RE = re.compile(r"[^a-z0-9 ]+")
+
+
+def _normalize(text: str) -> str:
+    return _NORMALIZE_RE.sub(" ", (text or "").lower()).strip()
+
+
+def _text_similar(a: str, b: str) -> bool:
+    """Cheap near-duplicate check — same normalized text or one is a
+    >80%-character prefix of the other."""
+    na, nb = _normalize(a), _normalize(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+    return long.startswith(short) and len(short) >= int(len(long) * 0.8)
+
+
+# ── add / list / complete ─────────────────────────────────────────────
+def add_commitment(text: str, due: str | None = None,
+                   priority: str = "medium", contact: str | None = None,
                    tags: list[str] | None = None,
-                   source: str = "manual") -> dict:
-    """Add one commitment. `due` accepts ISO date OR natural phrase
-    ('tomorrow', 'Friday', 'in 2 weeks'). Returns the new record."""
-    gate = _gate_check()
-    if gate:
-        return gate
+                   owner: str = "watson",
+                   source_type: str = "manual",
+                   notes: str | None = None) -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
     text = (text or "").strip()
     if not text:
         return {"error": "text is required"}
 
-    parsed_due = _parse_due(due)
+    parsed_due = _parse_due(due) if due else None
     if due and not parsed_due:
-        # User asked for a specific date and we couldn't read it. Better
-        # to flag it than silently drop the constraint.
-        return {"error": f"could not parse due date: {due!r}"}
+        # Watson said "Friday" but we couldn't pin a date. Keep the raw
+        # value in notes so it isn't lost — Watson can fix it later.
+        notes = ((notes or "") + f" (raw due: {due})").strip()
 
-    rec = _new_record(
-        text=text, owner=owner, source=source, due=parsed_due,
-        priority=priority, related_contact=related_contact, tags=tags,
-    )
-    items = _load_items()
-    items.append(rec)
-    _save_items(items)
-    _emit("add", "success", id=rec["id"], owner=owner, source=source,
-          has_due=bool(parsed_due))
-    _log(f"add {rec['id']} text={text[:80]!r} due={parsed_due}")
-    return {"ok": True, "commitment": rec}
-
-
-# ── list_commitments ──────────────────────────────────────────────────
-def list_commitments(status: str | list[str] | None = None,
-                     owner: str | None = None,
-                     related_contact: str | None = None,
-                     days_ahead: int | None = None,
-                     limit: int = 50) -> dict:
-    """Filter the store. Filters compose with AND.
-
-    days_ahead=0   → due today
-    days_ahead=7   → due within next 7 days (inclusive of today)
-    days_ahead=-1  → no upper bound (only useful with status='overdue')
-    None           → no due-date filter
-    """
-    gate = _gate_check()
-    if gate:
-        return gate
-    items = _load_items()
-    if _refresh_overdue(items):
-        _save_items(items)
-
-    if isinstance(status, str):
-        status_set = {status}
-    elif isinstance(status, list):
-        status_set = {s for s in status if s in VALID_STATUSES}
-    else:
-        status_set = None
-
-    today = date.today()
-    contact_canon = _canonical(related_contact) if related_contact else None
-
-    out: list[dict] = []
-    for rec in items:
-        if status_set and rec.get("status") not in status_set:
-            continue
-        if owner and rec.get("owner") != owner:
-            continue
-        if contact_canon:
-            rc = _canonical(rec.get("related_contact") or "")
-            if not rc or contact_canon not in rc:
-                continue
-        if days_ahead is not None:
-            due = rec.get("due")
-            if not due:
-                continue
+    # Auto-link contact via network intelligence when only a partial name
+    # was given. Keep best-effort: if jarvis-network is missing, just use
+    # the raw string.
+    contact_resolved = contact
+    if contact:
+        net = _load_sibling("jarvis-network.py")
+        if net is not None:
             try:
-                due_d = date.fromisoformat(due)
+                rec = net.lookup_or_canonical(contact) if hasattr(net, "lookup_or_canonical") else None
+                if rec and rec.get("name"):
+                    contact_resolved = rec["name"]
+            except Exception:
+                pass
+
+    items = _load_items()
+    record = _build_record(
+        text=text, owner=owner, due=parsed_due, priority=priority,
+        contact=contact_resolved, tags=tags or [],
+        source={"type": source_type, "ts": _now_iso(), "context": ""},
+    )
+    if notes:
+        record["notes"] = notes.strip()
+    items["items"].append(record)
+    _save_items(items)
+    _emit("add", "success", context={"id": record["id"], "due": parsed_due,
+                                     "priority": priority})
+    _log(f"added {record['id']} '{text}' due={parsed_due}")
+    return {"ok": True, "commitment": record}
+
+
+def list_commitments(status: str = "open", owner: str | None = None,
+                     contact: str | None = None,
+                     days_ahead: int | None = 7,
+                     limit: int = 50) -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
+    items = _load_items()["items"]
+    today = datetime.now().astimezone().date()
+    horizon = (today + timedelta(days=days_ahead)).isoformat() if days_ahead else None
+
+    filtered: list[dict] = []
+    for it in items:
+        s = it.get("status", "open")
+        if status != "all" and s != status and not (
+                status == "open" and _is_overdue(it.get("due"), s)):
+            continue
+        if owner and it.get("owner", "").lower() != owner.lower():
+            continue
+        if contact:
+            rc = (it.get("related_contact") or "").lower()
+            if contact.lower() not in rc:
+                continue
+        if horizon and status == "open" and it.get("due") and it["due"] > horizon:
+            continue
+        filtered.append(it)
+
+    def sort_key(rec: dict) -> tuple:
+        # Overdue first, then due-date asc (no due → far future), then
+        # priority (high → low), then created-asc.
+        overdue = _is_overdue(rec.get("due"), rec.get("status", "open"))
+        due = rec.get("due") or "9999-12-31"
+        prio = {"high": 0, "medium": 1, "low": 2}.get(rec.get("priority", "medium"), 1)
+        return (0 if overdue else 1, due, prio, rec.get("created", ""))
+
+    filtered.sort(key=sort_key)
+    return {"ok": True, "count": len(filtered), "items": filtered[:limit]}
+
+
+def _find_one(id_or_text: str, items: list[dict]) -> dict | None:
+    if not id_or_text:
+        return None
+    if id_or_text.startswith("cmt_"):
+        for it in items:
+            if it.get("id") == id_or_text:
+                return it
+    # Fuzzy match on text — pick the highest-similarity open item.
+    target = _normalize(id_or_text)
+    if not target:
+        return None
+    best: dict | None = None
+    best_score = 0.0
+    for it in items:
+        nt = _normalize(it.get("text", ""))
+        if not nt:
+            continue
+        score = 0.0
+        if nt == target:
+            score = 1.0
+        elif target in nt or nt in target:
+            score = max(len(target), len(nt)) / max(len(target), len(nt), 1)
+            score = min(0.9, len(set(target.split()) & set(nt.split())) /
+                        max(1, len(set(target.split()) | set(nt.split()))))
+        else:
+            tw, nw = set(target.split()), set(nt.split())
+            if tw and nw:
+                score = len(tw & nw) / len(tw | nw)
+        # Open items beat closed items at the same score.
+        if it.get("status") == "open":
+            score += 0.05
+        if score > best_score:
+            best_score = score
+            best = it
+    return best if best_score >= 0.4 else None
+
+
+def complete_commitment(id_or_text: str, sync: bool = True) -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
+    items_data = _load_items()
+    item = _find_one(id_or_text, items_data["items"])
+    if not item:
+        return {"error": f"no commitment matched {id_or_text!r}"}
+    if item.get("status") == "done":
+        return {"ok": True, "commitment": item, "already_done": True}
+
+    item["status"] = "done"
+    item["completed"] = _now_iso()
+    _save_items(items_data)
+    _log(f"completed {item['id']} '{item['text']}'")
+    _emit("complete", "success", context={"id": item["id"]})
+
+    sync_results: dict = {}
+    if sync:
+        # Best-effort propagation. Failures don't block the local update.
+        trello = _load_sibling("jarvis-trello.py")
+        if trello is not None and item.get("synced_to", {}).get("trello"):
+            try:
+                sync_results["trello"] = trello.complete_card(
+                    item["synced_to"]["trello"])
+            except Exception as e:
+                sync_results["trello"] = {"error": str(e)}
+        apple = _load_sibling("jarvis-apple.py")
+        if apple is not None and item.get("synced_to", {}).get("apple_reminders"):
+            try:
+                sync_results["apple"] = apple.apple_complete_reminder_by_id(
+                    item["synced_to"]["apple_reminders"])
+            except Exception as e:
+                sync_results["apple"] = {"error": str(e)}
+        # Fallback: complete by text if no remote id was stored.
+        if "apple" not in sync_results and apple is not None:
+            try:
+                sync_results["apple"] = apple.apple_complete_reminder(item["text"])
+            except Exception:
+                pass
+
+    return {"ok": True, "commitment": item, "synced": sync_results}
+
+
+def update_commitment(id_or_text: str, **fields) -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
+    items_data = _load_items()
+    item = _find_one(id_or_text, items_data["items"])
+    if not item:
+        return {"error": f"no commitment matched {id_or_text!r}"}
+    allowed = {"text", "due", "priority", "status", "related_contact",
+               "tags", "notes", "owner"}
+    for k, v in fields.items():
+        if k not in allowed or v is None:
+            continue
+        if k == "due":
+            v = _parse_due(v) or v
+        if k == "priority" and v not in PRIORITY_VALUES:
+            continue
+        if k == "status" and v not in STATUS_VALUES:
+            continue
+        item[k] = v
+    _save_items(items_data)
+    return {"ok": True, "commitment": item}
+
+
+# ── reports + briefing ────────────────────────────────────────────────
+def commitment_report(days: int = 7) -> dict:
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
+    items = _load_items()["items"]
+    today = datetime.now().astimezone().date()
+    horizon = today + timedelta(days=days)
+    week_ago = today - timedelta(days=7)
+
+    overdue, due_today, due_week, others_owe, recently_done = [], [], [], [], []
+    for it in items:
+        status = it.get("status", "open")
+        due = it.get("due")
+        owner = (it.get("owner") or "watson").lower()
+        if status == "open":
+            if owner != "watson":
+                others_owe.append(it)
+            elif due:
+                try:
+                    d = date.fromisoformat(due)
+                except ValueError:
+                    continue
+                if d < today:
+                    overdue.append(it)
+                elif d == today:
+                    due_today.append(it)
+                elif d <= horizon:
+                    due_week.append(it)
+        elif status == "done" and it.get("completed"):
+            try:
+                cd = date.fromisoformat(it["completed"][:10])
             except ValueError:
                 continue
-            if days_ahead < 0:
-                pass  # no upper bound
-            else:
-                if (due_d - today).days > days_ahead:
-                    continue
-                if (due_d - today).days < 0 and rec.get("status") != "overdue":
-                    # When days_ahead is non-negative, an overdue record
-                    # whose status hadn't been promoted yet still counts.
-                    pass
-        out.append(rec)
-
-    # Sort: overdue first, then by due date ascending, then by created.
-    def sort_key(r: dict):
-        st = r.get("status")
-        st_order = {"overdue": 0, "open": 1, "done": 2, "cancelled": 3}.get(st, 4)
-        due = r.get("due") or "9999-12-31"
-        return (st_order, due, r.get("created_at") or "")
-    out.sort(key=sort_key)
-    return {
-        "ok": True,
-        "count": len(out),
-        "filters": {
-            "status": list(status_set) if status_set else None,
-            "owner": owner,
-            "related_contact": related_contact,
-            "days_ahead": days_ahead,
-        },
-        "commitments": out[:max(1, int(limit))],
-    }
-
-
-# ── complete_commitment (fuzzy match) ─────────────────────────────────
-def complete_commitment(name_or_id: str) -> dict:
-    """Mark a commitment done. Resolves by:
-       1. Exact ID match
-       2. ID prefix (e.g. 'c_a1b2')
-       3. Substring match against text (canonical lowercase)
-    Returns {ok, commitment} on success, {error, candidates?} when
-    ambiguous or missing."""
-    gate = _gate_check()
-    if gate:
-        return gate
-    if not name_or_id or not name_or_id.strip():
-        return {"error": "name or id is required"}
-    needle = name_or_id.strip()
-
-    items = _load_items()
-    if _refresh_overdue(items):
-        # Don't save here — the resolution might fail; let the caller
-        # decide on persistence.
-        pass
-
-    # Pass 1: exact ID
-    for rec in items:
-        if rec.get("id") == needle:
-            return _mark_done(items, rec)
-    # Pass 2: ID prefix
-    if needle.startswith("c_"):
-        hits = [r for r in items if (r.get("id") or "").startswith(needle)]
-        if len(hits) == 1:
-            return _mark_done(items, hits[0])
-        if len(hits) > 1:
-            return {"error": "ambiguous id prefix",
-                    "candidates": [{"id": r["id"], "text": r["text"]}
-                                   for r in hits[:6]]}
-    # Pass 3: substring on canonical text — only consider open/overdue
-    canon = _canonical(needle)
-    if not canon:
-        return {"error": f"no match for {name_or_id!r}"}
-    hits = []
-    for rec in items:
-        if rec.get("status") in ("done", "cancelled"):
-            continue
-        rcanon = _canonical(rec.get("text") or "")
-        if canon in rcanon:
-            hits.append(rec)
-    if len(hits) == 1:
-        return _mark_done(items, hits[0])
-    if len(hits) > 1:
-        return {"error": "ambiguous match — be more specific",
-                "candidates": [{"id": r["id"], "text": r["text"],
-                                "due": r.get("due")} for r in hits[:6]]}
-    return {"error": f"no open commitment matches {name_or_id!r}"}
-
-
-def _mark_done(items: list[dict], rec: dict) -> dict:
-    rec["status"] = "done"
-    rec["completed_at"] = _now_iso()
-    rec["updated_at"] = rec["completed_at"]
-    _save_items(items)
-    _emit("complete", "success", id=rec["id"])
-    _log(f"complete {rec['id']} text={rec.get('text', '')[:80]!r}")
-    return {"ok": True, "commitment": rec}
-
-
-# ── update_commitment (lighter helper, used by syncers) ───────────────
-def update_commitment(commitment_id: str, **changes) -> dict:
-    """Partial-update a record by id. Used by trello/apple syncers to
-    write back the external IDs. Reserved for fields we trust callers to
-    set; status transitions go through complete_commitment."""
-    gate = _gate_check()
-    if gate:
-        return gate
-    items = _load_items()
-    target = next((r for r in items if r.get("id") == commitment_id), None)
-    if target is None:
-        return {"error": f"no commitment with id {commitment_id!r}"}
-    allowed = {"due", "priority", "related_contact", "tags", "synced_to",
-               "text", "status"}
-    for k, v in changes.items():
-        if k not in allowed:
-            continue
-        if k == "synced_to" and isinstance(v, dict):
-            target.setdefault("synced_to", {}).update(v)
-        else:
-            target[k] = v
-    target["updated_at"] = _now_iso()
-    _save_items(items)
-    return {"ok": True, "commitment": target}
-
-
-# ── commitment_report (briefing-shaped) ───────────────────────────────
-def commitment_report(week_window: int = 7) -> dict:
-    """Summary buckets used by jarvis-briefing + voice 'what's on my
-    plate'. Returns counts plus the actual records for each bucket so
-    callers can choose to render either."""
-    gate = _gate_check()
-    if gate:
-        return gate
-    items = _load_items()
-    if _refresh_overdue(items):
-        _save_items(items)
-    today = date.today()
-    overdue: list[dict] = []
-    due_today: list[dict] = []
-    due_week: list[dict] = []
-    recently_done: list[dict] = []
-
-    cutoff_done = (today - timedelta(days=7)).isoformat()
-    for rec in items:
-        st = rec.get("status")
-        if st == "overdue":
-            overdue.append(rec)
-            continue
-        if st == "done":
-            done_at = (rec.get("completed_at") or "")[:10]
-            if done_at and done_at >= cutoff_done:
-                recently_done.append(rec)
-            continue
-        if st != "open":
-            continue
-        due = rec.get("due")
-        if not due:
-            continue
-        try:
-            due_d = date.fromisoformat(due)
-        except ValueError:
-            continue
-        delta = (due_d - today).days
-        if delta == 0:
-            due_today.append(rec)
-        elif 0 < delta <= week_window:
-            due_week.append(rec)
-
-    overdue.sort(key=lambda r: r.get("due") or "")
-    due_today.sort(key=lambda r: r.get("priority") or "")
-    due_week.sort(key=lambda r: r.get("due") or "")
-    recently_done.sort(key=lambda r: r.get("completed_at") or "", reverse=True)
-
-    def short(items_: list[dict], with_nudge: bool = False) -> list[dict]:
-        out: list[dict] = []
-        for r in items_:
-            entry = {
-                "id": r["id"],
-                "text": r.get("text"),
-                "due": r.get("due"),
-                "priority": r.get("priority"),
-                "owner": r.get("owner"),
-                "related_contact": r.get("related_contact"),
-            }
-            if with_nudge:
-                entry["nudge"] = _nudge_text(r)
-            out.append(entry)
-        return out
+            if cd >= week_ago:
+                recently_done.append(it)
 
     return {
         "ok": True,
         "as_of": today.isoformat(),
+        "overdue": sorted(overdue, key=lambda x: x.get("due") or ""),
+        "due_today": due_today,
+        "due_this_week": sorted(due_week, key=lambda x: x.get("due") or ""),
+        "others_owe_watson": others_owe,
+        "recently_completed": recently_done,
         "counts": {
             "overdue": len(overdue),
             "due_today": len(due_today),
-            "due_week": len(due_week),
-            "recently_done": len(recently_done),
+            "due_this_week": len(due_week),
+            "others_owe_watson": len(others_owe),
+            "recently_completed": len(recently_done),
         },
-        "overdue": short(overdue, with_nudge=True),
-        "due_today": short(due_today, with_nudge=True),
-        "due_this_week": short(due_week),
-        "recently_done": short(recently_done[:8]),
     }
 
 
-# ── briefing + context + notification hooks ───────────────────────────
-def _days_overdue(due: str | None) -> int:
-    if not due:
-        return 0
-    try:
-        return (date.today() - date.fromisoformat(due)).days
-    except ValueError:
-        return 0
-
-
-def _nudge_text(rec: dict) -> str:
-    """Short, voice-ready accountability prompt for an overdue commitment.
-    Reads naturally when Jarvis speaks the briefing aloud."""
-    text = (rec.get("text") or "").strip().rstrip(".")
-    # Lowercase only the first letter so it reads as a clause inside our
-    # sentence, but preserve proper nouns later in the text.
-    if text:
-        text = text[0].lower() + text[1:]
-    who = rec.get("related_contact")
-    # Skip the "with X" suffix when the name is already in the commitment text.
-    name_already_in_text = bool(who and who.lower() in text.lower())
-    suffix = "" if (not who or name_already_in_text) else f" with {who}"
-    days = _days_overdue(rec.get("due"))
-    if days <= 0:
-        return f"You said you'd {text}{suffix} today — want to knock it out now?"
-    age = "yesterday" if days == 1 else f"{days} days ago"
-    closer = "Want me to draft a message now?" if who else "Want me to handle it?"
-    return f"You said you'd {text}{suffix} — that was due {age}. {closer}"
-
-
 def briefing_section() -> str:
-    """Markdown 'Commitments' block — overdue first (with nudge text), due
-    today, due this week. Empty when there's nothing on the plate."""
-    rep = commitment_report()
+    """Markdown block for jarvis-briefing. Empty when nothing pressing."""
+    rep = commitment_report(days=7)
     if not rep.get("ok"):
         return ""
     counts = rep.get("counts") or {}
-    if not (counts.get("overdue") or counts.get("due_today")
-            or counts.get("due_week")):
+    if not (counts.get("overdue") or counts.get("due_today") or
+            counts.get("due_this_week")):
         return ""
-    lines = ["## Commitments", ""]
-    if counts.get("overdue"):
-        lines.append(f"**Overdue ({counts['overdue']}):**")
-        for r in rep["overdue"][:6]:
-            who = f" (with {r['related_contact']})" if r.get("related_contact") else ""
-            lines.append(f"- {r['text']} — was due {r.get('due')}{who}")
-            lines.append(f"  - _Nudge:_ {_nudge_text(r)}")
-        lines.append("")
-    if counts.get("due_today"):
-        lines.append(f"**Due today ({counts['due_today']}):**")
-        for r in rep["due_today"][:6]:
-            who = f" (with {r['related_contact']})" if r.get("related_contact") else ""
-            lines.append(f"- {r['text']}{who}")
-        lines.append("")
-    if counts.get("due_week"):
-        lines.append(f"**Due this week ({counts['due_week']}):**")
-        for r in rep["due_this_week"][:8]:
-            who = f" (with {r['related_contact']})" if r.get("related_contact") else ""
-            lines.append(f"- {r['text']} — {r.get('due')}{who}")
-        lines.append("")
-    return "\n".join(lines)
+    lines = ["## Commitments"]
+    if rep["overdue"]:
+        lines.append(f"\n**Overdue** ({len(rep['overdue'])})")
+        for it in rep["overdue"][:5]:
+            lines.append(f"- {it['text']} (due {it.get('due', '?')})"
+                         + (f" — {it['related_contact']}" if it.get('related_contact') else ""))
+    if rep["due_today"]:
+        lines.append(f"\n**Due today** ({len(rep['due_today'])})")
+        for it in rep["due_today"][:5]:
+            lines.append(f"- {it['text']}"
+                         + (f" — {it['related_contact']}" if it.get('related_contact') else ""))
+    if rep["due_this_week"]:
+        lines.append(f"\n**Due this week** ({len(rep['due_this_week'])})")
+        for it in rep["due_this_week"][:5]:
+            lines.append(f"- {it['text']} ({it.get('due', '?')})")
+    if rep["others_owe_watson"]:
+        lines.append(f"\n**Others owe you** ({len(rep['others_owe_watson'])})")
+        for it in rep["others_owe_watson"][:3]:
+            who = it.get("owner") or "?"
+            lines.append(f"- {who}: {it['text']}")
+    return "\n".join(lines) + "\n"
 
 
-def context_hint(mentioned_names: list[str] | None = None) -> str:
-    """One-line system-prompt hint when a mentioned contact has open
-    commitments. Empty otherwise."""
-    if not mentioned_names:
+def context_hint() -> str:
+    """One-liner for the system prompt. Empty when nothing pressing."""
+    if not _gate_enabled():
         return ""
-    if _gate_check() is not None:
+    rep = commitment_report(days=7)
+    if not rep.get("ok"):
         return ""
-    items = _load_items()
-    if _refresh_overdue(items):
-        _save_items(items)
-    bits: list[str] = []
-    for nm in mentioned_names[:3]:
-        canon = _canonical(nm)
-        if not canon:
-            continue
-        with_them = [r for r in items
-                     if r.get("status") in ("open", "overdue")
-                     and canon in _canonical(r.get("related_contact") or "")]
-        if not with_them:
-            continue
-        # Pick the most pressing — overdue, then earliest due.
-        with_them.sort(key=lambda r: (
-            0 if r.get("status") == "overdue" else 1,
-            r.get("due") or "9999",
-        ))
-        top = with_them[0]
-        st = top.get("status")
-        due = top.get("due")
-        suffix = f" (due {due})" if due else ""
-        if st == "overdue":
-            suffix = f" (OVERDUE — was due {due})" if due else " (overdue)"
-        bits.append(f"open with {nm}: {top['text']}{suffix}")
+    c = rep.get("counts") or {}
+    bits = []
+    if c.get("overdue"):
+        bits.append(f"{c['overdue']} overdue")
+    if c.get("due_today"):
+        bits.append(f"{c['due_today']} due today")
+    if c.get("due_this_week"):
+        bits.append(f"{c['due_this_week']} this week")
     if not bits:
         return ""
-    return "**Commitments:** " + "; ".join(bits) + "."
+    return ("**Commitments:** " + ", ".join(bits)
+            + ". If Watson asks 'what's on my plate', call list_commitments first.")
 
 
-def overdue_inner_circle_alerts() -> list[dict]:
-    """Surface overdue commitments tied to inner_circle / trusted
-    contacts, for jarvis-notifications to score as high priority. Lazy-
-    loads jarvis-network for trust labels; falls through cleanly if the
-    module isn't installed."""
-    items = _load_items()
-    if _refresh_overdue(items):
-        _save_items(items)
-    overdue = [r for r in items if r.get("status") == "overdue"
-               and r.get("related_contact")]
-    if not overdue:
-        return []
+def context_hint_for_contact(name: str) -> str:
+    """Inline hint when Watson mentions a specific contact and there are
+    open commitments touching them."""
+    if not _gate_enabled() or not name:
+        return ""
+    rep = list_commitments(status="open", contact=name, days_ahead=None, limit=5)
+    items = rep.get("items") or []
+    if not items:
+        return ""
+    bits = []
+    for it in items[:3]:
+        owner = it.get("owner", "watson")
+        prefix = "you owe" if owner == "watson" else f"{owner} owes you"
+        due = f" (due {it['due']})" if it.get("due") else ""
+        bits.append(f"{prefix}: {it['text']}{due}")
+    return f"**Open with {name}:** " + " · ".join(bits)
 
-    # Resolve each related_contact to a trust level via jarvis-network.
-    src = BIN_DIR / "jarvis-network.py"
-    if not src.exists():
-        src = Path(__file__).parent / "jarvis-network.py"
-    if not src.exists():
-        return []
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "jarvis_network_for_commit", src)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    except Exception:
-        return []
-    out: list[dict] = []
-    for rec in overdue:
-        try:
-            res = mod.relationship_score(rec["related_contact"])
-        except Exception:
-            continue
-        trust = (res or {}).get("trust_level")
-        if trust in ("inner_circle", "trusted"):
-            out.append({
-                "commitment_id": rec["id"],
-                "text": rec["text"],
-                "related_contact": rec["related_contact"],
-                "trust_level": trust,
-                "due": rec.get("due"),
-            })
+
+# ── sync ──────────────────────────────────────────────────────────────
+def sync(systems: list[str] | None = None) -> dict:
+    """Push canonical items to Trello + Apple Reminders, then pull
+    completion signals back. Best-effort; never raises."""
+    if not _gate_enabled():
+        return {"error": "JARVIS_COMMITMENTS=0"}
+    systems = systems or ["trello", "apple"]
+    out: dict = {"ok": True, "results": {}}
+    if "trello" in systems:
+        trello = _load_sibling("jarvis-trello.py")
+        if trello is not None and hasattr(trello, "trello_sync"):
+            try:
+                out["results"]["trello"] = trello.trello_sync()
+            except Exception as e:
+                out["results"]["trello"] = {"error": str(e)}
+        else:
+            out["results"]["trello"] = {"skipped": "module missing"}
+    if "apple" in systems:
+        apple = _load_sibling("jarvis-apple.py")
+        if apple is not None and hasattr(apple, "apple_sync_commitments"):
+            try:
+                out["results"]["apple"] = apple.apple_sync_commitments()
+            except Exception as e:
+                out["results"]["apple"] = {"error": str(e)}
+        else:
+            out["results"]["apple"] = {"skipped": "module missing"}
+    state = _read_json(SYNC_STATE_FILE, {})
+    state["last_sync"] = _now_iso()
+    state["last_results"] = out["results"]
+    _write_json(SYNC_STATE_FILE, state)
     return out
 
 
-# ── CLI ────────────────────────────────────────────────────────────────
-def _cli() -> int:
+# ── status / overdue mark ─────────────────────────────────────────────
+def mark_overdue() -> int:
+    """Promote open items past their due date to overdue status.
+    Returns the count promoted. Cheap; called from jarvis-improve."""
+    if not _gate_enabled():
+        return 0
+    items_data = _load_items()
+    n = 0
+    for it in items_data["items"]:
+        if it.get("status") == "open" and _is_overdue(it.get("due"), "open"):
+            # We don't actually flip status — "overdue" is computed live
+            # so list_commitments(status="open") still surfaces it. But
+            # we tag the item so reports stay consistent. Real flip kept
+            # for items past due by 14 days (truly stale).
+            try:
+                d = date.fromisoformat(it["due"])
+                if (datetime.now().astimezone().date() - d).days >= 14:
+                    it["status"] = "overdue"
+                    n += 1
+            except ValueError:
+                continue
+    if n:
+        _save_items(items_data)
+    return n
+
+
+# ── CLI ───────────────────────────────────────────────────────────────
+def _cli(argv: list[str]) -> int:
+    import argparse
+
     p = argparse.ArgumentParser(description="Jarvis commitment tracker")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pa = sub.add_parser("add", help="add a commitment")
+    pe = sub.add_parser("extract")
+    pe.add_argument("text")
+    pe.add_argument("--source", default="conversation")
+    pe.add_argument("--context", default=None)
+    pe.add_argument("--dry-run", action="store_true")
+
+    pa = sub.add_parser("add")
     pa.add_argument("text")
-    pa.add_argument("--owner", default="watson",
-                    choices=sorted(VALID_OWNERS))
     pa.add_argument("--due", default=None)
-    pa.add_argument("--priority", default="normal",
-                    choices=sorted(VALID_PRIORITIES))
+    pa.add_argument("--priority", default="medium",
+                    choices=sorted(PRIORITY_VALUES))
     pa.add_argument("--contact", default=None)
     pa.add_argument("--tags", default=None,
-                    help="comma-separated tags")
+                    help="comma-separated")
+    pa.add_argument("--owner", default="watson")
+    pa.add_argument("--notes", default=None)
 
-    pl = sub.add_parser("list", help="list commitments")
-    pl.add_argument("--status", default=None,
-                    help="comma-separated subset of "
-                         + ",".join(sorted(VALID_STATUSES)))
-    pl.add_argument("--owner", default=None,
-                    choices=sorted(VALID_OWNERS))
+    pl = sub.add_parser("list")
+    pl.add_argument("--status", default="open",
+                    choices=("open", "done", "overdue", "cancelled", "all"))
+    pl.add_argument("--owner", default=None)
     pl.add_argument("--contact", default=None)
-    pl.add_argument("--days-ahead", type=int, default=None)
+    pl.add_argument("--days-ahead", type=int, default=7)
     pl.add_argument("--limit", type=int, default=50)
 
-    pc = sub.add_parser("complete", help="mark done by id or text")
-    pc.add_argument("name_or_id")
+    pc = sub.add_parser("complete")
+    pc.add_argument("id_or_text")
+    pc.add_argument("--no-sync", action="store_true")
 
-    pe = sub.add_parser("extract", help="Haiku-extract from stdin or a file")
-    pe.add_argument("--file", default=None,
-                    help="path to a text file (else read stdin)")
-    pe.add_argument("--source", default="manual")
-    pe.add_argument("--contact", default=None)
+    pu = sub.add_parser("update")
+    pu.add_argument("id_or_text")
+    pu.add_argument("--text", default=None)
+    pu.add_argument("--due", default=None)
+    pu.add_argument("--priority", default=None)
+    pu.add_argument("--status", default=None)
+    pu.add_argument("--contact", default=None)
+    pu.add_argument("--notes", default=None)
 
-    sub.add_parser("report", help="briefing-shaped summary")
-    sub.add_parser("status", help="store stats")
-    sub.add_parser("briefing-section",
-                   help="markdown block for jarvis-briefing")
-    pch = sub.add_parser("context-hint")
-    pch.add_argument("--names", default=None,
-                     help="comma-separated names to check")
+    sub.add_parser("report")
+    sub.add_parser("briefing-section")
+    sub.add_parser("context-hint")
 
-    args = p.parse_args()
+    ps = sub.add_parser("sync")
+    ps.add_argument("--systems", default="trello,apple")
 
-    if args.cmd == "add":
-        tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()] or None
-        print(json.dumps(add_commitment(
-            args.text, owner=args.owner, due=args.due,
-            priority=args.priority, related_contact=args.contact,
-            tags=tags,
-        ), ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "list":
-        status: list[str] | None = None
-        if args.status:
-            status = [s.strip() for s in args.status.split(",") if s.strip()]
-        print(json.dumps(list_commitments(
-            status=status, owner=args.owner,
-            related_contact=args.contact,
-            days_ahead=args.days_ahead, limit=args.limit,
-        ), ensure_ascii=False, indent=2))
-        return 0
-    if args.cmd == "complete":
-        print(json.dumps(complete_commitment(args.name_or_id),
-                         ensure_ascii=False, indent=2))
-        return 0
+    pcmark = sub.add_parser("mark-overdue")
+
+    args = p.parse_args(argv)
     if args.cmd == "extract":
-        if args.file:
-            text = Path(args.file).read_text(encoding="utf-8")
-        else:
-            text = sys.stdin.read()
-        print(json.dumps(extract_commitments(
-            text, source=args.source, related_contact=args.contact,
-        ), ensure_ascii=False, indent=2))
-        return 0
+        out = extract_commitments(args.text, source_type=args.source,
+                                  context=args.context, dry_run=args.dry_run)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out.get("ok") else 1
+    if args.cmd == "add":
+        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+        out = add_commitment(args.text, due=args.due, priority=args.priority,
+                             contact=args.contact, tags=tags,
+                             owner=args.owner, notes=args.notes)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out.get("ok") else 1
+    if args.cmd == "list":
+        out = list_commitments(status=args.status, owner=args.owner,
+                               contact=args.contact,
+                               days_ahead=args.days_ahead, limit=args.limit)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out.get("ok") else 1
+    if args.cmd == "complete":
+        out = complete_commitment(args.id_or_text, sync=not args.no_sync)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out.get("ok") else 1
+    if args.cmd == "update":
+        fields = {k: v for k, v in vars(args).items()
+                  if k not in ("cmd", "id_or_text") and v is not None}
+        if "contact" in fields:
+            fields["related_contact"] = fields.pop("contact")
+        out = update_commitment(args.id_or_text, **fields)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0 if out.get("ok") else 1
     if args.cmd == "report":
         print(json.dumps(commitment_report(), ensure_ascii=False, indent=2))
         return 0
-    if args.cmd == "status":
-        items = _load_items()
-        by_status: dict[str, int] = {}
-        for r in items:
-            by_status[r.get("status") or "?"] = by_status.get(
-                r.get("status") or "?", 0) + 1
-        print(json.dumps({
-            "ok": True,
-            "count": len(items),
-            "by_status": by_status,
-            "items_path": str(ITEMS_FILE),
-        }, ensure_ascii=False, indent=2))
-        return 0
     if args.cmd == "briefing-section":
-        s = briefing_section()
-        print(s if s else "(no commitments to surface)")
+        print(briefing_section())
         return 0
     if args.cmd == "context-hint":
-        names = [n.strip() for n in (args.names or "").split(",") if n.strip()]
-        h = context_hint(mentioned_names=names or None)
-        print(h if h else "(no hint)")
+        print(context_hint())
+        return 0
+    if args.cmd == "sync":
+        systems = [s.strip() for s in args.systems.split(",") if s.strip()]
+        print(json.dumps(sync(systems=systems), ensure_ascii=False, indent=2))
+        return 0
+    if args.cmd == "mark-overdue":
+        n = mark_overdue()
+        print(json.dumps({"ok": True, "promoted": n}, ensure_ascii=False))
         return 0
     return 2
 
 
-def main() -> int:
-    """Entrypoint for jarvis-improve. Just refreshes overdue status —
-    the heavy syncing lives in jarvis-trello and jarvis-apple. Always
-    exits 0."""
-    if _gate_check() is not None:
-        return 0
-    try:
-        items = _load_items()
-        if _refresh_overdue(items):
-            _save_items(items)
-    except Exception as e:
-        _log(f"main refresh: {e}")
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(_cli() if len(sys.argv) > 1 else main())
+    try:
+        sys.exit(_cli(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

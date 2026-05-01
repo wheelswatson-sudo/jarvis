@@ -630,6 +630,56 @@ def _network_alerts_section() -> str:
         return ""
 
 
+def _commitments_section() -> str:
+    """Pull the 'Commitments' markdown block from jarvis-commitments
+    when there are overdue items, items due today, or items due this
+    week. Empty otherwise so quiet days stay clean."""
+    if os.environ.get("JARVIS_COMMITMENTS", "1") != "1":
+        return ""
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_commitments_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.briefing_section() or ""
+    except Exception:
+        return ""
+
+
+def _imessages_section() -> str:
+    """Pull a brief 'iMessages' summary block — counts unread inbound
+    messages from contacts in the last 24h. Empty when nothing
+    unread."""
+    if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
+        return ""
+    src = BIN_DIR / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_apple_brief", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        out = mod.imessage_check(hours=24, limit=10, unread_only=True)
+    except Exception:
+        return ""
+    msgs = (out or {}).get("messages") or []
+    if not msgs:
+        return ""
+    lines = [f"## iMessages\n\n**Unread** ({len(msgs)})"]
+    for m in msgs[:5]:
+        who = m.get("handle") or "?"
+        text = (m.get("text") or "").replace("\n", " ").strip()[:120]
+        if text:
+            lines.append(f"- {who}: {text}")
+    return "\n".join(lines) + "\n"
+
+
 def _format_markdown(payload: dict, briefing_text: str) -> str:
     """The .md file is the canonical record. Header has metadata, body is
     the spoken text, footer has the structured payload for debugging."""
@@ -638,15 +688,12 @@ def _format_markdown(payload: dict, briefing_text: str) -> str:
         f"_Generated: {payload['generated_at']}_\n\n"
     )
     spoken = "## Spoken briefing\n\n" + briefing_text.strip() + "\n\n"
-    revenue = _stripe_section()
-    if revenue:
-        spoken += revenue + "\n"
-    workflows = _workflows_section()
-    if workflows:
-        spoken += workflows + "\n"
     commitments = _commitments_section()
     if commitments:
         spoken += commitments + "\n"
+    imessages = _imessages_section()
+    if imessages:
+        spoken += imessages + "\n"
     relationships = _relationship_alerts_section()
     if relationships:
         spoken += relationships + "\n"

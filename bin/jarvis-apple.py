@@ -1,91 +1,84 @@
 #!/usr/bin/env python3
-"""Apple integration layer — Reminders, Notes, iMessage, Contacts.
+"""Apple integration layer — Reminders, Notes, iMessages, Contacts.
 
-macOS-native surfaces the assistant talks to through `osascript` (JXA
-for Reminders / Notes, AppleScript for Messages / Contacts) and a
-read-only sqlite3 query against ~/Library/Messages/chat.db for iMessage
-history. Stdlib only.
+A single thin wrapper so Jarvis can reach native macOS without having
+to remember which app needs JXA, which app needs SQLite, and which one
+needs AppleScript. Every public function returns a JSON-friendly dict
+with `ok`/`error` so the think.py tool layer can wire them straight in.
 
-Public tools (returned by jarvis-think):
+Backends (chosen for "works on a stock Mac, no extra installs"):
 
-  Reminders (all in a 'Jarvis' list, auto-created on first use):
-    apple_add_reminder(text, due=None, notes=None)
-    apple_list_reminders(include_completed=False)
-    apple_complete_reminder(name_or_id)
+    Reminders   JXA (JavaScript for Automation) — JSON-safe, faster than
+                AppleScript, and returns full ids so we can complete
+                items by id later.
+    Notes       JXA — same reasoning.
+    iMessages   read: sqlite3 against ~/Library/Messages/chat.db
+                send: AppleScript against Messages.app (the only
+                supported send path)
+    Contacts    JXA against the Contacts.app object model.
 
-  Notes (folder 'Jarvis'):
-    apple_save_note(title, body, append=False)
-    apple_read_note(title)
+If a connected MCP later replaces any of these, the Python signatures
+stay identical — only the implementation underneath swaps.
 
-  iMessage (read via sqlite, send via Messages.app):
-    imessage_check(hours=24)
-    imessage_read(handle, limit=20)
-    imessage_send(handle, message, confirm=False)
-    imessage_search_contacts(query)
+Public functions (callable from jarvis-think.py):
 
-  Contacts:
-    apple_contacts_search(query)
-    apple_contacts_list_all()        # full-dump for jarvis-contacts sync
+    apple_add_reminder(text, due=None, list="Jarvis", priority=None) -> dict
+    apple_list_reminders(list="Jarvis", include_completed=False, limit=20) -> dict
+    apple_complete_reminder(text_or_id) -> dict
+    apple_complete_reminder_by_id(reminder_id) -> dict
+    apple_sync_commitments() -> dict      # mirrors items.json → Reminders
 
-Hooks for the rest of the assistant:
+    apple_save_note(title, content, folder="Jarvis") -> dict
+    apple_read_note(title, folder="Jarvis") -> dict
 
-    briefing_section()
-        Markdown 'iMessages' subsection — unread from contacts.
-    context_hint(mentioned_names)
-        Per-turn hint when a mentioned contact has unread iMessages.
-    interaction_signal_for_contact(rec)
-        Feeds iMessage interaction counts into network strength scoring.
-    recent_urgent(minutes)
-        Items the wake-listener can route as a fresh-DM notification.
+    imessage_check(contact=None, hours=24, limit=20) -> dict
+    imessage_read(contact, limit=50) -> dict
+    imessage_send(contact, message, confirm=True) -> dict
+    imessage_search_contacts(query) -> dict
 
-Files:
-    ~/.jarvis/apple/state.json    last_seen ROWID per chat
-    ~/.jarvis/logs/apple.log      diagnostic log
+    apple_contacts_search(query, limit=10) -> dict
+
+CLI:
+    bin/jarvis-apple.py add-reminder "buy milk" --due tomorrow
+    bin/jarvis-apple.py list-reminders
+    bin/jarvis-apple.py save-note "Forge prep" "Talking points: ..."
+    bin/jarvis-apple.py imessage-check --hours 6
+    bin/jarvis-apple.py contacts-search "Corbin"
+    bin/jarvis-apple.py sync-commitments
 
 Gates:
-    JARVIS_APPLE=1     master gate (default 1 on Darwin, 0 elsewhere)
-    JARVIS_IMESSAGE=1  iMessage-specific gate (default 1)
-
-iMessage requires Full Disk Access on the running process to read
-chat.db. We surface a clear error when permission is denied so Watson
-knows to grant it via System Settings.
+    JARVIS_APPLE=1       master gate (default on)
+    JARVIS_IMESSAGE=1    iMessage subgate
+    JARVIS_REMINDERS=1   Reminders subgate
+    JARVIS_NOTES=1       Notes subgate
 """
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
 import os
-import platform
-import re
-import shutil
+import shlex
 import sqlite3
 import subprocess
 import sys
 import time
-import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 ASSISTANT_DIR = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis")))
-BIN_DIR = ASSISTANT_DIR / "bin"
-LIB_DIR = ASSISTANT_DIR / "lib"
-APPLE_DIR = ASSISTANT_DIR / "apple"
-STATE_FILE = APPLE_DIR / "state.json"
 LOG_DIR = ASSISTANT_DIR / "logs"
 APPLE_LOG = LOG_DIR / "apple.log"
+BIN_DIR = Path(__file__).resolve().parent
 
 CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
-JARVIS_REMINDER_LIST = os.environ.get("JARVIS_REMINDER_LIST", "Jarvis")
+JARVIS_LIST = os.environ.get("JARVIS_REMINDERS_LIST", "Jarvis")
 JARVIS_NOTES_FOLDER = os.environ.get("JARVIS_NOTES_FOLDER", "Jarvis")
 
-OSASCRIPT_TIMEOUT_S = float(os.environ.get("JARVIS_APPLE_TIMEOUT_S", "10"))
-# Mac OS messages store dates as nanoseconds since 2001-01-01 UTC.
-MAC_EPOCH_OFFSET = 978307200
+OSA_TIMEOUT = float(os.environ.get("JARVIS_OSA_TIMEOUT_S", "20"))
 
 
-# ── logging + gates ───────────────────────────────────────────────────
+# ── logging / IO ─────────────────────────────────────────────────────
 def _log(msg: str) -> None:
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -96,1145 +89,844 @@ def _log(msg: str) -> None:
         pass
 
 
-def _is_macos() -> bool:
-    return platform.system() == "Darwin"
+def _gate(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
 
 
-def _apple_gate_default() -> str:
-    return "1" if _is_macos() else "0"
+def _apple_enabled() -> bool:
+    return _gate("JARVIS_APPLE")
 
 
-def _apple_gate() -> dict | None:
-    if os.environ.get("JARVIS_APPLE", _apple_gate_default()) != "1":
-        return {"error": "apple integration disabled (not macOS or JARVIS_APPLE=0)"}
-    if not _is_macos():
-        return {"error": "apple integration requires macOS"}
-    return None
-
-
-def _imessage_gate() -> dict | None:
-    base = _apple_gate()
-    if base:
-        return base
-    if os.environ.get("JARVIS_IMESSAGE", "1") != "1":
-        return {"error": "imessage disabled (JARVIS_IMESSAGE=0)"}
-    if not CHAT_DB.exists():
-        return {"error": f"chat.db not found at {CHAT_DB}"}
-    return None
-
-
-# ── module loaders ────────────────────────────────────────────────────
-def _load_module(mod_id: str, filename: str, search_dirs: list[Path]) -> Any:
-    for d in search_dirs:
-        src = d / filename
-        if src.exists():
-            try:
-                spec = importlib.util.spec_from_file_location(mod_id, src)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                return mod
-            except Exception as e:
-                _log(f"load {filename} failed: {e}")
-                return None
-    return None
-
-
-_BIN_SEARCH = [BIN_DIR, Path(__file__).parent]
-_LIB_SEARCH = [LIB_DIR, Path(__file__).parent.parent / "lib"]
-
-_cache: dict[str, Any] = {}
-
-
-def _primitive():
-    if "primitive" not in _cache:
-        _cache["primitive"] = _load_module("primitive", "primitive.py", _LIB_SEARCH)
-    return _cache["primitive"]
-
-
-def _contacts():
-    if "contacts" not in _cache:
-        _cache["contacts"] = _load_module(
-            "jarvis_contacts_for_apple", "jarvis-contacts.py", _BIN_SEARCH)
-    return _cache["contacts"]
-
-
-def _emit(action: str, status: str, **ctx) -> None:
-    p = _primitive()
-    if p is None:
-        return
+def _emit(action: str, status: str, context: dict | None = None,
+          latency_ms: int | None = None) -> None:
     try:
-        cap = ctx.pop("__cap", "apple")
-        p.emit(cap=cap, action=action, status=status, context=ctx)
+        sys.path.insert(0, str(ASSISTANT_DIR / "lib"))
+        sys.path.insert(0, str(BIN_DIR.parent / "lib"))
+        from outcome_ledger import emit  # type: ignore
+        emit("apple", action, status, context=context, latency_ms=latency_ms)
     except Exception:
         pass
 
 
-# ── state I/O ─────────────────────────────────────────────────────────
-def _load_state() -> dict:
-    if not STATE_FILE.exists():
-        return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _save_state(state: dict) -> None:
-    APPLE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False),
-                   encoding="utf-8")
-    os.replace(tmp, STATE_FILE)
-
-
-# ── osascript runner ─────────────────────────────────────────────────
-def _run_osascript(script: str, *,
-                   language: str = "JavaScript",
-                   timeout: float | None = None) -> tuple[int, str, str]:
-    """Run an osascript snippet. `language='JavaScript'` for JXA, else
-    AppleScript. Returns (returncode, stdout, stderr). Output is utf-8
-    decoded; trailing newlines are stripped."""
-    cmd = ["osascript"]
-    if language.lower() in ("javascript", "jxa", "js"):
-        cmd += ["-l", "JavaScript"]
-    cmd += ["-e", script]
+# ── osascript (JXA) helper ────────────────────────────────────────────
+def _run_jxa(script: str, timeout: float = OSA_TIMEOUT) -> dict:
+    """Run a JXA script via osascript -l JavaScript. The script SHOULD
+    print a JSON string on stdout. Returns {ok, data} | {error}."""
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout if timeout is not None else OSASCRIPT_TIMEOUT_S,
+            ["osascript", "-l", "JavaScript", "-e", script],
+            capture_output=True, text=True, timeout=timeout,
         )
-    except subprocess.TimeoutExpired:
-        _log(f"osascript timeout: {script[:200]}")
-        return 124, "", "osascript timed out"
     except FileNotFoundError:
-        return 127, "", "osascript not found (macOS only)"
-    return proc.returncode, (proc.stdout or "").rstrip("\n"), (proc.stderr or "").strip()
-
-
-def _run_jxa(script: str, timeout: float | None = None) -> tuple[int, str, str]:
-    return _run_osascript(script, language="JavaScript", timeout=timeout)
-
-
-def _run_applescript(script: str, timeout: float | None = None) -> tuple[int, str, str]:
-    return _run_osascript(script, language="AppleScript", timeout=timeout)
-
-
-def _applescript_quote(s: str) -> str:
-    """Quote a string for safe interpolation into an AppleScript literal."""
-    return '"' + (s or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def _jxa_quote(s: str) -> str:
-    """Quote a string for safe interpolation into a JXA template literal."""
-    return json.dumps(s or "", ensure_ascii=False)
-
-
-# ── name canonicalization ─────────────────────────────────────────────
-_PUNCT_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _canonical(s: str) -> str:
-    if not s:
-        return ""
-    norm = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    norm = _PUNCT_RE.sub(" ", norm.lower()).strip()
-    return " ".join(norm.split())
-
-
-# ── PUBLIC: apple_add_reminder ────────────────────────────────────────
-def apple_add_reminder(text: str, due: str | None = None,
-                       notes: str | None = None) -> dict:
-    """Create a reminder in the 'Jarvis' list (auto-created). `due` is
-    ISO 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS'. Returns the reminder id."""
-    gate = _apple_gate()
-    if gate:
-        return gate
-    if not text or not text.strip():
-        return {"error": "text is required"}
-
-    due_iso = _normalize_due_iso(due)
-    script = f"""
-        var Reminders = Application('Reminders');
-        Reminders.includeStandardAdditions = true;
-        var listName = {_jxa_quote(JARVIS_REMINDER_LIST)};
-        var lst;
-        try {{ lst = Reminders.lists.byName(listName); lst.id(); }}
-        catch (e) {{
-            lst = Reminders.List({{name: listName}});
-            Reminders.lists.push(lst);
-        }}
-        var props = {{name: {_jxa_quote(text.strip())}}};
-        var notes = {_jxa_quote(notes or '')};
-        if (notes) props.body = notes;
-        var due = {_jxa_quote(due_iso or '')};
-        if (due) props.dueDate = new Date(due);
-        var r = Reminders.Reminder(props);
-        lst.reminders.push(r);
-        JSON.stringify({{id: r.id(), name: r.name(), due: due}});
-    """
-    rc, out, err = _run_jxa(script)
-    if rc != 0:
-        _emit("apple_add_reminder", "failed", error=err[:200])
-        return {"error": f"reminder add failed: {err or 'rc=' + str(rc)}"}
+        return {"error": "osascript not found (not on macOS?)"}
+    except subprocess.TimeoutExpired:
+        return {"error": f"osascript timed out after {timeout}s"}
+    if proc.returncode != 0:
+        msg = (proc.stderr or "").strip().splitlines()[-1] if proc.stderr else "unknown"
+        return {"error": f"osascript: {msg[:300]}"}
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return {"ok": True, "data": None}
     try:
-        parsed = json.loads(out)
+        return {"ok": True, "data": json.loads(raw)}
     except json.JSONDecodeError:
-        return {"error": "reminder add: bad osascript output", "raw": out[:200]}
-    _emit("apple_add_reminder", "success", id=parsed.get("id"))
-    _log(f"reminder add id={parsed.get('id')} text={text[:80]!r}")
-    return {"ok": True, "reminder": parsed}
+        return {"ok": True, "data": raw}
 
 
-def _normalize_due_iso(s: str | None) -> str | None:
-    """Accept either a date or a datetime; emit a JS-parseable ISO
-    string with no trailing timezone (Reminders' Date constructor reads
-    local-time strings happily)."""
-    if not s or not str(s).strip():
+def _run_applescript(script: str, timeout: float = OSA_TIMEOUT) -> dict:
+    """For the rare paths where AppleScript is the only option (Messages
+    send). Returns {ok, output} | {error}."""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        return {"error": "osascript not found"}
+    except subprocess.TimeoutExpired:
+        return {"error": f"osascript timed out after {timeout}s"}
+    if proc.returncode != 0:
+        msg = (proc.stderr or "").strip().splitlines()[-1] if proc.stderr else "unknown"
+        return {"error": f"osascript: {msg[:300]}"}
+    return {"ok": True, "output": (proc.stdout or "").strip()}
+
+
+def _js_str(s: str | None) -> str:
+    """Escape a string for safe embedding inside a JS string literal."""
+    if s is None:
+        return "null"
+    return json.dumps(s)  # JSON strings are valid JS strings.
+
+
+# ── Reminders (JXA) ──────────────────────────────────────────────────
+def _ensure_reminders_list_script(name: str) -> str:
+    return f"""
+    (() => {{
+      const r = Application('Reminders');
+      r.includeStandardAdditions = true;
+      const target = {_js_str(name)};
+      let lst = r.lists.whose({{name: target}});
+      if (lst.length === 0) {{
+        const created = r.List({{name: target}});
+        r.lists.push(created);
+        return JSON.stringify({{created: true, id: created.id()}});
+      }}
+      return JSON.stringify({{created: false, id: lst[0].id()}});
+    }})()
+    """
+
+
+def _reminders_due_iso(due: str | None) -> str | None:
+    """Turn YYYY-MM-DD into a JS-friendly Date string at 5pm local."""
+    if not due:
         return None
-    raw = str(s).strip()
-    # Already a datetime?
     try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return dt.isoformat()
+        d = datetime.fromisoformat(due[:10])
     except ValueError:
-        pass
-    # Date-only? Default to 9am local.
-    try:
-        d = datetime.fromisoformat(raw + "T09:00:00")
-        return d.isoformat()
-    except ValueError:
-        return raw  # let JS try
+        return None
+    return d.replace(hour=17, minute=0, second=0).isoformat()
 
 
-# ── PUBLIC: apple_list_reminders ──────────────────────────────────────
-def apple_list_reminders(include_completed: bool = False,
-                         limit: int = 50) -> dict:
-    """List reminders in the 'Jarvis' list. Pending only by default."""
-    gate = _apple_gate()
-    if gate:
-        return gate
+def apple_add_reminder(text: str, due: str | None = None,
+                       list: str = JARVIS_LIST,
+                       priority: str | None = None,
+                       notes: str | None = None) -> dict:
+    if not (_apple_enabled() and _gate("JARVIS_REMINDERS")):
+        return {"error": "JARVIS_REMINDERS=0"}
+    text = (text or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    list_name = (list or JARVIS_LIST).strip() or JARVIS_LIST
+
+    # Make sure the target list exists.
+    ensure = _run_jxa(_ensure_reminders_list_script(list_name))
+    if not ensure.get("ok"):
+        return ensure
+
+    due_iso = _reminders_due_iso(due) if due else None
+    prio_int = {"high": 1, "medium": 5, "low": 9}.get(
+        (priority or "").lower(), 0)
     script = f"""
-        var Reminders = Application('Reminders');
-        var listName = {_jxa_quote(JARVIS_REMINDER_LIST)};
-        var lst;
-        try {{ lst = Reminders.lists.byName(listName); lst.id(); }}
-        catch (e) {{ JSON.stringify([]); throw "no list"; }}
-        var rems = lst.reminders();
-        var includeCompleted = {('true' if include_completed else 'false')};
-        var out = [];
-        for (var i = 0; i < rems.length; i++) {{
-            var r = rems[i];
-            if (!includeCompleted && r.completed()) continue;
-            var due = null;
-            try {{ var d = r.dueDate(); if (d) due = d.toISOString(); }}
-            catch (e) {{}}
-            out.push({{
-                id: r.id(),
-                name: r.name(),
-                completed: r.completed(),
-                body: r.body() || "",
-                due: due,
-            }});
-        }}
-        JSON.stringify(out);
+    (() => {{
+      const r = Application('Reminders');
+      r.includeStandardAdditions = true;
+      const lst = r.lists.byName({_js_str(list_name)});
+      const props = {{name: {_js_str(text)}}};
+      const reminder = r.Reminder(props);
+      lst.reminders.push(reminder);
+      const dueStr = {_js_str(due_iso)};
+      if (dueStr) {{
+        reminder.dueDate = new Date(dueStr);
+      }}
+      const notesStr = {_js_str(notes)};
+      if (notesStr) {{
+        reminder.body = notesStr;
+      }}
+      const prio = {prio_int};
+      if (prio > 0) {{
+        reminder.priority = prio;
+      }}
+      return JSON.stringify({{id: reminder.id(), name: reminder.name(),
+                              due: dueStr, list: {_js_str(list_name)}}});
+    }})()
     """
-    rc, out, err = _run_jxa(script)
-    if rc != 0 and "no list" not in err:
-        return {"error": f"reminders list failed: {err or 'rc=' + str(rc)}"}
-    try:
-        rems = json.loads(out) if out else []
-    except json.JSONDecodeError:
-        rems = []
-    return {"ok": True, "list": JARVIS_REMINDER_LIST,
-            "count": len(rems), "reminders": rems[:max(1, int(limit))]}
+    started = time.time()
+    out = _run_jxa(script)
+    latency = int((time.time() - started) * 1000)
+    if not out.get("ok"):
+        _emit("add_reminder", "failed", context={"error": out.get("error")},
+              latency_ms=latency)
+        return out
+    _emit("add_reminder", "success",
+          context={"id": (out.get("data") or {}).get("id")},
+          latency_ms=latency)
+    return {"ok": True, "reminder": out.get("data")}
 
 
-# ── PUBLIC: apple_complete_reminder ───────────────────────────────────
-def apple_complete_reminder(name_or_id: str) -> dict:
-    """Mark a reminder completed. Match by exact id, then by canonical
-    substring of the name."""
-    gate = _apple_gate()
-    if gate:
-        return gate
-    if not name_or_id or not name_or_id.strip():
-        return {"error": "name or id required"}
-    needle = name_or_id.strip()
+def apple_list_reminders(list: str = JARVIS_LIST,
+                         include_completed: bool = False,
+                         limit: int = 20) -> dict:
+    if not (_apple_enabled() and _gate("JARVIS_REMINDERS")):
+        return {"error": "JARVIS_REMINDERS=0"}
+    list_name = (list or JARVIS_LIST).strip() or JARVIS_LIST
     script = f"""
-        var Reminders = Application('Reminders');
-        var listName = {_jxa_quote(JARVIS_REMINDER_LIST)};
-        var lst = Reminders.lists.byName(listName);
-        var rems = lst.reminders();
-        var needle = {_jxa_quote(needle)};
-        var needleLower = needle.toLowerCase();
-        var hit = null;
-        var matches = [];
-        for (var i = 0; i < rems.length; i++) {{
-            var r = rems[i];
-            if (r.completed()) continue;
-            if (r.id() === needle) {{ hit = r; break; }}
-            var nm = (r.name() || "").toLowerCase();
-            if (nm.indexOf(needleLower) !== -1) matches.push(r);
-        }}
-        if (!hit && matches.length === 1) hit = matches[0];
-        if (!hit && matches.length > 1) {{
-            var cands = matches.slice(0, 5).map(function(r) {{
-                return {{id: r.id(), name: r.name()}};
-            }});
-            JSON.stringify({{error: "ambiguous", candidates: cands}});
-        }} else if (!hit) {{
-            JSON.stringify({{error: "no match"}});
-        }} else {{
-            hit.completed = true;
-            JSON.stringify({{id: hit.id(), name: hit.name(),
-                              completed: true}});
-        }}
+    (() => {{
+      const r = Application('Reminders');
+      const target = {_js_str(list_name)};
+      const lst = r.lists.whose({{name: target}});
+      if (lst.length === 0) return JSON.stringify({{ok: true, items: []}});
+      const wanted = lst[0].reminders();
+      const out = [];
+      const includeDone = {str(bool(include_completed)).lower()};
+      for (let i = 0; i < wanted.length && out.length < {int(limit)}; i++) {{
+        const it = wanted[i];
+        if (!includeDone && it.completed()) continue;
+        let due = null;
+        try {{ const d = it.dueDate(); if (d) due = d.toISOString(); }} catch (_) {{}}
+        out.push({{
+          id: it.id(),
+          name: it.name(),
+          completed: it.completed(),
+          due: due,
+          body: it.body() || null,
+          priority: it.priority(),
+        }});
+      }}
+      return JSON.stringify({{ok: true, items: out, list: target}});
+    }})()
     """
-    rc, out, err = _run_jxa(script)
-    if rc != 0:
-        return {"error": f"complete failed: {err or 'rc=' + str(rc)}"}
-    try:
-        parsed = json.loads(out)
-    except json.JSONDecodeError:
-        return {"error": "complete: bad osascript output", "raw": out[:200]}
-    if parsed.get("error"):
-        return parsed
-    _emit("apple_complete_reminder", "success", id=parsed.get("id"))
-    return {"ok": True, "reminder": parsed}
+    started = time.time()
+    out = _run_jxa(script)
+    if not out.get("ok"):
+        _emit("list_reminders", "failed",
+              context={"error": out.get("error")},
+              latency_ms=int((time.time() - started) * 1000))
+        return out
+    data = out.get("data") or {}
+    _emit("list_reminders", "success",
+          context={"count": len(data.get("items") or [])},
+          latency_ms=int((time.time() - started) * 1000))
+    return {"ok": True, "items": data.get("items") or [], "list": list_name}
 
 
-# ── PUBLIC: apple_save_note ───────────────────────────────────────────
-def apple_save_note(title: str, body: str = "", append: bool = False) -> dict:
-    """Create or update a note in the 'Jarvis' folder. With append=True,
-    appends to the existing note's body instead of overwriting it."""
-    gate = _apple_gate()
-    if gate:
-        return gate
-    if not title or not title.strip():
-        return {"error": "title is required"}
+def apple_complete_reminder_by_id(reminder_id: str) -> dict:
+    if not (_apple_enabled() and _gate("JARVIS_REMINDERS")):
+        return {"error": "JARVIS_REMINDERS=0"}
+    if not reminder_id:
+        return {"error": "reminder_id required"}
     script = f"""
-        var Notes = Application('Notes');
-        Notes.includeStandardAdditions = true;
-        var folderName = {_jxa_quote(JARVIS_NOTES_FOLDER)};
-        var folder;
-        try {{ folder = Notes.folders.byName(folderName); folder.id(); }}
-        catch (e) {{
-            folder = Notes.Folder({{name: folderName}});
-            Notes.folders.push(folder);
+    (() => {{
+      const r = Application('Reminders');
+      const target = {_js_str(reminder_id)};
+      const all = r.reminders();
+      for (let i = 0; i < all.length; i++) {{
+        if (all[i].id() === target) {{
+          all[i].completed = true;
+          return JSON.stringify({{ok: true, id: target}});
         }}
-        var title = {_jxa_quote(title.strip())};
-        var body  = {_jxa_quote(body or '')};
-        var append = {('true' if append else 'false')};
-        // Notes' note bodies are HTML — wrap our plain text in <pre>
-        // so newlines survive.
-        function escapeHtml(s) {{
-            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-        }}
-        var existing = null;
-        var notes = folder.notes();
-        for (var i = 0; i < notes.length; i++) {{
-            if ((notes[i].name() || '').trim() === title) {{
-                existing = notes[i]; break;
-            }}
-        }}
-        if (existing && append) {{
-            var prev = existing.body();
-            existing.body = prev + "<br><pre>" + escapeHtml(body) + "</pre>";
-            JSON.stringify({{id: existing.id(), title: existing.name(),
-                              appended: true}});
-        }} else if (existing) {{
-            existing.body = "<h1>" + escapeHtml(title) + "</h1><pre>"
-                            + escapeHtml(body) + "</pre>";
-            JSON.stringify({{id: existing.id(), title: existing.name(),
-                              updated: true}});
-        }} else {{
-            var n = Notes.Note({{
-                name: title,
-                body: "<h1>" + escapeHtml(title) + "</h1><pre>"
-                       + escapeHtml(body) + "</pre>",
-            }});
-            folder.notes.push(n);
-            JSON.stringify({{id: n.id(), title: n.name(), created: true}});
-        }}
+      }}
+      return JSON.stringify({{ok: false, error: 'not found'}});
+    }})()
     """
-    rc, out, err = _run_jxa(script)
-    if rc != 0:
-        _emit("apple_save_note", "failed", error=err[:200])
-        return {"error": f"note save failed: {err or 'rc=' + str(rc)}"}
-    try:
-        parsed = json.loads(out)
-    except json.JSONDecodeError:
-        return {"error": "note save: bad osascript output", "raw": out[:200]}
-    _emit("apple_save_note", "success", id=parsed.get("id"))
-    return {"ok": True, "note": parsed}
+    out = _run_jxa(script)
+    if not out.get("ok"):
+        return out
+    data = out.get("data") or {}
+    if not data.get("ok"):
+        return {"error": data.get("error") or "not found"}
+    _emit("complete_reminder", "success", context={"id": reminder_id})
+    return {"ok": True, "id": reminder_id}
 
 
-# ── PUBLIC: apple_read_note ───────────────────────────────────────────
-def apple_read_note(title: str) -> dict:
-    """Find a note in the 'Jarvis' folder by title (case-insensitive
-    substring) and return its body as plain text."""
-    gate = _apple_gate()
-    if gate:
-        return gate
-    if not title or not title.strip():
-        return {"error": "title is required"}
+def apple_complete_reminder(text_or_id: str,
+                            list: str = JARVIS_LIST) -> dict:
+    """Match by id first, then by name (case-insensitive substring) in
+    the given list. Completes the first hit and stops."""
+    if not (_apple_enabled() and _gate("JARVIS_REMINDERS")):
+        return {"error": "JARVIS_REMINDERS=0"}
+    if (text_or_id or "").startswith(("x-coredata:", "x-apple-")):
+        return apple_complete_reminder_by_id(text_or_id)
+    list_name = (list or JARVIS_LIST).strip() or JARVIS_LIST
     script = f"""
-        var Notes = Application('Notes');
-        var folderName = {_jxa_quote(JARVIS_NOTES_FOLDER)};
-        var folder = Notes.folders.byName(folderName);
-        var notes = folder.notes();
-        var needle = {_jxa_quote(title.strip())}.toLowerCase();
-        var hit = null;
-        for (var i = 0; i < notes.length; i++) {{
-            var nm = (notes[i].name() || '').toLowerCase();
-            if (nm.indexOf(needle) !== -1) {{ hit = notes[i]; break; }}
+    (() => {{
+      const r = Application('Reminders');
+      const target = {_js_str((text_or_id or "").lower())};
+      const lst = r.lists.whose({{name: {_js_str(list_name)}}});
+      if (lst.length === 0) return JSON.stringify({{ok: false, error: 'list not found'}});
+      const items = lst[0].reminders();
+      for (let i = 0; i < items.length; i++) {{
+        const it = items[i];
+        if (it.completed()) continue;
+        const n = (it.name() || '').toLowerCase();
+        if (n === target || n.indexOf(target) !== -1 || target.indexOf(n) !== -1) {{
+          it.completed = true;
+          return JSON.stringify({{ok: true, id: it.id(), name: it.name()}});
         }}
-        if (!hit) JSON.stringify({{error: "no match"}});
-        else JSON.stringify({{id: hit.id(), title: hit.name(),
-                                body_html: hit.body()}});
+      }}
+      return JSON.stringify({{ok: false, error: 'no match'}});
+    }})()
     """
-    rc, out, err = _run_jxa(script)
-    if rc != 0:
-        return {"error": f"note read failed: {err or 'rc=' + str(rc)}"}
+    out = _run_jxa(script)
+    if not out.get("ok"):
+        return out
+    data = out.get("data") or {}
+    if not data.get("ok"):
+        return {"error": data.get("error") or "no match"}
+    _emit("complete_reminder", "success", context={"id": data.get("id")})
+    return {"ok": True, "id": data.get("id"), "name": data.get("name")}
+
+
+def _load_commitments_module():
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = ASSISTANT_DIR / "bin" / "jarvis-commitments.py"
+    if not src.exists():
+        return None
     try:
-        parsed = json.loads(out)
-    except json.JSONDecodeError:
-        return {"error": "note read: bad osascript output", "raw": out[:200]}
-    if parsed.get("error"):
-        return parsed
-    body_text = _strip_html(parsed.get("body_html") or "")
-    return {"ok": True, "note": {
-        "id": parsed.get("id"), "title": parsed.get("title"),
-        "body": body_text,
-    }}
+        spec = importlib.util.spec_from_file_location("jarvis_commitments_a", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+    except Exception:
+        return None
 
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
+def apple_sync_commitments() -> dict:
+    """For each open commitment without an apple_reminders id, create
+    one in the Jarvis list and store the id. Pulls completion status
+    back: any reminder marked complete promotes the matching commitment
+    to done."""
+    if not (_apple_enabled() and _gate("JARVIS_REMINDERS")):
+        return {"skipped": "JARVIS_REMINDERS=0"}
+    cmt_mod = _load_commitments_module()
+    if cmt_mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    summary = {"created": 0, "completed": 0, "errors": []}
+
+    items_data = cmt_mod._load_items()
+    items = items_data["items"]
+    dirty = False
+
+    # 1. Push new commitments → reminders.
+    for c in items:
+        if c.get("status") != "open":
+            continue
+        if (c.get("synced_to") or {}).get("apple_reminders"):
+            continue
+        notes = []
+        if c.get("related_contact"):
+            notes.append(f"contact: {c['related_contact']}")
+        if c.get("source", {}).get("context"):
+            notes.append(f"context: {c['source']['context'][:200]}")
+        notes.append(f"jarvis-id: {c['id']}")
+        out = apple_add_reminder(
+            c["text"], due=c.get("due"),
+            priority=c.get("priority"),
+            notes="\n".join(notes),
+        )
+        if not out.get("ok"):
+            summary["errors"].append({"phase": "create", "id": c["id"],
+                                      "error": out.get("error")})
+            continue
+        rem_id = (out.get("reminder") or {}).get("id")
+        if rem_id:
+            c.setdefault("synced_to", {})["apple_reminders"] = rem_id
+            summary["created"] += 1
+            dirty = True
+
+    # 2. Pull completion state.
+    listing = apple_list_reminders(list=JARVIS_LIST,
+                                   include_completed=True, limit=200)
+    completed_ids = set()
+    if listing.get("ok"):
+        for r in listing.get("items") or []:
+            if r.get("completed"):
+                completed_ids.add(r.get("id"))
+    for c in items:
+        rem_id = (c.get("synced_to") or {}).get("apple_reminders")
+        if rem_id and rem_id in completed_ids and c.get("status") != "done":
+            c["status"] = "done"
+            c["completed"] = _now_iso()
+            summary["completed"] += 1
+            dirty = True
+
+    if dirty:
+        cmt_mod._save_items(items_data)
+    _emit("sync_commitments", "success", context=summary)
+    return {"ok": True, "summary": summary}
 
 
-def _strip_html(html: str) -> str:
-    text = _TAG_RE.sub("\n", html or "")
-    text = text.replace("&nbsp;", " ").replace("&amp;", "&") \
-               .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
-    return _WS_RE.sub(" ", text).strip()
+# ── Notes (JXA) ──────────────────────────────────────────────────────
+def _ensure_notes_folder_script(name: str) -> str:
+    return f"""
+    (() => {{
+      const n = Application('Notes');
+      const target = {_js_str(name)};
+      const found = n.folders.whose({{name: target}});
+      if (found.length === 0) {{
+        const f = n.Folder({{name: target}});
+        n.folders.push(f);
+        return JSON.stringify({{created: true}});
+      }}
+      return JSON.stringify({{created: false}});
+    }})()
+    """
 
 
-# ── chat.db helpers ───────────────────────────────────────────────────
-def _open_chatdb() -> sqlite3.Connection | None:
-    """Open chat.db read-only. Returns None when permission is denied —
-    caller surfaces a friendly error so Watson knows to grant Full Disk
-    Access."""
+def apple_save_note(title: str, content: str,
+                    folder: str = JARVIS_NOTES_FOLDER) -> dict:
+    if not (_apple_enabled() and _gate("JARVIS_NOTES")):
+        return {"error": "JARVIS_NOTES=0"}
+    title = (title or "").strip()
+    content = content or ""
+    if not title:
+        return {"error": "title required"}
+    folder_name = (folder or JARVIS_NOTES_FOLDER).strip() or JARVIS_NOTES_FOLDER
+
+    ensure = _run_jxa(_ensure_notes_folder_script(folder_name))
+    if not ensure.get("ok"):
+        return ensure
+
+    # Notes uses HTML-ish bodies. We pass the title as <h1> and let the
+    # rest of the content land as plain text — Notes happily renders
+    # newlines in plain text.
+    safe_body = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_body = safe_body.replace("\n", "<br>")
+    body_html = f"<h1>{title}</h1><div>{safe_body}</div>"
+    script = f"""
+    (() => {{
+      const n = Application('Notes');
+      const fld = n.folders.byName({_js_str(folder_name)});
+      const note = n.Note({{name: {_js_str(title)}, body: {_js_str(body_html)}}});
+      fld.notes.push(note);
+      return JSON.stringify({{ok: true, id: note.id(), name: note.name()}});
+    }})()
+    """
+    started = time.time()
+    out = _run_jxa(script)
+    latency = int((time.time() - started) * 1000)
+    if not out.get("ok"):
+        _emit("save_note", "failed", context={"error": out.get("error")},
+              latency_ms=latency)
+        return out
+    data = out.get("data") or {}
+    _emit("save_note", "success",
+          context={"id": data.get("id"), "folder": folder_name},
+          latency_ms=latency)
+    return {"ok": True, "note": data, "folder": folder_name}
+
+
+def apple_read_note(title: str, folder: str = JARVIS_NOTES_FOLDER) -> dict:
+    if not (_apple_enabled() and _gate("JARVIS_NOTES")):
+        return {"error": "JARVIS_NOTES=0"}
+    title = (title or "").strip()
+    if not title:
+        return {"error": "title required"}
+    folder_name = (folder or JARVIS_NOTES_FOLDER).strip() or JARVIS_NOTES_FOLDER
+    script = f"""
+    (() => {{
+      const n = Application('Notes');
+      const target = {_js_str(title.lower())};
+      const fld = n.folders.whose({{name: {_js_str(folder_name)}}});
+      let pool = [];
+      if (fld.length > 0) pool = fld[0].notes();
+      else pool = n.notes();
+      for (let i = 0; i < pool.length; i++) {{
+        const nm = (pool[i].name() || '').toLowerCase();
+        if (nm === target || nm.indexOf(target) !== -1) {{
+          return JSON.stringify({{ok: true, id: pool[i].id(),
+                                  name: pool[i].name(),
+                                  body: pool[i].plaintext()}});
+        }}
+      }}
+      return JSON.stringify({{ok: false, error: 'note not found'}});
+    }})()
+    """
+    out = _run_jxa(script)
+    if not out.get("ok"):
+        return out
+    data = out.get("data") or {}
+    if not data.get("ok"):
+        return {"error": data.get("error") or "not found"}
+    return {"ok": True, "note": data}
+
+
+# ── iMessages (SQLite read + AppleScript send) ───────────────────────
+def _imessage_apple_epoch_to_iso(apple_ts: int | None) -> str | None:
+    """Apple's chat.db stores message dates as nanoseconds since
+    2001-01-01 UTC. Convert to ISO 8601 local."""
+    if apple_ts is None:
+        return None
+    try:
+        # Newer macOS uses nanoseconds; older used seconds. Heuristic:
+        # values bigger than ~10^11 are nanoseconds.
+        secs = apple_ts / 1_000_000_000 if apple_ts > 10**11 else apple_ts
+        epoch_2001 = 978307200  # 2001-01-01T00:00:00Z in unix seconds
+        return datetime.fromtimestamp(epoch_2001 + secs).astimezone().isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def _normalize_handle(handle: str) -> str:
+    """Strip + - ( ) and spaces from a phone number for matching;
+    leave emails alone."""
+    h = (handle or "").strip()
+    if "@" in h:
+        return h.lower()
+    return "".join(c for c in h if c.isdigit())
+
+
+def _open_chat_db():
     if not CHAT_DB.exists():
         return None
     try:
-        # The URI form is the only way to get a true read-only handle
-        # without risking writes if Apple's schema migrates under us.
-        conn = sqlite3.connect(f"file:{CHAT_DB}?mode=ro&immutable=1",
-                                uri=True, timeout=2.0)
+        # Read-only URI so we never accidentally write.
+        conn = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         return conn
-    except sqlite3.OperationalError as e:
+    except sqlite3.Error as e:
         _log(f"chat.db open failed: {e}")
         return None
 
 
-def _mac_ts_to_unix(mac_ns: int | float | None) -> float:
-    if not mac_ns:
-        return 0.0
-    # Pre-High Sierra files store seconds; modern files store nanoseconds.
-    n = float(mac_ns)
-    if n > 1e15:
-        n = n / 1e9
-    return n + MAC_EPOCH_OFFSET
-
-
-def _format_handle(h: str | None) -> str:
-    if not h:
-        return ""
-    return h.strip()
-
-
-def _resolve_handle(query: str, conn: sqlite3.Connection) -> list[dict]:
-    """Resolve a free-form query (name fragment, phone digits, email)
-    against the handle table. Returns matching {id, service} records."""
-    q = (query or "").strip()
-    if not q:
-        return []
-    # Pure-digit query → strip non-digits in handle.id and compare.
-    digits = re.sub(r"\D", "", q)
-    rows: list[dict] = []
-    if digits and len(digits) >= 7:
-        cur = conn.execute(
-            "SELECT DISTINCT id, service FROM handle "
-            "WHERE id LIKE ? OR REPLACE(REPLACE(REPLACE(id,'+',''),'-',''),' ','') LIKE ? "
-            "LIMIT 12",
-            (f"%{q}%", f"%{digits}%"),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-    if not rows:
-        cur = conn.execute(
-            "SELECT DISTINCT id, service FROM handle WHERE id LIKE ? LIMIT 12",
-            (f"%{q}%",),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-    return rows
-
-
-# ── PUBLIC: imessage_check ────────────────────────────────────────────
-def imessage_check(hours: int = 24) -> dict:
-    """Recent inbound messages (newest first). Drops `is_from_me=1`
-    rows so Watson sees the queue, not his own outbox echoes."""
-    gate = _imessage_gate()
-    if gate:
-        return gate
-    conn = _open_chatdb()
+def imessage_check(contact: str | None = None,
+                   hours: float = 24.0,
+                   limit: int = 20,
+                   unread_only: bool = False) -> dict:
+    """Recent inbound messages in the last `hours`, optionally filtered
+    by contact (match against handle id, email, or phone number).
+    Returns newest first."""
+    if not (_apple_enabled() and _gate("JARVIS_IMESSAGE")):
+        return {"error": "JARVIS_IMESSAGE=0"}
+    if not CHAT_DB.exists():
+        return {"error": f"chat.db not found at {CHAT_DB}"}
+    conn = _open_chat_db()
     if conn is None:
-        return {"error": "could not open chat.db — grant Full Disk Access "
-                         "to your terminal in System Settings → Privacy"}
-    cutoff_unix = time.time() - max(0, int(hours)) * 3600
-    cutoff_mac_ns = int((cutoff_unix - MAC_EPOCH_OFFSET) * 1e9)
-    rows = []
+        return {"error": "could not open chat.db (Full Disk Access?)"}
+
+    # Apple stores dates as ns since 2001-01-01. Build the cutoff in the
+    # same unit so the index can be used.
+    cutoff_unix = (datetime.now() - timedelta(hours=hours)).timestamp()
+    cutoff_apple_ns = int((cutoff_unix - 978307200) * 1_000_000_000)
+
+    where = ["m.is_from_me = 0", "m.date >= ?"]
+    params: list[Any] = [cutoff_apple_ns]
+    if unread_only:
+        where.append("m.is_read = 0")
+    if contact:
+        norm = _normalize_handle(contact)
+        if "@" in norm:
+            where.append("LOWER(h.id) = ?")
+            params.append(norm)
+        elif norm:
+            # Match on the trailing N digits to handle +1 / no-+1 formats.
+            where.append("REPLACE(REPLACE(REPLACE(REPLACE(h.id,'+',''),'-',''),' ',''),'(','') LIKE ?")
+            params.append(f"%{norm[-7:]}")
+        else:
+            where.append("h.id LIKE ?")
+            params.append(f"%{contact}%")
+
+    sql = f"""
+        SELECT m.rowid, m.text, m.date, m.is_from_me, m.is_read,
+               h.id AS handle, h.service AS service
+          FROM message m
+          LEFT JOIN handle h ON m.handle_id = h.rowid
+         WHERE {' AND '.join(where)}
+      ORDER BY m.date DESC
+         LIMIT ?
+    """
+    params.append(int(limit))
     try:
-        cur = conn.execute(
-            """
-            SELECT m.ROWID as rowid, m.text, m.is_from_me, m.date,
-                   m.is_read, h.id as handle, c.display_name,
-                   c.chat_identifier
-              FROM message m
-              LEFT JOIN handle h ON m.handle_id = h.ROWID
-              LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              LEFT JOIN chat c ON c.ROWID = cmj.chat_id
-              WHERE m.date >= ? AND m.is_from_me = 0
-              ORDER BY m.date DESC
-              LIMIT 200
-            """,
-            (cutoff_mac_ns,),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = conn.execute(sql, params).fetchall()
     except sqlite3.Error as e:
+        conn.close()
         return {"error": f"chat.db query: {e}"}
     finally:
-        conn.close()
-
-    out: list[dict] = []
-    seen: set[str] = set()
-    for r in rows:
-        text = (r.get("text") or "").strip()
-        if not text:
-            continue
-        rowid = r.get("rowid")
-        if rowid in seen:
-            continue
-        seen.add(rowid)
-        ts = _mac_ts_to_unix(r.get("date"))
-        out.append({
-            "rowid": rowid,
-            "handle": _format_handle(r.get("handle")),
-            "chat_identifier": r.get("chat_identifier"),
-            "display_name": (r.get("display_name") or "").strip(),
-            "text": text[:600],
-            "is_read": bool(r.get("is_read")),
-            "ts": ts,
-            "iso": datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().isoformat(timespec="seconds") if ts else None,
-        })
-
-    unread_count = sum(1 for m in out if not m["is_read"])
-    by_handle: dict[str, list[dict]] = {}
-    for m in out:
-        by_handle.setdefault(m["handle"] or m.get("chat_identifier") or "?",
-                             []).append(m)
-    threads = [
-        {
-            "handle": k,
-            "messages": v[:5],
-            "newest_iso": v[0]["iso"] if v else None,
-            "unread_count": sum(1 for x in v if not x["is_read"]),
-        }
-        for k, v in by_handle.items()
-    ]
-    threads.sort(key=lambda t: t["newest_iso"] or "", reverse=True)
-    return {
-        "ok": True, "hours": hours,
-        "message_count": len(out),
-        "unread_count": unread_count,
-        "threads": threads[:50],
-    }
-
-
-# ── PUBLIC: imessage_read ─────────────────────────────────────────────
-def imessage_read(handle: str, limit: int = 20) -> dict:
-    """Read recent message history with one handle (phone or email).
-    Returns oldest→newest so the result reads like a transcript."""
-    gate = _imessage_gate()
-    if gate:
-        return gate
-    if not handle or not handle.strip():
-        return {"error": "handle is required"}
-    conn = _open_chatdb()
-    if conn is None:
-        return {"error": "could not open chat.db (Full Disk Access needed)"}
-    try:
-        candidates = _resolve_handle(handle, conn)
-        if not candidates:
-            return {"ok": True, "handle": handle, "messages": [],
-                    "hint": "no chat history with that handle"}
-        ids = [c["id"] for c in candidates]
-        placeholders = ",".join("?" * len(ids))
-        cur = conn.execute(
-            f"""
-            SELECT m.ROWID as rowid, m.text, m.is_from_me, m.date, m.is_read,
-                   h.id as handle, c.display_name
-              FROM message m
-              LEFT JOIN handle h ON m.handle_id = h.ROWID
-              LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              LEFT JOIN chat c ON c.ROWID = cmj.chat_id
-             WHERE h.id IN ({placeholders})
-             ORDER BY m.date DESC
-             LIMIT ?
-            """,
-            (*ids, max(1, int(limit))),
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-    except sqlite3.Error as e:
-        return {"error": f"chat.db query: {e}"}
-    finally:
-        conn.close()
-
-    msgs: list[dict] = []
-    for r in rows:
-        text = (r.get("text") or "").strip()
-        if not text:
-            continue
-        ts = _mac_ts_to_unix(r.get("date"))
-        msgs.append({
-            "rowid": r.get("rowid"),
-            "from_me": bool(r.get("is_from_me")),
-            "handle": _format_handle(r.get("handle")),
-            "text": text[:1000],
-            "ts": ts,
-            "iso": datetime.fromtimestamp(ts, tz=timezone.utc).astimezone().isoformat(timespec="seconds") if ts else None,
-        })
-    msgs.sort(key=lambda m: m.get("ts") or 0)
-    return {"ok": True, "handle": handle, "count": len(msgs),
-            "messages": msgs}
-
-
-# ── PUBLIC: imessage_send ─────────────────────────────────────────────
-def imessage_send(handle: str, message: str, confirm: bool = False) -> dict:
-    """Send an iMessage to `handle` (phone OR email). Two-stage flow:
-    confirm=False returns a preview Watson must approve; confirm=True
-    actually sends via AppleScript on Messages.app."""
-    gate = _imessage_gate()
-    if gate:
-        return gate
-    if not handle or not handle.strip():
-        return {"error": "handle is required"}
-    if not message or not message.strip():
-        return {"error": "message is required"}
-
-    if not confirm:
-        return {
-            "sent": False,
-            "needs_confirmation": True,
-            "platform": "imessage",
-            "to": handle,
-            "preview": message,
-            "char_count": len(message),
-            "hint": ("Read the preview to Watson. After he says yes, "
-                     "re-call with confirm=true."),
-        }
-
-    # AppleScript path — Messages.app + iMessage service.
-    script = f"""
-        tell application "Messages"
-            set targetService to 1st service whose service type = iMessage
-            set targetBuddy to participant {_applescript_quote(handle.strip())} of targetService
-            send {_applescript_quote(message)} to targetBuddy
-        end tell
-    """
-    rc, out, err = _run_applescript(script, timeout=15)
-    if rc != 0:
-        # Fall back: some setups expect "buddy" instead of "participant".
-        script2 = f"""
-            tell application "Messages"
-                set targetService to 1st service whose service type = iMessage
-                set targetBuddy to buddy {_applescript_quote(handle.strip())} of targetService
-                send {_applescript_quote(message)} to targetBuddy
-            end tell
-        """
-        rc2, _, err2 = _run_applescript(script2, timeout=15)
-        if rc2 != 0:
-            _emit("imessage_send", "failed", error=(err or err2)[:200],
-                  __cap="messaging")
-            return {"error": f"send failed: {err or err2 or 'rc=' + str(rc)}"}
-    _emit("imessage_send", "success", to=handle, __cap="messaging")
-    _log(f"imessage send to={handle} len={len(message)}")
-    # Best-effort: bump the contact record so the relationship pulse
-    # learns about this exchange.
-    try:
-        _maybe_note_contact("imessage", handle,
-                            summary=f"Sent iMessage: {message[:120]}")
-    except Exception:
-        pass
-    return {"ok": True, "sent": True, "to": handle}
-
-
-def _maybe_note_contact(channel: str, handle: str, summary: str = "") -> None:
-    mod = _contacts()
-    if mod is None:
-        return
-    try:
-        mod.note_interaction(channel=channel, handle=handle, summary=summary)
-    except Exception as e:
-        _log(f"contacts note skipped: {e}")
-
-
-# ── PUBLIC: imessage_search_contacts ──────────────────────────────────
-def imessage_search_contacts(query: str, limit: int = 12) -> dict:
-    """Search chat.db for handles whose id (phone/email) or chat
-    display_name matches `query`. Useful for resolving 'send Karina an
-    iMessage' to a real handle."""
-    gate = _imessage_gate()
-    if gate:
-        return gate
-    if not query or not query.strip():
-        return {"error": "query is required"}
-    conn = _open_chatdb()
-    if conn is None:
-        return {"error": "could not open chat.db (Full Disk Access needed)"}
-    try:
-        # Direct handle hits
-        handles = _resolve_handle(query, conn)
-        # Plus chat display-name hits, since Apple stores group/contact
-        # names independently of the underlying handle.
-        cur = conn.execute(
-            """
-            SELECT DISTINCT c.chat_identifier, c.display_name, h.id as handle
-              FROM chat c
-              LEFT JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
-              LEFT JOIN handle h ON h.ROWID = chj.handle_id
-             WHERE c.display_name LIKE ?
-             LIMIT ?
-            """,
-            (f"%{query}%", max(1, int(limit))),
-        )
-        chat_hits = [dict(r) for r in cur.fetchall()]
-    except sqlite3.Error as e:
-        return {"error": f"chat.db query: {e}"}
-    finally:
-        conn.close()
-
-    out: list[dict] = []
-    seen: set[str] = set()
-    for h in handles[: max(1, int(limit))]:
-        key = (h.get("id") or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append({"handle": key, "service": h.get("service"),
-                    "display_name": None})
-    for ch in chat_hits:
-        key = (ch.get("handle") or ch.get("chat_identifier") or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append({"handle": key,
-                    "service": "iMessage",
-                    "display_name": (ch.get("display_name") or "").strip() or None})
-    return {"ok": True, "query": query, "count": len(out), "matches": out[:limit]}
-
-
-# ── PUBLIC: apple_contacts_search ─────────────────────────────────────
-def apple_contacts_search(query: str, limit: int = 8) -> dict:
-    """Search Apple Contacts for a name fragment. Returns name + phones
-    + emails so the caller (jarvis-network enrich) can backfill the
-    contact record."""
-    gate = _apple_gate()
-    if gate:
-        return gate
-    if not query or not query.strip():
-        return {"error": "query is required"}
-    # AppleScript — Contacts.app's JXA bridge is flaky on people; AppleScript
-    # is the dependable path.
-    needle = query.strip()
-    script = f"""
-        set out to {{}}
-        tell application "Contacts"
-            set hits to every person whose name contains {_applescript_quote(needle)}
-            repeat with p in hits
-                set theName to name of p
-                set thePhones to {{}}
-                repeat with ph in (phones of p)
-                    set end of thePhones to (value of ph as string)
-                end repeat
-                set theEmails to {{}}
-                repeat with em in (emails of p)
-                    set end of theEmails to (value of em as string)
-                end repeat
-                set theOrg to ""
-                try
-                    set theOrg to organization of p
-                end try
-                copy {{theName, thePhones, theEmails, theOrg}} to end of out
-            end repeat
-        end tell
-        set AppleScript's text item delimiters to "|"
-        set lines to {{}}
-        repeat with rec in out
-            set theName to item 1 of rec
-            set phs to item 2 of rec
-            set ems to item 3 of rec
-            set org to item 4 of rec
-            set AppleScript's text item delimiters to ","
-            set phsJoined to phs as string
-            set emsJoined to ems as string
-            set AppleScript's text item delimiters to "|"
-            set end of lines to theName & "|" & phsJoined & "|" & emsJoined & "|" & org
-        end repeat
-        set output to lines as string
-        set AppleScript's text item delimiters to ""
-        return output
-    """
-    rc, out, err = _run_applescript(script, timeout=10)
-    if rc != 0:
-        return {"error": f"contacts search failed: {err or 'rc=' + str(rc)}"}
-    if not out.strip():
-        return {"ok": True, "query": query, "count": 0, "matches": []}
-    matches: list[dict] = []
-    for line in out.split("\n"):
-        line = line.rstrip("\r")
-        if not line.strip():
-            continue
-        parts = line.split("|", 3)
-        if len(parts) < 4:
-            continue
-        name, phones, emails, org = parts
-        matches.append({
-            "name": name.strip(),
-            "phones": [p.strip() for p in phones.split(",") if p.strip()],
-            "emails": [e.strip() for e in emails.split(",") if e.strip()],
-            "organization": org.strip() or None,
-        })
-    return {"ok": True, "query": query, "count": len(matches),
-            "matches": matches[:max(1, int(limit))]}
-
-
-# ── PUBLIC: apple_contacts_list_all ───────────────────────────────────
-def apple_contacts_list_all() -> dict:
-    """Dump every person in Contacts.app: name, phones, emails, org.
-    Used by jarvis-contacts sync to make Apple Contacts the source of
-    truth for who exists in Watson's relationship memory.
-
-    Implemented in JXA so output is JSON — survives names/orgs that
-    contain pipes, commas, or newlines, and gracefully handles records
-    with `missing value` on name / phone / email / organization."""
-    gate = _apple_gate()
-    if gate:
-        return gate
-    script = r"""
-        const Contacts = Application('Contacts');
-        // Bulk-fetch each property as a single Apple Event — orders of
-        // magnitude faster than per-person attribute access on stores
-        // with hundreds of contacts. Each `Contacts.people.X()` call
-        // returns an array aligned by index across the four properties.
-        let names = [], orgs = [], phs = [], ems = [];
-        try { names = Contacts.people.name(); } catch (e) {}
-        try { orgs = Contacts.people.organization(); } catch (e) {}
-        try { phs = Contacts.people.phones.value(); } catch (e) {}
-        try { ems = Contacts.people.emails.value(); } catch (e) {}
-        const out = [];
-        const norm = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : '';
-        const flat = (a) => Array.isArray(a)
-            ? a.map(norm).filter(Boolean)
-            : (typeof a === 'string' ? [norm(a)].filter(Boolean) : []);
-        for (let i = 0; i < names.length; i++) {
-            const name = norm(names[i]);
-            if (!name) continue;
-            const org = norm(orgs && orgs[i]);
-            const phones = flat(phs && phs[i]);
-            const emails = flat(ems && ems[i]);
-            out.push({ name, phones, emails, organization: org || null });
-        }
-        JSON.stringify(out);
-    """
-    # Apple Contacts can have thousands of records; allow a generous
-    # timeout (default 2 min) overridable via JARVIS_CONTACTS_LIST_TIMEOUT.
-    # Bulk fetch typically completes in <10s for ~600 contacts.
-    timeout_s = float(os.environ.get("JARVIS_CONTACTS_LIST_TIMEOUT", "120"))
-    rc, out, err = _run_jxa(script, timeout=timeout_s)
-    if rc != 0:
-        return {"error": f"contacts list failed: {err or 'rc=' + str(rc)}"}
-    if not out.strip():
-        return {"ok": True, "count": 0, "contacts": []}
-    try:
-        contacts = json.loads(out)
-    except json.JSONDecodeError as e:
-        return {"error": f"contacts list parse failed: {e}"}
-    if not isinstance(contacts, list):
-        return {"error": "contacts list returned non-list payload"}
-    # Final sanity pass: drop any malformed entries silently.
-    cleaned: list[dict] = []
-    for c in contacts:
-        if not isinstance(c, dict):
-            continue
-        nm = (c.get("name") or "").strip()
-        if not nm:
-            continue
-        cleaned.append({
-            "name": nm,
-            "phones": [p.strip() for p in (c.get("phones") or []) if isinstance(p, str) and p.strip()],
-            "emails": [e.strip() for e in (c.get("emails") or []) if isinstance(e, str) and e.strip()],
-            "organization": (c.get("organization") or None) if isinstance(c.get("organization"), str) and c.get("organization").strip() else None,
-        })
-    return {"ok": True, "count": len(cleaned), "contacts": cleaned}
-
-
-# ── briefing + context + notification + network hooks ─────────────────
-def briefing_section() -> str:
-    """Markdown 'iMessages' subsection — unread inbound messages only,
-    grouped by handle. Empty when nothing is sitting unread."""
-    if _imessage_gate() is not None:
-        return ""
-    res = imessage_check(hours=24)
-    if not res.get("ok"):
-        return ""
-    threads = res.get("threads") or []
-    unread_threads = [t for t in threads if t.get("unread_count")]
-    if not unread_threads:
-        return ""
-    # Boost contacts-tier threads to the top — looks up via jarvis-contacts.
-    cmod = _contacts()
-    annotated: list[tuple[int, dict, str]] = []
-    for t in unread_threads:
-        handle = t.get("handle") or "?"
-        contact_name = ""
-        rank = 1  # default rank (non-contact)
-        if cmod is not None:
-            try:
-                hit = cmod._resolve(handle)  # type: ignore[attr-defined]
-            except Exception:
-                hit = None
-            if hit:
-                _, rec = hit
-                contact_name = rec.get("name") or ""
-                rank = 0
-        annotated.append((rank, t, contact_name))
-    annotated.sort(key=lambda r: (r[0], -(r[1].get("unread_count") or 0)))
-
-    lines = ["## iMessages", ""]
-    for rank, t, contact_name in annotated[:8]:
-        handle = t.get("handle") or "?"
-        label = contact_name or handle
-        msgs = t.get("messages") or []
-        preview = (msgs[0].get("text") if msgs else "") or ""
-        lines.append(f"- **{label}** ({t.get('unread_count')} unread): "
-                     f"{preview[:120]}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def context_hint(mentioned_names: list[str] | None = None) -> str:
-    """One-line system-prompt hint when a mentioned name has unread
-    iMessages on file. Empty otherwise."""
-    if not mentioned_names or _imessage_gate() is not None:
-        return ""
-    res = imessage_check(hours=72)
-    if not res.get("ok"):
-        return ""
-    cmod = _contacts()
-    if cmod is None:
-        return ""
-    for nm in mentioned_names[:3]:
         try:
-            hit = cmod._resolve(nm)  # type: ignore[attr-defined]
+            conn.close()
         except Exception:
-            hit = None
-        if not hit:
-            continue
-        _, rec = hit
-        target = (rec.get("phone") or "").strip()
-        # Look up which handle in the threads belongs to this contact.
-        canon = _canonical(rec.get("name") or "")
-        for t in res.get("threads") or []:
-            if not t.get("unread_count"):
-                continue
-            handle = t.get("handle") or ""
-            display = (t.get("messages") or [{}])[0].get("display_name") or ""
-            if (target and target in handle) or (canon and canon in _canonical(display)):
-                return (f"**iMessage:** {rec.get('name')} has "
-                        f"{t['unread_count']} unread message"
-                        f"{'s' if t['unread_count'] != 1 else ''}.")
-    return ""
+            pass
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["rowid"],
+            "handle": r["handle"],
+            "service": r["service"],
+            "text": r["text"],
+            "ts": _imessage_apple_epoch_to_iso(r["date"]),
+            "is_read": bool(r["is_read"]),
+            "from_me": bool(r["is_from_me"]),
+        })
+    _emit("imessage_check", "success", context={"count": len(out),
+                                                "contact": contact})
+    return {"ok": True, "messages": out, "count": len(out)}
 
 
-def interaction_signal_for_contact(rec: dict, hours: int = 72) -> dict:
-    """Count recent iMessage activity for one contact record. Returns
-    {count, last_ts} so jarvis-network can fold it into relationship
-    strength alongside email + telegram."""
-    if _imessage_gate() is not None:
-        return {"count": 0, "last_ts": None}
-    handle = (rec.get("phone") or rec.get("imessage_handle") or "").strip()
-    if not handle:
-        return {"count": 0, "last_ts": None}
-    conn = _open_chatdb()
+def imessage_read(contact: str, limit: int = 50) -> dict:
+    """Two-sided thread with one contact, newest last (so it reads top
+    to bottom in chronological order). Best for catching up on a
+    specific conversation."""
+    if not (_apple_enabled() and _gate("JARVIS_IMESSAGE")):
+        return {"error": "JARVIS_IMESSAGE=0"}
+    if not contact:
+        return {"error": "contact required"}
+    conn = _open_chat_db()
     if conn is None:
-        return {"count": 0, "last_ts": None}
-    cutoff_unix = time.time() - max(1, int(hours)) * 3600
-    cutoff_mac_ns = int((cutoff_unix - MAC_EPOCH_OFFSET) * 1e9)
+        return {"error": "could not open chat.db (Full Disk Access?)"}
+    norm = _normalize_handle(contact)
+    if "@" in norm:
+        where = "LOWER(h.id) = ?"
+        params: list[Any] = [norm]
+    elif norm:
+        where = "REPLACE(REPLACE(REPLACE(REPLACE(h.id,'+',''),'-',''),' ',''),'(','') LIKE ?"
+        params = [f"%{norm[-7:]}"]
+    else:
+        where = "h.id LIKE ?"
+        params = [f"%{contact}%"]
+    sql = f"""
+        SELECT m.rowid, m.text, m.date, m.is_from_me,
+               h.id AS handle, h.service AS service
+          FROM message m
+          LEFT JOIN handle h ON m.handle_id = h.rowid
+         WHERE {where}
+      ORDER BY m.date DESC
+         LIMIT ?
+    """
+    params.append(int(limit))
     try:
-        cur = conn.execute(
-            """
-            SELECT COUNT(*) as n, MAX(m.date) as last_date
-              FROM message m
-              LEFT JOIN handle h ON m.handle_id = h.ROWID
-             WHERE h.id LIKE ? AND m.date >= ?
-            """,
-            (f"%{handle}%", cutoff_mac_ns),
-        )
-        row = cur.fetchone()
-    except sqlite3.Error:
-        return {"count": 0, "last_ts": None}
-    finally:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error as e:
         conn.close()
-    if not row:
-        return {"count": 0, "last_ts": None}
-    last_ts = _mac_ts_to_unix(row["last_date"]) if row["last_date"] else None
-    last_iso = (datetime.fromtimestamp(last_ts, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
-                if last_ts else None)
-    return {"count": int(row["n"] or 0), "last_ts": last_iso}
+        return {"error": f"chat.db query: {e}"}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    msgs = [{
+        "handle": r["handle"], "service": r["service"], "text": r["text"],
+        "ts": _imessage_apple_epoch_to_iso(r["date"]),
+        "from_me": bool(r["is_from_me"]),
+    } for r in rows]
+    msgs.reverse()
+    return {"ok": True, "contact": contact, "messages": msgs}
 
 
-def recent_urgent(minutes: int = 10) -> list[dict]:
-    """Return inbound iMessages from the last `minutes` so the wake-
-    listener can route them as fresh-DM notifications."""
-    if _imessage_gate() is not None:
-        return []
-    res = imessage_check(hours=max(1, minutes // 60 + 1))
-    if not res.get("ok"):
-        return []
-    cutoff = time.time() - max(1, int(minutes)) * 60
-    out: list[dict] = []
-    for t in res.get("threads") or []:
-        for m in t.get("messages") or []:
-            if (m.get("ts") or 0) >= cutoff and not m.get("is_read"):
-                out.append({"handle": m.get("handle"),
-                            "text": m.get("text"),
-                            "ts": m.get("ts"),
-                            "iso": m.get("iso")})
-    out.sort(key=lambda r: r.get("ts") or 0)
-    return out
+def imessage_send(contact: str, message: str, confirm: bool = True,
+                  service: str = "iMessage") -> dict:
+    """Send via Messages.app. The `confirm` gate is a safety net for
+    Watson — when False the python wrapper refuses to send unless the
+    caller explicitly bypassed the preview-then-send flow upstream."""
+    if not (_apple_enabled() and _gate("JARVIS_IMESSAGE")):
+        return {"error": "JARVIS_IMESSAGE=0"}
+    if not confirm:
+        return {"error": "send not confirmed (preview-then-confirm flow required)"}
+    contact = (contact or "").strip()
+    message = (message or "").strip()
+    if not contact or not message:
+        return {"error": "contact and message both required"}
+
+    target = contact
+    # AppleScript wants either a buddy id (phone/email) or a chat. We
+    # pass the raw handle and let Messages resolve it.
+    script = f'''
+    on run
+      tell application "Messages"
+        set targetService to first service whose service type = {service}
+        set targetBuddy to buddy "{target}" of targetService
+        send "{_apple_quote(message)}" to targetBuddy
+      end tell
+    end run
+    '''
+    started = time.time()
+    out = _run_applescript(script)
+    latency = int((time.time() - started) * 1000)
+    if not out.get("ok"):
+        _emit("imessage_send", "failed",
+              context={"contact": target, "error": out.get("error")},
+              latency_ms=latency)
+        return out
+    _emit("imessage_send", "success",
+          context={"contact": target, "len": len(message)},
+          latency_ms=latency)
+    return {"ok": True, "sent_to": target, "service": service}
 
 
-# ── CLI ────────────────────────────────────────────────────────────────
-def _cli() -> int:
-    p = argparse.ArgumentParser(description="Jarvis Apple integration")
+def _apple_quote(s: str) -> str:
+    """Escape a string for safe inclusion inside an AppleScript double-
+    quoted literal (escape backslashes and double quotes)."""
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def imessage_search_contacts(query: str) -> dict:
+    """Find handles (phone/email) in chat.db that match the query.
+    Useful when Watson asks 'message Corbin' and we need to resolve to
+    a specific phone number — falls through to apple_contacts_search if
+    the address book has a richer record."""
+    if not (_apple_enabled() and _gate("JARVIS_IMESSAGE")):
+        return {"error": "JARVIS_IMESSAGE=0"}
+    query = (query or "").strip()
+    if not query:
+        return {"error": "query required"}
+    conn = _open_chat_db()
+    if conn is None:
+        return {"error": "could not open chat.db (Full Disk Access?)"}
+    try:
+        rows = conn.execute("""
+            SELECT h.id AS handle, h.service AS service, COUNT(m.rowid) AS msgs
+              FROM handle h
+              LEFT JOIN message m ON m.handle_id = h.rowid
+             WHERE h.id LIKE ?
+          GROUP BY h.id, h.service
+          ORDER BY msgs DESC
+             LIMIT 20
+        """, (f"%{query}%",)).fetchall()
+    except sqlite3.Error as e:
+        conn.close()
+        return {"error": f"chat.db query: {e}"}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return {"ok": True, "handles": [dict(r) for r in rows]}
+
+
+# ── Apple Contacts (JXA) ─────────────────────────────────────────────
+def apple_contacts_search(query: str, limit: int = 10) -> dict:
+    """Hit Contacts.app directly. Used by jarvis-network to enrich the
+    canonical people.json with native phone/email rows."""
+    if not _apple_enabled():
+        return {"error": "JARVIS_APPLE=0"}
+    query = (query or "").strip()
+    if not query:
+        return {"error": "query required"}
+    script = f"""
+    (() => {{
+      const c = Application('Contacts');
+      const q = {_js_str(query.lower())};
+      const all = c.people();
+      const out = [];
+      for (let i = 0; i < all.length && out.length < {int(limit)}; i++) {{
+        const p = all[i];
+        const name = (p.name() || '').toLowerCase();
+        const org  = (p.organization() || '').toLowerCase();
+        if (name.indexOf(q) === -1 && org.indexOf(q) === -1) continue;
+        const emails = (p.emails() || []).map(e => ({{label: e.label(), value: e.value()}}));
+        const phones = (p.phones() || []).map(t => ({{label: t.label(), value: t.value()}}));
+        out.push({{
+          id: p.id(),
+          name: p.name(),
+          first: p.firstName(),
+          last: p.lastName(),
+          organization: p.organization(),
+          emails: emails,
+          phones: phones,
+          note: p.note() || null,
+        }});
+      }}
+      return JSON.stringify({{ok: true, items: out}});
+    }})()
+    """
+    started = time.time()
+    out = _run_jxa(script)
+    latency = int((time.time() - started) * 1000)
+    if not out.get("ok"):
+        _emit("contacts_search", "failed",
+              context={"error": out.get("error")},
+              latency_ms=latency)
+        return out
+    data = out.get("data") or {}
+    _emit("contacts_search", "success",
+          context={"count": len(data.get("items") or [])},
+          latency_ms=latency)
+    return {"ok": True, "items": data.get("items") or []}
+
+
+# ── CLI ──────────────────────────────────────────────────────────────
+def _cli(argv: list[str]) -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(description="Jarvis Apple integration layer")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Reminders
-    pra = sub.add_parser("add-reminder")
-    pra.add_argument("text")
-    pra.add_argument("--due", default=None)
-    pra.add_argument("--notes", default=None)
-    prl = sub.add_parser("list-reminders")
-    prl.add_argument("--include-completed", action="store_true")
-    prl.add_argument("--limit", type=int, default=50)
-    prc = sub.add_parser("complete-reminder")
-    prc.add_argument("name_or_id")
+    par = sub.add_parser("add-reminder")
+    par.add_argument("text")
+    par.add_argument("--due", default=None)
+    par.add_argument("--list", default=JARVIS_LIST)
+    par.add_argument("--priority", default=None,
+                     choices=("high", "medium", "low"))
+    par.add_argument("--notes", default=None)
 
-    # Notes
-    pns = sub.add_parser("save-note")
-    pns.add_argument("title")
-    pns.add_argument("body", nargs="?", default="")
-    pns.add_argument("--append", action="store_true")
-    pnr = sub.add_parser("read-note")
-    pnr.add_argument("title")
+    plr = sub.add_parser("list-reminders")
+    plr.add_argument("--list", default=JARVIS_LIST)
+    plr.add_argument("--include-completed", action="store_true")
+    plr.add_argument("--limit", type=int, default=20)
 
-    # iMessage
-    pim = sub.add_parser("imessage-check")
-    pim.add_argument("--hours", type=int, default=24)
+    pcr = sub.add_parser("complete-reminder")
+    pcr.add_argument("text_or_id")
+    pcr.add_argument("--list", default=JARVIS_LIST)
+
+    sub.add_parser("sync-commitments")
+
+    psn = sub.add_parser("save-note")
+    psn.add_argument("title")
+    psn.add_argument("content")
+    psn.add_argument("--folder", default=JARVIS_NOTES_FOLDER)
+
+    prn = sub.add_parser("read-note")
+    prn.add_argument("title")
+    prn.add_argument("--folder", default=JARVIS_NOTES_FOLDER)
+
+    pic = sub.add_parser("imessage-check")
+    pic.add_argument("--contact", default=None)
+    pic.add_argument("--hours", type=float, default=24)
+    pic.add_argument("--limit", type=int, default=20)
+    pic.add_argument("--unread-only", action="store_true")
+
     pir = sub.add_parser("imessage-read")
-    pir.add_argument("handle")
-    pir.add_argument("--limit", type=int, default=20)
+    pir.add_argument("contact")
+    pir.add_argument("--limit", type=int, default=50)
+
     pis = sub.add_parser("imessage-send")
-    pis.add_argument("handle")
+    pis.add_argument("contact")
     pis.add_argument("message")
-    pis.add_argument("--confirm", action="store_true")
-    pisc = sub.add_parser("imessage-search")
+    pis.add_argument("--service", default="iMessage")
+    pis.add_argument("--no-confirm", action="store_true",
+                     help="Skip the python-side confirm gate (for testing).")
+
+    pisc = sub.add_parser("imessage-search-contacts")
     pisc.add_argument("query")
 
-    # Contacts
     pcs = sub.add_parser("contacts-search")
     pcs.add_argument("query")
-    sub.add_parser("contacts-list-all")
+    pcs.add_argument("--limit", type=int, default=10)
 
-    # Hooks (smoke testing)
-    sub.add_parser("briefing-section")
-    pch = sub.add_parser("context-hint")
-    pch.add_argument("--names", default=None)
-    sub.add_parser("status")
-
-    args = p.parse_args()
-
-    def _dump(obj):
-        print(json.dumps(obj, ensure_ascii=False, indent=2))
-
+    args = p.parse_args(argv)
     if args.cmd == "add-reminder":
-        _dump(apple_add_reminder(args.text, due=args.due, notes=args.notes))
-        return 0
-    if args.cmd == "list-reminders":
-        _dump(apple_list_reminders(include_completed=args.include_completed,
-                                    limit=args.limit))
-        return 0
-    if args.cmd == "complete-reminder":
-        _dump(apple_complete_reminder(args.name_or_id))
-        return 0
-    if args.cmd == "save-note":
-        _dump(apple_save_note(args.title, args.body, append=args.append))
-        return 0
-    if args.cmd == "read-note":
-        _dump(apple_read_note(args.title))
-        return 0
-    if args.cmd == "imessage-check":
-        _dump(imessage_check(hours=args.hours))
-        return 0
-    if args.cmd == "imessage-read":
-        _dump(imessage_read(args.handle, limit=args.limit))
-        return 0
-    if args.cmd == "imessage-send":
-        _dump(imessage_send(args.handle, args.message, confirm=args.confirm))
-        return 0
-    if args.cmd == "imessage-search":
-        _dump(imessage_search_contacts(args.query))
-        return 0
-    if args.cmd == "contacts-search":
-        _dump(apple_contacts_search(args.query))
-        return 0
-    if args.cmd == "contacts-list-all":
-        _dump(apple_contacts_list_all())
-        return 0
-    if args.cmd == "briefing-section":
-        s = briefing_section()
-        print(s if s else "(no unread iMessages)")
-        return 0
-    if args.cmd == "context-hint":
-        names = [n.strip() for n in (args.names or "").split(",") if n.strip()]
-        h = context_hint(mentioned_names=names or None)
-        print(h if h else "(no hint)")
-        return 0
-    if args.cmd == "status":
-        print(json.dumps({
-            "ok": True,
-            "platform": platform.system(),
-            "apple_enabled": _apple_gate() is None,
-            "imessage_enabled": _imessage_gate() is None,
-            "chat_db_exists": CHAT_DB.exists(),
-            "reminder_list": JARVIS_REMINDER_LIST,
-            "notes_folder": JARVIS_NOTES_FOLDER,
-        }, indent=2, ensure_ascii=False))
-        return 0
-    return 2
+        out = apple_add_reminder(args.text, due=args.due, list=args.list,
+                                 priority=args.priority, notes=args.notes)
+    elif args.cmd == "list-reminders":
+        out = apple_list_reminders(list=args.list,
+                                   include_completed=args.include_completed,
+                                   limit=args.limit)
+    elif args.cmd == "complete-reminder":
+        out = apple_complete_reminder(args.text_or_id, list=args.list)
+    elif args.cmd == "sync-commitments":
+        out = apple_sync_commitments()
+    elif args.cmd == "save-note":
+        out = apple_save_note(args.title, args.content, folder=args.folder)
+    elif args.cmd == "read-note":
+        out = apple_read_note(args.title, folder=args.folder)
+    elif args.cmd == "imessage-check":
+        out = imessage_check(contact=args.contact, hours=args.hours,
+                             limit=args.limit, unread_only=args.unread_only)
+    elif args.cmd == "imessage-read":
+        out = imessage_read(args.contact, limit=args.limit)
+    elif args.cmd == "imessage-send":
+        out = imessage_send(args.contact, args.message,
+                            confirm=not args.no_confirm,
+                            service=args.service)
+    elif args.cmd == "imessage-search-contacts":
+        out = imessage_search_contacts(args.query)
+    elif args.cmd == "contacts-search":
+        out = apple_contacts_search(args.query, limit=args.limit)
+    else:
+        return 2
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if (isinstance(out, dict) and out.get("ok")) else 1
 
 
 if __name__ == "__main__":
-    sys.exit(_cli())
+    try:
+        sys.exit(_cli(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

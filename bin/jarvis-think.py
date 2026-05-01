@@ -281,8 +281,25 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "run_command": "shell",
     "get_time": "clock",
     "get_date": "clock",
-    "model_status": "model",
-    "model_stats": "model",
+    "extract_commitments": "commitments",
+    "add_commitment": "commitments",
+    "list_commitments": "commitments",
+    "complete_commitment": "commitments",
+    "commitment_report": "commitments",
+    "trello_sync": "trello",
+    "trello_boards": "trello",
+    "trello_add": "trello",
+    "trello_move": "trello",
+    "apple_add_reminder": "apple",
+    "apple_list_reminders": "apple",
+    "apple_complete_reminder": "apple",
+    "apple_save_note": "apple",
+    "apple_read_note": "apple",
+    "imessage_check": "imessage",
+    "imessage_read": "imessage",
+    "imessage_send": "imessage",
+    "imessage_search_contacts": "imessage",
+    "apple_contacts_search": "apple",
 }
 
 
@@ -730,7 +747,9 @@ _style_mod = None
 _contacts_mod = None
 _notif_mod = None
 _social_mod = None
-_network_mod = None
+_commitments_mod = None
+_trello_mod = None
+_apple_mod = None
 
 
 def _load_email_module():
@@ -945,6 +964,66 @@ def _load_network_module():
         return mod
     except Exception as e:
         sys.stderr.write(f"jarvis-think: network module load failed ({e})\n")
+        return None
+
+
+def _load_commitments_module():
+    global _commitments_mod
+    if _commitments_mod is not None:
+        return _commitments_mod
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-commitments.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_commitments", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _commitments_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: commitments module load failed ({e})\n")
+        return None
+
+
+def _load_trello_module():
+    global _trello_mod
+    if _trello_mod is not None:
+        return _trello_mod
+    src = BIN_DIR / "jarvis-trello.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-trello.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_trello", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _trello_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: trello module load failed ({e})\n")
+        return None
+
+
+def _load_apple_module():
+    global _apple_mod
+    if _apple_mod is not None:
+        return _apple_mod
+    src = BIN_DIR / "jarvis-apple.py"
+    if not src.exists():
+        src = Path(__file__).parent / "jarvis-apple.py"
+    if not src.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("jarvis_apple", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        _apple_mod = mod
+        return mod
+    except Exception as e:
+        sys.stderr.write(f"jarvis-think: apple module load failed ({e})\n")
         return None
 
 
@@ -1733,6 +1812,230 @@ def _tool_network_alerts(args: dict, _mem: Memory) -> dict:
     if mod is None:
         return {"error": "jarvis-network module not installed"}
     return mod.network_alerts(refresh=bool(args.get("refresh")))
+
+
+# ── commitments tools ───────────────────────────────────────────────
+def _tool_extract_commitments(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    return mod.extract_commitments(
+        text,
+        source_type=(args.get("source_type") or "conversation"),
+        context=args.get("context"),
+        dry_run=bool(args.get("dry_run", False)),
+    )
+
+
+def _tool_add_commitment(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    tags = args.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    return mod.add_commitment(
+        text, due=args.get("due"),
+        priority=args.get("priority") or "medium",
+        contact=args.get("contact"), tags=tags,
+        owner=args.get("owner") or "watson",
+        notes=args.get("notes"),
+    )
+
+
+def _tool_list_commitments(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    return mod.list_commitments(
+        status=args.get("status") or "open",
+        owner=args.get("owner"),
+        contact=args.get("contact"),
+        days_ahead=args.get("days_ahead", 7),
+        limit=int(args.get("limit") or 50),
+    )
+
+
+def _tool_complete_commitment(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    target = (args.get("id_or_text") or args.get("id") or args.get("text") or "").strip()
+    if not target:
+        return {"error": "id_or_text is required"}
+    return mod.complete_commitment(target, sync=bool(args.get("sync", True)))
+
+
+def _tool_commitment_report(args: dict, _mem: Memory) -> dict:
+    mod = _load_commitments_module()
+    if mod is None:
+        return {"error": "jarvis-commitments not installed"}
+    return mod.commitment_report(days=int(args.get("days") or 7))
+
+
+# ── trello tools ────────────────────────────────────────────────────
+def _tool_trello_sync(_args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello not installed"}
+    return mod.trello_sync()
+
+
+def _tool_trello_boards(_args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello not installed"}
+    return mod.trello_boards()
+
+
+def _tool_trello_add(args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    return mod.trello_add(
+        text, list_name=args.get("list") or "todo",
+        due=args.get("due"),
+        commitment_id=args.get("commitment_id"),
+    )
+
+
+def _tool_trello_move(args: dict, _mem: Memory) -> dict:
+    mod = _load_trello_module()
+    if mod is None:
+        return {"error": "jarvis-trello not installed"}
+    card = (args.get("card") or args.get("card_id") or "").strip()
+    list_name = (args.get("list") or "doing").strip()
+    if not card:
+        return {"error": "card id is required"}
+    return mod.trello_move(card, list_name=list_name)
+
+
+# ── apple tools ─────────────────────────────────────────────────────
+def _tool_apple_add_reminder(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required"}
+    return mod.apple_add_reminder(
+        text, due=args.get("due"),
+        list=args.get("list") or "Jarvis",
+        priority=args.get("priority"),
+        notes=args.get("notes"),
+    )
+
+
+def _tool_apple_list_reminders(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    return mod.apple_list_reminders(
+        list=args.get("list") or "Jarvis",
+        include_completed=bool(args.get("include_completed", False)),
+        limit=int(args.get("limit") or 20),
+    )
+
+
+def _tool_apple_complete_reminder(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    target = (args.get("text_or_id") or args.get("text") or args.get("id") or "").strip()
+    if not target:
+        return {"error": "text_or_id is required"}
+    return mod.apple_complete_reminder(target, list=args.get("list") or "Jarvis")
+
+
+def _tool_apple_save_note(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    title = (args.get("title") or "").strip()
+    content = args.get("content") or ""
+    if not title:
+        return {"error": "title is required"}
+    return mod.apple_save_note(title, content,
+                               folder=args.get("folder") or "Jarvis")
+
+
+def _tool_apple_read_note(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    title = (args.get("title") or "").strip()
+    if not title:
+        return {"error": "title is required"}
+    return mod.apple_read_note(title, folder=args.get("folder") or "Jarvis")
+
+
+# ── iMessage tools ─────────────────────────────────────────────────
+def _tool_imessage_check(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    return mod.imessage_check(
+        contact=args.get("contact"),
+        hours=float(args.get("hours") or 24),
+        limit=int(args.get("limit") or 20),
+        unread_only=bool(args.get("unread_only", False)),
+    )
+
+
+def _tool_imessage_read(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    contact = (args.get("contact") or "").strip()
+    if not contact:
+        return {"error": "contact is required"}
+    return mod.imessage_read(contact, limit=int(args.get("limit") or 50))
+
+
+def _tool_imessage_send(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    contact = (args.get("contact") or "").strip()
+    message = (args.get("message") or "").strip()
+    if not contact or not message:
+        return {"error": "contact and message are required"}
+    if not bool(args.get("confirm", False)):
+        # Mirror send_email/send_telegram contract: refuse to ship a
+        # draft without an explicit confirm flag from the model.
+        return {"error": "confirm=true required (preview-then-confirm flow)",
+                "preview": {"contact": contact, "message": message}}
+    return mod.imessage_send(contact, message, confirm=True,
+                             service=args.get("service") or "iMessage")
+
+
+def _tool_imessage_search_contacts(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    q = (args.get("query") or "").strip()
+    if not q:
+        return {"error": "query is required"}
+    return mod.imessage_search_contacts(q)
+
+
+def _tool_apple_contacts_search(args: dict, _mem: Memory) -> dict:
+    mod = _load_apple_module()
+    if mod is None:
+        return {"error": "jarvis-apple not installed"}
+    q = (args.get("query") or "").strip()
+    if not q:
+        return {"error": "query is required"}
+    return mod.apple_contacts_search(q, limit=int(args.get("limit") or 10))
 
 
 # Tool registry — name → (handler, schema)
@@ -2902,6 +3205,410 @@ TOOLS: dict[str, tuple[Any, dict]] = {
                         "description": "Recompute from people.json.",
                     },
                 },
+            },
+        },
+    ),
+    "extract_commitments": (
+        _tool_extract_commitments,
+        {
+            "name": "extract_commitments",
+            "description": (
+                "Pull commitments out of a chunk of text (conversation, "
+                "email body, iMessage thread). Returns candidate items "
+                "with owner / due / priority / contact. Use proactively "
+                "when Watson reads or pastes something with promises in "
+                "it. dry_run=true returns candidates without saving — "
+                "set false (default) to persist immediately."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_type": {
+                        "type": "string",
+                        "enum": ["conversation", "email", "imessage", "manual"],
+                    },
+                    "context": {"type": "string"},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "add_commitment": (
+        _tool_add_commitment,
+        {
+            "name": "add_commitment",
+            "description": (
+                "Manually log a commitment Watson is making or has been "
+                "given. Use when Watson says 'remind me to X by Y', "
+                "'make sure I send the proposal Friday'. The natural-"
+                "language `due` (today / tomorrow / Friday / 2026-05-01 / "
+                "in 3 days) is parsed locally."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string",
+                             "description": "Imperative phrase: 'send the proposal'"},
+                    "due": {"type": "string"},
+                    "priority": {"type": "string",
+                                 "enum": ["high", "medium", "low"]},
+                    "contact": {"type": "string",
+                                "description": "Person this commitment touches."},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "owner": {"type": "string",
+                              "description": "'watson' or another person's name."},
+                    "notes": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "list_commitments": (
+        _tool_list_commitments,
+        {
+            "name": "list_commitments",
+            "description": (
+                "Query the commitment store. Default returns Watson's "
+                "open items due in the next 7 days, overdue first. Use "
+                "when Watson asks 'what's on my plate', 'what do I owe "
+                "Corbin', 'what's due this week'. Set status='all' to "
+                "include completed items."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string",
+                               "enum": ["open", "done", "overdue",
+                                        "cancelled", "all"]},
+                    "owner": {"type": "string"},
+                    "contact": {"type": "string"},
+                    "days_ahead": {"type": "integer",
+                                   "description": "Horizon in days (default 7)."},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    ),
+    "complete_commitment": (
+        _tool_complete_commitment,
+        {
+            "name": "complete_commitment",
+            "description": (
+                "Mark a commitment done. Accepts the canonical id "
+                "(cmt_...) OR a fuzzy text match — 'send Corbin the "
+                "proposal' will match the open item with that text. "
+                "Triggers Trello + Apple Reminders sync so the mirrors "
+                "close too. Use when Watson says 'done', 'sent that', "
+                "'taken care of'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "id_or_text": {"type": "string"},
+                    "sync": {"type": "boolean",
+                             "description": "Default true. Set false to skip Trello/Reminders propagation."},
+                },
+                "required": ["id_or_text"],
+            },
+        },
+    ),
+    "commitment_report": (
+        _tool_commitment_report,
+        {
+            "name": "commitment_report",
+            "description": (
+                "Snapshot of overdue / due-today / due-this-week / what "
+                "others owe Watson / recently completed. Use for the "
+                "morning briefing or wrap-up review. Returns counts and "
+                "the items themselves."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer",
+                             "description": "Look-ahead window for 'this week'. Default 7."},
+                },
+            },
+        },
+    ),
+    "trello_sync": (
+        _tool_trello_sync,
+        {
+            "name": "trello_sync",
+            "description": (
+                "Reconcile the canonical commitment store against the "
+                "configured Trello board: push new cards, pull "
+                "completion signals, import unknown dated cards. "
+                "Idempotent. Use when Watson asks 'sync my Trello' or "
+                "after a batch of commitment edits. The self-improvement "
+                "daemon also runs this on every tier-1 pass."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "trello_boards": (
+        _tool_trello_boards,
+        {
+            "name": "trello_boards",
+            "description": (
+                "List Watson's open Trello boards. Use when he asks "
+                "'what's on my Trello' or as the first step of setup. "
+                "Cheap — single API call."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ),
+    "trello_add": (
+        _tool_trello_add,
+        {
+            "name": "trello_add",
+            "description": (
+                "Create a single Trello card directly. Prefer "
+                "add_commitment + trello_sync for the normal path; use "
+                "this only when Watson explicitly wants a Trello-only "
+                "card (no commitment tracking)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "list": {"type": "string",
+                             "enum": ["todo", "doing", "done"]},
+                    "due": {"type": "string",
+                            "description": "YYYY-MM-DD."},
+                    "commitment_id": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "trello_move": (
+        _tool_trello_move,
+        {
+            "name": "trello_move",
+            "description": (
+                "Move a Trello card to another list (todo/doing/done)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "card": {"type": "string",
+                             "description": "Trello card id."},
+                    "list": {"type": "string",
+                             "enum": ["todo", "doing", "done"]},
+                },
+                "required": ["card", "list"],
+            },
+        },
+    ),
+    "apple_add_reminder": (
+        _tool_apple_add_reminder,
+        {
+            "name": "apple_add_reminder",
+            "description": (
+                "Create a reminder in Apple Reminders. Lands in the "
+                "'Jarvis' list by default so it shows up on Watson's "
+                "iPhone. Use when Watson explicitly asks for a Reminders "
+                "entry; for general 'remember to X by Y' prefer "
+                "add_commitment which mirrors here automatically."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "due": {"type": "string",
+                            "description": "YYYY-MM-DD or relative (today/tomorrow/Friday)."},
+                    "list": {"type": "string"},
+                    "priority": {"type": "string",
+                                 "enum": ["high", "medium", "low"]},
+                    "notes": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+        },
+    ),
+    "apple_list_reminders": (
+        _tool_apple_list_reminders,
+        {
+            "name": "apple_list_reminders",
+            "description": (
+                "Read open reminders from a Reminders list (default "
+                "'Jarvis'). Use when Watson asks 'what's in my "
+                "reminders'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "list": {"type": "string"},
+                    "include_completed": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    ),
+    "apple_complete_reminder": (
+        _tool_apple_complete_reminder,
+        {
+            "name": "apple_complete_reminder",
+            "description": (
+                "Mark a Reminders item complete. Fuzzy-matches by name "
+                "within the target list. Prefer complete_commitment for "
+                "the normal path so all mirrors close together."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text_or_id": {"type": "string"},
+                    "list": {"type": "string"},
+                },
+                "required": ["text_or_id"],
+            },
+        },
+    ),
+    "apple_save_note": (
+        _tool_apple_save_note,
+        {
+            "name": "apple_save_note",
+            "description": (
+                "Save a note (meeting prep, briefing, research summary) "
+                "to Apple Notes. Lands in the 'Jarvis' folder by "
+                "default. Use when Watson says 'save this to Notes', or "
+                "when an orchestrator plan produces a long-form artifact "
+                "worth keeping."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "folder": {"type": "string"},
+                },
+                "required": ["title", "content"],
+            },
+        },
+    ),
+    "apple_read_note": (
+        _tool_apple_read_note,
+        {
+            "name": "apple_read_note",
+            "description": (
+                "Read a note from Apple Notes. Fuzzy-matches title in "
+                "the target folder, falls through to all notes if not "
+                "in folder."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "folder": {"type": "string"},
+                },
+                "required": ["title"],
+            },
+        },
+    ),
+    "imessage_check": (
+        _tool_imessage_check,
+        {
+            "name": "imessage_check",
+            "description": (
+                "Recent inbound iMessages from the local chat.db, "
+                "newest first. Optionally filter by `contact` (phone "
+                "number, email, or substring of either). Use when "
+                "Watson asks 'check my messages', 'any new texts', "
+                "'what did Karina text'. unread_only=true narrows to "
+                "what hasn't been read yet."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "contact": {"type": "string"},
+                    "hours": {"type": "number"},
+                    "limit": {"type": "integer"},
+                    "unread_only": {"type": "boolean"},
+                },
+            },
+        },
+    ),
+    "imessage_read": (
+        _tool_imessage_read,
+        {
+            "name": "imessage_read",
+            "description": (
+                "Two-sided thread with one contact, oldest to newest, "
+                "for catching up on a specific conversation."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "contact": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["contact"],
+            },
+        },
+    ),
+    "imessage_send": (
+        _tool_imessage_send,
+        {
+            "name": "imessage_send",
+            "description": (
+                "Send an iMessage via Messages.app. Same preview-then-"
+                "confirm flow as send_email and send_telegram: first "
+                "call WITHOUT confirm=true to preview the styled draft "
+                "to Watson, then call again with confirm=true after he "
+                "approves. NEVER set confirm=true on the first round."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "contact": {"type": "string",
+                                "description": "Phone (+1...) or email handle."},
+                    "message": {"type": "string"},
+                    "service": {"type": "string",
+                                "enum": ["iMessage", "SMS"]},
+                    "confirm": {"type": "boolean",
+                                "description": "True only after Watson has approved the preview."},
+                },
+                "required": ["contact", "message"],
+            },
+        },
+    ),
+    "imessage_search_contacts": (
+        _tool_imessage_search_contacts,
+        {
+            "name": "imessage_search_contacts",
+            "description": (
+                "Find iMessage handles (phones / emails) Watson has "
+                "messaged before, ranked by message volume. Use to "
+                "resolve 'message Corbin' to a specific phone number."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    ),
+    "apple_contacts_search": (
+        _tool_apple_contacts_search,
+        {
+            "name": "apple_contacts_search",
+            "description": (
+                "Search the native Apple Contacts address book "
+                "directly. Returns name, organization, all phones, "
+                "emails. Heavier than the curated relationship_brief — "
+                "use when Watson asks for a number/email that isn't in "
+                "his curated graph."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
             },
         },
     ),
@@ -4363,8 +5070,57 @@ def run_turn(user_text: str) -> str:
     history["messages"].append({"role": "assistant", "content": final_text})
     _save_history(history)
 
+    _maybe_extract_commitments(user_text, final_text)
+
     reply = final_text or "I appear to be at a loss for words, sir."
     return _apply_voice_markup(reply)
+
+
+_COMMITMENT_HINTS_RE = re.compile(
+    r"\b(I'?ll |I will |let me |let's |we'?ll |we will |"
+    r"can you |could you |would you |"
+    r"by (?:tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"end of (?:day|week)|eod|eow|next week|\d)|"
+    r"deadline|due (?:by|on)|owe you|i owe|remind me)\b",
+    re.I,
+)
+
+
+def _maybe_extract_commitments(user_text: str, assistant_text: str) -> None:
+    """Spawn a detached commitment extraction pass when the turn smells
+    like a promise. Best-effort, non-blocking — the extracted items go
+    into items.json straight away so the next 'what's on my plate'
+    surfaces them. The audit log records every candidate, kept or
+    rejected, so the self-improvement loop can tune the trigger."""
+    if not _gate("commitments", default=True):
+        return
+    if not (user_text or assistant_text):
+        return
+    combined = f"{user_text}\n\n{assistant_text}"
+    if not _COMMITMENT_HINTS_RE.search(combined):
+        return
+    # Spawn detached so we don't pay 1-3s of Haiku latency on the
+    # critical path. The extractor itself logs and persists.
+    src = BIN_DIR / "jarvis-commitments.py"
+    if not src.exists():
+        return
+    py = sys.executable or "python3"
+    try:
+        subprocess.Popen(
+            [py, str(src), "extract", combined[:8000],
+             "--source", "conversation"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def _gate(name: str, default: bool = True) -> bool:
+    raw = os.environ.get(f"JARVIS_{name.upper()}")
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def main(argv: list[str]) -> int:

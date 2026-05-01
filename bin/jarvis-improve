@@ -195,113 +195,17 @@ contacts_path=$(locate_script "jarvis-contacts.py")
 network_path=$(locate_script "jarvis-network.py")
 [[ -n "$network_path" ]] && run_step "network" "$PYTHON" "$network_path"
 
-# LinkedIn change monitor — re-scrape due profiles (contacts every 7d,
-# linkedin_only every 30d) and write change records. Also enqueues
-# contact-tier role changes into the smart-notification bus. No-ops
-# without LINKEDIN_COOKIE configured. Capped at JARVIS_LINKEDIN_MONITOR_CAP
-# per run so a large connection set spreads across the week.
-linkedin_path=$(locate_script "jarvis-linkedin.py")
-[[ -n "$linkedin_path" ]] && run_step "linkedin" "$PYTHON" "$linkedin_path"
-
-# Commitment refresh — promotes anything past its due date to status
-# 'overdue' so list_commitments + briefing reflect reality. Cheap (file
-# scan, no API). Always runs.
+# Commitment mirrors — push new commitments to Trello + Apple Reminders
+# and pull completion signals back. Each subsystem skips cleanly if it
+# isn't configured (no Trello key / no JARVIS_REMINDERS), so this
+# no-ops on installs without external mirrors.
 commitments_path=$(locate_script "jarvis-commitments.py")
-[[ -n "$commitments_path" ]] && run_step "commitments" "$PYTHON" "$commitments_path"
-
-# Trello sync — bidirectional. No-ops without TRELLO_API_KEY +
-# TRELLO_TOKEN configured (and a setup-wizard run). When configured,
-# this is one round-trip per pass to keep the board mirrored.
-trello_path=$(locate_script "jarvis-trello.py")
-[[ -n "$trello_path" ]] && run_step "trello" "$PYTHON" "$trello_path"
-
-# Stripe alerts — scan for failed payments, expiring subscriptions,
-# signup spikes/drops, and at-risk customers; idempotently push high-
-# signal items into the smart-notification bus. No-ops without
-# STRIPE_SECRET_KEY in the env. Cheap (handful of API calls; cached).
-stripe_path=$(locate_script "jarvis-stripe.py")
-[[ -n "$stripe_path" ]] && run_step "stripe-alerts" "$PYTHON" "$stripe_path" alerts
-
-# Recurring workflows — fire any workflow whose next_run has passed.
-# Each workflow's goal is handed to the orchestrator's execute_plan;
-# results are recorded under ~/.jarvis/workflows/runs and notifications
-# fire when notify_on_complete is set. Cheap when nothing is due.
-workflows_path=$(locate_script "jarvis-workflows.py")
-[[ -n "$workflows_path" ]] && run_step "workflows" "$PYTHON" "$workflows_path" --tick
-
-# Reminders sync — push every open commitment that isn't already on
-# Apple Reminders to the 'Jarvis' list, so the iPhone fires a real
-# notification. Lightweight wrapper around apple_add_reminder. Skips on
-# non-macOS automatically.
-apple_path=$(locate_script "jarvis-apple.py")
-if [[ -n "$apple_path" && -n "$commitments_path" ]]; then
-    run_step "reminders-sync" "$PYTHON" - <<'PY'
-import importlib.util, json, os, sys
-from pathlib import Path
-bin_dir = Path(os.environ.get("ASSISTANT_DIR", str(Path.home() / ".jarvis"))) / "bin"
-def load(name):
-    src = bin_dir / name
-    if not src.exists():
-        src = Path(__file__).resolve().parent / name if False else None
-        # script is invoked via PYTHON; bin dir is the deployed source
-    if not src or not src.exists():
-        # fall back to repo location
-        for cand in (Path.cwd() / "bin" / name,):
-            if cand.exists():
-                src = cand
-                break
-    if not src or not src.exists():
-        return None
-    spec = importlib.util.spec_from_file_location(name.replace("-", "_").replace(".py",""), src)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-ap = load("jarvis-apple.py")
-cm = load("jarvis-commitments.py")
-if ap is None or cm is None:
-    print("reminders-sync: skipped (modules missing)")
-    sys.exit(0)
-gate = ap._apple_gate()
-if gate:
-    print(f"reminders-sync: {gate.get('error')}")
-    sys.exit(0)
-items = cm._load_items()
-pushed = 0
-for rec in items:
-    if rec.get("status") not in ("open", "overdue"):
-        continue
-    if (rec.get("synced_to") or {}).get("reminders_id"):
-        continue
-    res = ap.apple_add_reminder(rec.get("text") or "(untitled)",
-                                due=rec.get("due"))
-    if isinstance(res, dict) and res.get("ok"):
-        rid = (res.get("reminder") or {}).get("id")
-        if rid:
-            rec.setdefault("synced_to", {})["reminders_id"] = rid
-            pushed += 1
-if pushed:
-    cm._save_items(items)
-print(json.dumps({"pushed": pushed}))
-PY
-fi
-
-# Overdue-commitment alerts — push commitments past their due date
-# tied to inner_circle / trusted contacts into the smart-notification
-# bus so they interrupt the next time Watson lights up. Cheap; only
-# fires when there's something to surface.
-notif_path=$(locate_script "jarvis-notifications.py")
-if [[ -n "$notif_path" && -n "$commitments_path" ]]; then
-    run_step "overdue-alerts" "$PYTHON" -c "
-import importlib.util, os
-from pathlib import Path
-bin_dir = Path(os.environ.get('ASSISTANT_DIR', str(Path.home() / '.jarvis'))) / 'bin'
-src = bin_dir / 'jarvis-notifications.py'
-if not src.exists():
-    src = Path.cwd() / 'bin' / 'jarvis-notifications.py'
-spec = importlib.util.spec_from_file_location('jn', src)
-m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-print(m.enqueue_overdue_commitments())
-"
+if [[ -n "$commitments_path" ]]; then
+    [[ "${JARVIS_TRELLO:-1}" == "1" ]] && \
+        run_step "trello-sync" "$PYTHON" "$commitments_path" sync --systems trello
+    [[ "${JARVIS_REMINDERS:-1}" == "1" ]] && \
+        run_step "reminders-sync" "$PYTHON" "$commitments_path" sync --systems apple
+    run_step "commitments-overdue" "$PYTHON" "$commitments_path" mark-overdue
 fi
 
 # Tier 2: heavier tasks. Each script's should_run() decides whether to fire
