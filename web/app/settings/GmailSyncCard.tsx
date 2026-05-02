@@ -72,7 +72,7 @@ export function GmailSyncCard({ state }: Props) {
 
         setStatus('Fetching recent emails…')
         const listRes = await fetch(
-          'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=newer_than:7d',
+          'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=newer_than:30d',
           { headers: { Authorization: `Bearer ${token}` } },
         )
         if (!listRes.ok) {
@@ -162,7 +162,7 @@ export function GmailSyncCard({ state }: Props) {
             </span>
           </div>
           <p className="mt-1 text-xs text-zinc-500">
-            Pulls the last 7 days of emails, extracts commitments + sentiment with
+            Pulls the last 30 days of emails, extracts commitments + sentiment with
             Llama 4 Scout (Groq), and matches each thread to a contact in your
             graph. Reuses your Google sign-in — no extra OAuth.
           </p>
