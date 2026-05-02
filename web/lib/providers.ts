@@ -21,10 +21,10 @@ export type ModelInfo = {
 
 export const MODELS: ModelInfo[] = [
   {
-    id: 'groq-llama-4-maverick',
-    label: 'Llama 4 Maverick (Groq)',
+    id: 'groq-llama-4-scout',
+    label: 'Llama 4 Scout (Groq)',
     provider: 'groq',
-    apiModel: 'meta-llama/llama-4-maverick-17b-128e-instruct',
+    apiModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
   },
   {
     id: 'claude-sonnet-4-6',
@@ -64,7 +64,7 @@ export const MODELS: ModelInfo[] = [
   },
 ]
 
-export const DEFAULT_MODEL_ID = 'groq-llama-4-maverick'
+export const DEFAULT_MODEL_ID = 'groq-llama-4-scout'
 
 export function getModel(id: string | null | undefined): ModelInfo {
   return (
