@@ -123,6 +123,7 @@ export function GmailSyncCard({ state }: Props) {
         })
         const syncData = (await syncRes.json().catch(() => ({}))) as {
           processed?: number
+          skipped?: number
           commitments_created?: number
           errors?: number
           sample_errors?: string[]
@@ -132,9 +133,12 @@ export function GmailSyncCard({ state }: Props) {
           setError(syncData.error ?? `Sync failed (HTTP ${syncRes.status}).`)
           return
         }
+        const matched = syncData.processed ?? 0
+        const skipped = syncData.skipped ?? 0
         setStatus(
-          `Processed ${syncData.processed ?? 0} emails — ` +
+          `${matched} emails matched contacts — ` +
             `${syncData.commitments_created ?? 0} commitments captured` +
+            (skipped ? `, ${skipped} skipped (no matching contact)` : '') +
             (syncData.errors ? `, ${syncData.errors} errors.` : '.'),
         )
         if (syncData.errors && syncData.sample_errors?.length) {

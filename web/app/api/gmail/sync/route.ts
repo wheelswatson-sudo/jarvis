@@ -101,10 +101,15 @@ export async function POST(req: NextRequest) {
         | { id: string; name: string | null; email: string | null; company: string | null }
         | undefined
 
+      if (!contact) {
+        reports.push({ message_id: msg.id, status: 'skipped', error: 'no_matching_contact' })
+        continue
+      }
+
       const occurredAt = msg.date ? new Date(msg.date).toISOString() : new Date().toISOString()
       const direction: 'inbound' | 'outbound' = userIsSender ? 'outbound' : 'inbound'
 
-      const signals = await extractCommitments(msg.body, contact ?? undefined)
+      const signals = await extractCommitments(msg.body, contact)
 
       const summary = msg.subject?.trim() || signals.key_points[0] || null
 
@@ -112,7 +117,7 @@ export async function POST(req: NextRequest) {
         .from('interactions')
         .insert({
           user_id: user.id,
-          contact_id: contact?.id ?? null,
+          contact_id: contact.id,
           channel: 'email',
           direction,
           type: 'email',
@@ -134,7 +139,7 @@ export async function POST(req: NextRequest) {
 
       const commitmentRows = signals.commitments.map((c) => ({
         user_id: user.id,
-        contact_id: contact?.id ?? null,
+        contact_id: contact.id,
         interaction_id: interactionRow.id,
         description: c.description,
         due_at: c.due_at,
@@ -150,7 +155,7 @@ export async function POST(req: NextRequest) {
       reports.push({
         message_id: msg.id,
         status: 'processed',
-        contact_id: contact?.id ?? null,
+        contact_id: contact.id,
         commitments_created: commitmentRows.length,
       })
     } catch (err) {
