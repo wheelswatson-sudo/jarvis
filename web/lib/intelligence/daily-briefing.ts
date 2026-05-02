@@ -16,6 +16,9 @@ const SOCIAL_WINDOW_HOURS = 24
 const TOP_PER_SECTION = 5
 const MIN_RELATIONSHIP_SCORE_FOR_STALE = 0.6
 const RECIPROCITY_FLAG_THRESHOLD = 0.3
+// New schema-grounded reciprocity_score field on personal_details ranges
+// [-1, +1]. Negative means the user is overinvesting in this contact.
+const RECIPROCITY_DEBT_THRESHOLD = -0.5
 
 export type BriefingUrgency = 'high' | 'medium' | 'low'
 
@@ -312,22 +315,110 @@ function buildCoolingItems(contacts: ContactRow[]): BriefingItem[] {
 }
 
 function buildReciprocityItems(contacts: ContactRow[]): BriefingItem[] {
-  const flags = contacts
+  const seen = new Set<string>()
+  const items: BriefingItem[] = []
+
+  // 1) Schema-grounded reciprocity_score: per-commitment debt signal.
+  //    score < -0.5 means the user has done substantially more than the
+  //    contact has reciprocated. Strongest reciprocity signal, surface first.
+  const debt = contacts
+    .filter((c) => {
+      const pd = c.personal_details as PersonalDetails | null
+      return (
+        typeof pd?.reciprocity_score === 'number' &&
+        pd.reciprocity_score < RECIPROCITY_DEBT_THRESHOLD
+      )
+    })
+    .sort((a, b) => {
+      const sa = (a.personal_details as PersonalDetails | null)?.reciprocity_score ?? 0
+      const sb = (b.personal_details as PersonalDetails | null)?.reciprocity_score ?? 0
+      return sa - sb
+    })
+    .slice(0, TOP_PER_SECTION)
+
+  for (const c of debt) {
+    const pd = c.personal_details as PersonalDetails | null
+    const score = pd?.reciprocity_score ?? 0
+    const name = contactName(c)
+    const youDid = (pd?.active_commitments_to_them ?? []).filter(
+      (x) => x.status === 'completed',
+    ).length
+    const theyDid = (pd?.active_commitments_from_them ?? []).filter(
+      (x) => x.status === 'completed',
+    ).length
+    items.push({
+      id: `reciprocity:${c.id}`,
+      category: 'reciprocity',
+      action: `Reciprocity debt: ${name}`,
+      why: `You've done ${youDid} for them, they've done ${theyDid} for you (score ${score.toFixed(2)}). Stop investing until they reciprocate, or ask for something specific.`,
+      contact_id: c.id,
+      contact_name: name,
+      urgency: 'medium',
+      href: `/contacts/${c.id}`,
+      metadata: {
+        reciprocity_score: score,
+        you_did: youDid,
+        they_did: theyDid,
+        kind: 'commitment_debt',
+      },
+    })
+    seen.add(c.id)
+  }
+
+  // 2) Overdue incoming commitments — they promised something, the deadline
+  //    passed, you haven't heard back.
+  const overdueIncoming = contacts
+    .map((c) => {
+      const pd = c.personal_details as PersonalDetails | null
+      const overdue = (pd?.active_commitments_from_them ?? []).filter(
+        (x) =>
+          x.status === 'overdue' ||
+          (x.status === 'pending' && x.due && new Date(x.due).getTime() < Date.now()),
+      )
+      return overdue.length > 0 ? { contact: c, overdue } : null
+    })
+    .filter((x): x is { contact: ContactRow; overdue: NonNullable<PersonalDetails['active_commitments_from_them']> } => x !== null)
+    .sort((a, b) => b.overdue.length - a.overdue.length)
+    .slice(0, TOP_PER_SECTION)
+
+  for (const { contact, overdue } of overdueIncoming) {
+    if (seen.has(contact.id)) continue
+    const name = contactName(contact)
+    const headline = overdue[0]?.action ?? 'a commitment'
+    items.push({
+      id: `reciprocity_incoming:${contact.id}`,
+      category: 'reciprocity',
+      action: `${name} owes you a follow-through`,
+      why: `${overdue.length} overdue commitment${overdue.length === 1 ? '' : 's'} from them — most recent: "${truncate(headline, 80)}". A nudge is fair.`,
+      contact_id: contact.id,
+      contact_name: name,
+      urgency: 'medium',
+      href: `/contacts/${contact.id}`,
+      metadata: {
+        overdue_count: overdue.length,
+        kind: 'overdue_incoming',
+      },
+    })
+    seen.add(contact.id)
+  }
+
+  // 3) Legacy reciprocity_ratio (interaction count fallback) — only surface
+  //    contacts not already flagged by the commitment-grounded signals.
+  const legacy = contacts
     .filter(
       (c) =>
+        !seen.has(c.id) &&
         typeof c.reciprocity_ratio === 'number' &&
         c.reciprocity_ratio < RECIPROCITY_FLAG_THRESHOLD,
     )
-    .sort(
-      (a, b) => (a.reciprocity_ratio ?? 0) - (b.reciprocity_ratio ?? 0),
-    )
-    .slice(0, TOP_PER_SECTION)
+    .sort((a, b) => (a.reciprocity_ratio ?? 0) - (b.reciprocity_ratio ?? 0))
+    .slice(0, Math.max(0, TOP_PER_SECTION - items.length))
 
-  return flags.map((c) => {
+  for (const c of legacy) {
     const ratio = c.reciprocity_ratio ?? 0
     const name = contactName(c)
-    return {
-      id: `reciprocity:${c.id}`,
+    items.push({
+      id: `reciprocity_ratio:${c.id}`,
       category: 'reciprocity',
       action: `Pause outreach to ${name}`,
       why: `You're sending ${(ratio === 0 ? 0 : 1 / ratio).toFixed(1)}x what you get back. Consider waiting for them to surface, or asking a direct question that requires a reply.`,
@@ -335,9 +426,11 @@ function buildReciprocityItems(contacts: ContactRow[]): BriefingItem[] {
       contact_name: name,
       urgency: 'medium',
       href: `/contacts/${c.id}`,
-      metadata: { reciprocity_ratio: ratio },
-    }
-  })
+      metadata: { reciprocity_ratio: ratio, kind: 'interaction_ratio' },
+    })
+  }
+
+  return items
 }
 
 function buildStaleItems(
@@ -487,7 +580,7 @@ function renderMarkdown(p: BriefingPayload): string {
   appendSection(lines, 'Overdue commitments', p.sections.overdue_commitments)
   appendSection(lines, 'Cooling relationships', p.sections.cooling_relationships)
   appendSection(lines, 'Recent social changes', p.sections.social_changes)
-  appendSection(lines, 'Reciprocity flags', p.sections.reciprocity_flags)
+  appendSection(lines, 'Reciprocity alert', p.sections.reciprocity_flags)
   appendSection(lines, 'Dormant high-value relationships', p.sections.stale_relationships)
   appendSection(lines, 'Connector opportunities', p.sections.connector_opportunities)
 

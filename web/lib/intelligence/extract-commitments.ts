@@ -23,6 +23,13 @@ export type ExtractedSignals = {
   sentiment: number
   key_points: string[]
   action_items: string[]
+  // Relationship intelligence enrichment — populated when the model returns
+  // these fields, otherwise empty. Readers should treat all as optional.
+  topics: string[]
+  communication_style: string | null
+  meaningful: boolean
+  meaningful_summary: string | null
+  sentiment_label: string | null
 }
 
 export type ContactContext = {
@@ -36,6 +43,11 @@ const EMPTY: ExtractedSignals = {
   sentiment: 0,
   key_points: [],
   action_items: [],
+  topics: [],
+  communication_style: null,
+  meaningful: false,
+  meaningful_summary: null,
+  sentiment_label: null,
 }
 
 export async function extractCommitments(
@@ -52,14 +64,19 @@ export async function extractCommitments(
     ? `\nCounterparty: ${contact?.name ?? ''}${contact?.email ? ` <${contact.email}>` : ''}${contact?.company ? ` (${contact.company})` : ''}`.trim()
     : ''
 
-  const prompt = `You read one email and extract structured signals. Return ONLY a JSON object — no prose, no fences.
+  const prompt = `You read one email and extract structured signals for a relationship-intelligence system. Return ONLY a JSON object — no prose, no fences.
 
 Schema:
 {
   "commitments": [{"description": string, "due_at": ISO-8601 string or null, "owner": "self"|"contact"|"mutual", "confidence": 0-1}],
   "sentiment": number from -1 (hostile) to 1 (warm),
+  "sentiment_label": string ("warm"|"neutral"|"cool"|"tense"|"excited"|"appreciative"|...),
   "key_points": string[] (3-5 items),
-  "action_items": string[] (concrete next steps)
+  "action_items": string[] (concrete next steps),
+  "topics": string[] (1-6 short topical tags inferred from the body, e.g. ["fundraising","Q3 hiring"]),
+  "communication_style": string ("formal"|"casual"|"brief"|"warm"|"transactional"|...),
+  "meaningful": boolean (true when this is a substantive interaction worth remembering, false for logistics-only or pleasantries),
+  "meaningful_summary": string|null (one short sentence describing the substantive content, only when meaningful=true)
 }
 
 Rules:
@@ -67,6 +84,8 @@ Rules:
 - Only extract genuine commitments ("I'll send X by Friday", "we agreed to ship Monday"). Skip pleasantries.
 - due_at must be ISO-8601 with timezone (use UTC if unspecified). null when no date is implied.
 - confidence reflects how explicit the commitment is.
+- "topics" capture domain/subject tags, not feelings. Two-to-four words each, lowercase preferred.
+- "meaningful" is true when there's substantive content (decisions, discussions, life events, deals, conflicts) — false when it's purely scheduling, "thanks!", or auto-generated.
 - Empty arrays are valid. Sentiment defaults to 0 when neutral.${contactLine}
 
 Email:
@@ -108,6 +127,14 @@ ${trimmed}
     return EMPTY
   }
 
+  const enriched = parsed as Partial<ExtractedSignals> & {
+    topics?: unknown
+    communication_style?: unknown
+    meaningful?: unknown
+    meaningful_summary?: unknown
+    sentiment_label?: unknown
+  }
+
   return {
     commitments: Array.isArray(parsed.commitments)
       ? parsed.commitments
@@ -130,5 +157,24 @@ ${trimmed}
     action_items: Array.isArray(parsed.action_items)
       ? parsed.action_items.filter((s): s is string => typeof s === 'string').slice(0, 10)
       : [],
+    topics: Array.isArray(enriched.topics)
+      ? (enriched.topics as unknown[])
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .map((s) => s.trim())
+          .slice(0, 6)
+      : [],
+    communication_style:
+      typeof enriched.communication_style === 'string' && enriched.communication_style.trim()
+        ? enriched.communication_style.trim().slice(0, 40)
+        : null,
+    meaningful: enriched.meaningful === true,
+    meaningful_summary:
+      typeof enriched.meaningful_summary === 'string' && enriched.meaningful_summary.trim()
+        ? enriched.meaningful_summary.trim().slice(0, 280)
+        : null,
+    sentiment_label:
+      typeof enriched.sentiment_label === 'string' && enriched.sentiment_label.trim()
+        ? enriched.sentiment_label.trim().slice(0, 32)
+        : null,
   }
 }

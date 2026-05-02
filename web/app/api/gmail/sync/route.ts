@@ -6,6 +6,8 @@ import {
   extractCommitments,
   type ExtractedCommitment,
 } from '../../../../lib/intelligence/extract-commitments'
+import { mergeSignalsIntoDetails } from '../../../../lib/intelligence/relationship-merge'
+import type { PersonalDetails } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -73,25 +75,27 @@ export async function POST(req: NextRequest) {
   // contacts.email is stored in mixed case but we normalize to lowercase.
   const { data: allContactRows } = await service
     .from('contacts')
-    .select('id, first_name, last_name, email, company')
+    .select('id, first_name, last_name, email, company, personal_details')
     .eq('user_id', user.id)
     .not('email', 'is', null)
 
-  const contactsByLowercaseEmail = new Map<
-    string,
-    {
-      id: string
-      first_name: string | null
-      last_name: string | null
-      email: string | null
-      company: string | null
-    }
-  >()
+  type ContactRow = {
+    id: string
+    first_name: string | null
+    last_name: string | null
+    email: string | null
+    company: string | null
+    personal_details: PersonalDetails | null
+  }
 
-  for (const contact of allContactRows ?? []) {
+  const contactsByLowercaseEmail = new Map<string, ContactRow>()
+  const contactsById = new Map<string, ContactRow>()
+
+  for (const contact of (allContactRows ?? []) as ContactRow[]) {
     if (contact.email) {
       contactsByLowercaseEmail.set(contact.email.toLowerCase(), contact)
     }
+    contactsById.set(contact.id, contact)
   }
 
   const reports: SyncReport[] = []
@@ -117,13 +121,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Find the first matching contact using case-insensitive email lookup
-      let row: {
-        id: string
-        first_name: string | null
-        last_name: string | null
-        email: string | null
-        company: string | null
-      } | undefined
+      let row: ContactRow | undefined
 
       for (const emailToMatch of counterpartyEmails) {
         const match = contactsByLowercaseEmail.get(emailToMatch)
@@ -189,6 +187,31 @@ export async function POST(req: NextRequest) {
       if (commitmentRows.length > 0) {
         await service.from('commitments').insert(commitmentRows)
       }
+
+      // Schema-grounded merge: fold this email's signals into the contact's
+      // structured personal_details. We use the latest in-memory copy so
+      // multiple messages for the same contact in one batch accumulate.
+      const latestRow = contactsById.get(row.id) ?? row
+      const mergedDetails = mergeSignalsIntoDetails(
+        latestRow.personal_details,
+        signals,
+        {
+          occurredAt,
+          channel: 'email',
+          direction,
+        },
+      )
+
+      await service
+        .from('contacts')
+        .update({
+          personal_details: mergedDetails,
+          last_interaction_at: occurredAt,
+        })
+        .eq('id', row.id)
+        .eq('user_id', user.id)
+
+      contactsById.set(row.id, { ...latestRow, personal_details: mergedDetails })
 
       totalCommitments += commitmentRows.length
       reports.push({

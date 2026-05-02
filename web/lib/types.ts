@@ -1,6 +1,39 @@
 export type Tier = 1 | 2 | 3
 
+export const RELATIONSHIP_SCHEMA_VERSION = 1
+
+export type CommitmentRecordStatus = 'pending' | 'completed' | 'overdue'
+
+export type RelationshipCommitmentRecord = {
+  action: string
+  context?: string | null
+  date_promised: string
+  due?: string | null
+  status: CommitmentRecordStatus
+}
+
+export type RelationshipMilestone = {
+  date: string
+  event: string
+}
+
+export type RelationshipSentimentPoint = {
+  date: string
+  sentiment: string
+  score: number
+}
+
+export type RelationshipMeaningfulInteraction = {
+  date: string
+  channel: string
+  summary: string
+}
+
+// Schema-grounded relationship memory. Stored inside personal_details (jsonb)
+// so we can iterate without a column migration. New fields are optional;
+// readers must tolerate older rows that don't have them.
 export type PersonalDetails = {
+  // Existing structured fields
   spouse?: string | null
   kids?: string[] | null
   family_notes?: string | null
@@ -9,6 +42,7 @@ export type PersonalDetails = {
   career_history?: { role: string; company: string; years?: string | null }[] | null
   life_events?: { date?: string | null; event: string }[] | null
   notes?: string | null
+
   // Social-monitoring fields (populated by the Chrome extension via the
   // /api/extension/* endpoints). Stored in personal_details JSONB so we
   // don't need a column migration.
@@ -19,6 +53,23 @@ export type PersonalDetails = {
   facebook_current_city?: string | null
   facebook_workplace?: string | null
   social_last_checked_at?: string | null
+
+  // Import provenance
+  import_source?: string | null
+  birthday?: string | null
+  google_resource_name?: string | null
+
+  // ---- Schema-grounded relationship intelligence ----
+  relationship_origin?: string | null
+  key_milestones?: RelationshipMilestone[] | null
+  topics_of_interest?: string[] | null
+  communication_style?: string | null
+  emotional_trajectory?: RelationshipSentimentPoint[] | null
+  active_commitments_to_them?: RelationshipCommitmentRecord[] | null
+  active_commitments_from_them?: RelationshipCommitmentRecord[] | null
+  last_meaningful_interaction?: RelationshipMeaningfulInteraction | null
+  reciprocity_score?: number | null
+  schema_version?: number | null
 }
 
 export type Contact = {
