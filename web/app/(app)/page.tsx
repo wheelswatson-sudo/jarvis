@@ -1,16 +1,15 @@
 import Link from 'next/link'
 import { createClient } from '../../lib/supabase/server'
 import { Card, MetricCard, SectionHeader } from '../../components/cards'
-import { HalfLifeGauge, SentimentSlope } from '../../components/Gauge'
 import { IntelligencePanel } from '../../components/IntelligencePanel'
+import { ContactsGrid } from '../../components/ContactsGrid'
 import {
   formatCurrency,
   formatPercent,
   formatRelative,
-  tierColor,
-  tierLabel,
 } from '../../lib/format'
 import type { Commitment, Contact } from '../../lib/types'
+import { APOLLO_PROVIDER } from '../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,7 +19,11 @@ async function loadDashboard() {
   const supabase = await createClient()
   const now = new Date().toISOString()
 
-  const [contactsRes, commitmentsRes] = await Promise.all([
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  const [contactsRes, commitmentsRes, apolloRes] = await Promise.all([
     supabase
       .from('contacts')
       .select('*')
@@ -29,7 +32,20 @@ async function loadDashboard() {
     supabase
       .from('commitments')
       .select('id, contact_id, due_at, status, description'),
+    user
+      ? supabase
+          .from('user_integrations')
+          .select('access_token')
+          .eq('user_id', user.id)
+          .eq('provider', APOLLO_PROVIDER)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
   ])
+
+  const apolloConnected =
+    typeof (apolloRes.data as { access_token?: unknown } | null)
+      ?.access_token === 'string' &&
+    ((apolloRes.data as { access_token: string }).access_token.length ?? 0) > 0
 
   const contacts = (contactsRes.data ?? []) as Contact[]
   const commitments = (commitmentsRes.data ?? []) as Pick<
@@ -85,6 +101,7 @@ async function loadDashboard() {
 
   return {
     enriched,
+    apolloConnected,
     metrics: {
       activeRelationships: enriched.length,
       networkHealth,
@@ -99,7 +116,7 @@ async function loadDashboard() {
 
 export default async function DashboardPage() {
   const data = await loadDashboard()
-  const { metrics, needsAttention, topByLtv, enriched } = data
+  const { metrics, needsAttention, topByLtv, enriched, apolloConnected } = data
   const maxLtv = topByLtv[0]?.ltv_estimate ?? 1
 
   return (
@@ -241,48 +258,10 @@ export default async function DashboardPage() {
             </p>
           </Card>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {enriched.slice(0, 30).map((c) => (
-              <Link
-                key={c.id}
-                href={`/contacts/${c.id}`}
-                className="group rounded-lg border border-zinc-200 bg-white p-4 transition-colors hover:border-zinc-300"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="min-w-0">
-                    <div className="truncate font-medium">{c.name}</div>
-                    <div className="truncate text-xs text-zinc-500">
-                      {[c.title, c.company].filter(Boolean).join(' · ') || '—'}
-                    </div>
-                  </div>
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${tierColor(c.tier)}`}
-                  >
-                    {tierLabel(c.tier)}
-                  </span>
-                </div>
-                <div className="mt-4">
-                  <div className="mb-1 flex items-center justify-between text-xs text-zinc-500">
-                    <span>Half-life</span>
-                    <span className="tabular-nums">
-                      {c.half_life_days != null
-                        ? `${c.half_life_days.toFixed(0)}d`
-                        : '—'}
-                    </span>
-                  </div>
-                  <HalfLifeGauge days={c.half_life_days} />
-                </div>
-                <div className="mt-3 flex items-center justify-between text-xs text-zinc-500">
-                  <SentimentSlope slope={c.sentiment_slope} />
-                  <span>
-                    {c.open_commitments > 0
-                      ? `${c.open_commitments} open`
-                      : 'no commitments'}
-                  </span>
-                </div>
-              </Link>
-            ))}
-          </div>
+          <ContactsGrid
+            contacts={enriched}
+            apolloConnected={apolloConnected}
+          />
         )}
       </section>
     </div>

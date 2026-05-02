@@ -8,6 +8,8 @@ import {
   type GoogleContactsBanner,
   type GoogleContactsState,
 } from './GoogleContactsCard'
+import { ApolloCard, type ApolloState } from './ApolloCard'
+import { APOLLO_PROVIDER } from '../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
 
@@ -51,7 +53,7 @@ export default async function SettingsPage({
   } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [profileRes, keysRes, integrationRes] = await Promise.all([
+  const [profileRes, keysRes, integrationRes, apolloRes] = await Promise.all([
     supabase
       .from('profiles')
       .select('preferred_model')
@@ -66,6 +68,12 @@ export default async function SettingsPage({
       .select('account_email, last_synced_at')
       .eq('user_id', user.id)
       .eq('provider', 'google_contacts')
+      .maybeSingle(),
+    supabase
+      .from('user_integrations')
+      .select('access_token, last_synced_at')
+      .eq('user_id', user.id)
+      .eq('provider', APOLLO_PROVIDER)
       .maybeSingle(),
   ])
 
@@ -91,6 +99,16 @@ export default async function SettingsPage({
     last_synced_at: integrationRes.data?.last_synced_at ?? null,
   }
   const googleBanner = parseGoogleBanner(sp)
+
+  const apolloApiKey =
+    typeof apolloRes.data?.access_token === 'string'
+      ? apolloRes.data.access_token
+      : null
+  const apolloState: ApolloState = {
+    connected: !!apolloApiKey,
+    masked_key: apolloApiKey ? maskKey(apolloApiKey) : null,
+    last_synced_at: apolloRes.data?.last_synced_at ?? null,
+  }
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -128,7 +146,10 @@ export default async function SettingsPage({
               graph.
             </p>
           </div>
-          <GoogleContactsCard state={googleContacts} banner={googleBanner} />
+          <div className="space-y-3">
+            <GoogleContactsCard state={googleContacts} banner={googleBanner} />
+            <ApolloCard state={apolloState} />
+          </div>
         </section>
       </div>
     </div>

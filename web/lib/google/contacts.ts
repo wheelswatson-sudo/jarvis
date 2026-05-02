@@ -176,12 +176,13 @@ export async function fetchAllConnections(
   // 5000 connections × 1000 page size = at most 5 round-trips.
   const MAX_PAGES = 10
   for (let i = 0; i < MAX_PAGES; i++) {
-    const res = await people.people.connections.list({
-      resourceName: 'people/me',
-      pageSize: 1000,
-      personFields: PEOPLE_API_PERSON_FIELDS,
-      pageToken,
-    })
+    const res: { data: people_v1.Schema$ListConnectionsResponse } =
+      await people.people.connections.list({
+        resourceName: 'people/me',
+        pageSize: 1000,
+        personFields: PEOPLE_API_PERSON_FIELDS,
+        pageToken,
+      })
     if (res.data.connections) {
       all.push(...res.data.connections)
     }
