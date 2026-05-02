@@ -92,18 +92,31 @@ export async function POST(req: NextRequest) {
 
       const { data: contactRows } = await service
         .from('contacts')
-        .select('id, name, email, company')
+        .select('id, first_name, last_name, email, company')
         .eq('user_id', user.id)
         .in('email', counterpartyEmails)
         .limit(5)
 
-      const contact = (contactRows ?? [])[0] as
-        | { id: string; name: string | null; email: string | null; company: string | null }
+      const row = (contactRows ?? [])[0] as
+        | {
+            id: string
+            first_name: string | null
+            last_name: string | null
+            email: string | null
+            company: string | null
+          }
         | undefined
 
-      if (!contact) {
+      if (!row) {
         reports.push({ message_id: msg.id, status: 'skipped', error: 'no_matching_contact' })
         continue
+      }
+
+      const contact = {
+        id: row.id,
+        name: [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || null,
+        email: row.email,
+        company: row.company,
       }
 
       const occurredAt = msg.date ? new Date(msg.date).toISOString() : new Date().toISOString()
