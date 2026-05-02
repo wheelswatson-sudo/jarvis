@@ -1,184 +1,20 @@
 import { NextResponse, type NextRequest } from 'next/server'
-import { cookies } from 'next/headers'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
 import { trackImport } from '../../../../lib/events'
 import {
   GOOGLE_CONTACTS_PROVIDER,
-  buildAuthUrl,
-  buildOAuthClient,
-  exchangeCode,
+  buildPeopleClientFromAccessToken,
   fetchAllConnections,
   getConnectedAccountEmail,
   mapPersonToContact,
-  readGoogleEnv,
   type MappedContact,
 } from '../../../../lib/google/contacts'
 
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
-const STATE_COOKIE = 'google_contacts_oauth_state'
-const STATE_COOKIE_MAX_AGE = 600 // 10 minutes
-
-function redirectUriFor(req: NextRequest): string {
-  const { origin } = new URL(req.url)
-  return `${origin}/api/contacts/google`
-}
-
-function settingsRedirect(
-  req: NextRequest,
-  params: Record<string, string>,
-): NextResponse {
-  const { origin } = new URL(req.url)
-  const url = new URL(`${origin}/settings`)
-  for (const [k, v] of Object.entries(params)) {
-    url.searchParams.set(k, v)
-  }
-  return NextResponse.redirect(url)
-}
-
-// ----------------------------------------------------------------------------
-// GET — dual purpose: initiate OAuth (no `code`) OR handle callback (`code`)
-// ----------------------------------------------------------------------------
-export async function GET(req: NextRequest) {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
-  }
-
-  const env = readGoogleEnv()
-  if (!env) {
-    return apiError(
-      500,
-      'Google Contacts integration is not configured on this server.',
-      undefined,
-      'google_oauth_not_configured',
-    )
-  }
-
-  const url = new URL(req.url)
-  const code = url.searchParams.get('code')
-  const stateParam = url.searchParams.get('state')
-  const error = url.searchParams.get('error')
-
-  // Google bounced the user back with an error (e.g. user denied consent).
-  if (error) {
-    return settingsRedirect(req, {
-      google_contacts: 'error',
-      reason: error,
-    })
-  }
-
-  const oauth = buildOAuthClient(env, redirectUriFor(req))
-
-  // ---- Initiate flow ----
-  if (!code) {
-    const cookieStore = await cookies()
-    const state = crypto.randomUUID()
-    cookieStore.set(STATE_COOKIE, state, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      path: '/',
-      maxAge: STATE_COOKIE_MAX_AGE,
-    })
-    return NextResponse.redirect(buildAuthUrl(oauth, state))
-  }
-
-  // ---- Callback flow ----
-  const cookieStore = await cookies()
-  const expectedState = cookieStore.get(STATE_COOKIE)?.value
-  cookieStore.delete(STATE_COOKIE)
-  if (!expectedState || expectedState !== stateParam) {
-    return settingsRedirect(req, {
-      google_contacts: 'error',
-      reason: 'state_mismatch',
-    })
-  }
-
-  let refreshToken: string | null = null
-  let accessToken: string | null = null
-  let accessTokenExpiresAt: string | null = null
-  try {
-    const tokens = await exchangeCode(oauth, code)
-    refreshToken = tokens.refresh_token ?? null
-    accessToken = tokens.access_token ?? null
-    accessTokenExpiresAt = tokens.expiry_date
-      ? new Date(tokens.expiry_date).toISOString()
-      : null
-    oauth.setCredentials(tokens)
-  } catch {
-    return settingsRedirect(req, {
-      google_contacts: 'error',
-      reason: 'token_exchange_failed',
-    })
-  }
-
-  const accountEmail = await getConnectedAccountEmail(oauth)
-
-  const service = getServiceClient()
-  if (!service) {
-    return apiError(
-      500,
-      'Service role key not configured.',
-      undefined,
-      'service_unavailable',
-    )
-  }
-
-  // Look up any existing row so we can preserve a previously-saved
-  // refresh_token if Google omitted one this round (it does that when the
-  // same scopes were already granted; `prompt: 'consent'` mostly avoids
-  // this but we defend against it anyway).
-  const { data: existing } = await service
-    .from('user_integrations')
-    .select('refresh_token')
-    .eq('user_id', user.id)
-    .eq('provider', GOOGLE_CONTACTS_PROVIDER)
-    .maybeSingle()
-
-  const finalRefreshToken =
-    refreshToken ?? existing?.refresh_token ?? null
-
-  if (!finalRefreshToken) {
-    return settingsRedirect(req, {
-      google_contacts: 'error',
-      reason: 'no_refresh_token',
-    })
-  }
-
-  const { error: upsertError } = await service
-    .from('user_integrations')
-    .upsert(
-      {
-        user_id: user.id,
-        provider: GOOGLE_CONTACTS_PROVIDER,
-        account_email: accountEmail,
-        refresh_token: finalRefreshToken,
-        access_token: accessToken,
-        access_token_expires_at: accessTokenExpiresAt,
-        scopes: ['https://www.googleapis.com/auth/contacts.readonly'],
-      },
-      { onConflict: 'user_id,provider' },
-    )
-
-  if (upsertError) {
-    return settingsRedirect(req, {
-      google_contacts: 'error',
-      reason: 'persist_failed',
-    })
-  }
-
-  return settingsRedirect(req, { google_contacts: 'connected' })
-}
-
-// ----------------------------------------------------------------------------
-// POST — trigger a sync of Google Contacts into the contacts table
-// ----------------------------------------------------------------------------
 type SyncResult = {
   inserted: number
   updated: number
@@ -186,6 +22,10 @@ type SyncResult = {
   total_fetched: number
 }
 
+// ----------------------------------------------------------------------------
+// POST — sync Google Contacts using the access token from the Supabase
+// session (granted at login via the contacts.readonly scope).
+// ----------------------------------------------------------------------------
 export async function POST(req: NextRequest) {
   const supabase = await createClient()
   const {
@@ -195,13 +35,19 @@ export async function POST(req: NextRequest) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
-  const env = readGoogleEnv()
-  if (!env) {
+  const body = (await req.json().catch(() => null)) as
+    | { access_token?: unknown }
+    | null
+  const accessToken =
+    typeof body?.access_token === 'string' && body.access_token.length > 0
+      ? body.access_token
+      : null
+  if (!accessToken) {
     return apiError(
-      500,
-      'Google Contacts integration is not configured on this server.',
+      400,
+      'Missing Google access token. Sign out and back in with Google.',
       undefined,
-      'google_oauth_not_configured',
+      'missing_access_token',
     )
   }
 
@@ -215,51 +61,40 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Read the integration row through the service client so we can write
-  // back the refreshed access_token / last_synced_at on the same path.
-  const { data: integration, error: integrationError } = await service
-    .from('user_integrations')
-    .select('refresh_token, account_email')
-    .eq('user_id', user.id)
-    .eq('provider', GOOGLE_CONTACTS_PROVIDER)
-    .maybeSingle()
-
-  if (integrationError) {
-    return apiError(
-      500,
-      integrationError.message,
-      undefined,
-      'integration_lookup_failed',
-    )
-  }
-  if (!integration?.refresh_token) {
-    return apiError(
-      400,
-      'Google Contacts is not connected.',
-      undefined,
-      'not_connected',
-    )
-  }
-
-  const oauth = buildOAuthClient(env, redirectUriFor(req))
-  oauth.setCredentials({ refresh_token: integration.refresh_token })
+  const oauth = buildPeopleClientFromAccessToken(accessToken)
 
   let people
   try {
     people = await fetchAllConnections(oauth)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Google API error'
-    // Common case: refresh token revoked → user must reconnect.
-    const looksRevoked = /invalid_grant|unauthorized|401/i.test(message)
+    // "SERVICE_DISABLED" / "API has not been used" → People API isn't
+    // enabled on the Google Cloud project. Tell the user that directly
+    // instead of pretending it's an auth issue.
+    if (
+      /SERVICE_DISABLED|API has not been used|People API|accessNotConfigured/i.test(
+        message,
+      )
+    ) {
+      return apiError(
+        503,
+        'Google People API is not enabled on this project. Enable it in Google Cloud Console and retry.',
+        undefined,
+        'people_api_disabled',
+      )
+    }
+    const looksAuthFailure = /invalid_grant|unauthorized|401/i.test(message)
     return apiError(
-      looksRevoked ? 401 : 502,
-      looksRevoked
-        ? 'Google rejected the saved credentials. Reconnect your Google account.'
+      looksAuthFailure ? 401 : 502,
+      looksAuthFailure
+        ? 'Google rejected the access token. Sign out and back in with Google.'
         : `Google API error: ${message}`,
       undefined,
-      looksRevoked ? 'reconnect_required' : 'google_api_error',
+      looksAuthFailure ? 'reconnect_required' : 'google_api_error',
     )
   }
+
+  const accountEmail = await getConnectedAccountEmail(oauth)
 
   const mapped = people.map(mapPersonToContact)
 
@@ -363,11 +198,18 @@ export async function POST(req: NextRequest) {
     if (!updateError) updated++
   }
 
-  await service
-    .from('user_integrations')
-    .update({ last_synced_at: new Date().toISOString() })
-    .eq('user_id', user.id)
-    .eq('provider', GOOGLE_CONTACTS_PROVIDER)
+  // Record the sync time so the UI can surface it. We only need user_id +
+  // provider; refresh_token stays null because we don't manage tokens here.
+  await service.from('user_integrations').upsert(
+    {
+      user_id: user.id,
+      provider: GOOGLE_CONTACTS_PROVIDER,
+      account_email: accountEmail,
+      last_synced_at: new Date().toISOString(),
+      scopes: ['https://www.googleapis.com/auth/contacts.readonly'],
+    },
+    { onConflict: 'user_id,provider' },
+  )
 
   if (inserted > 0 || updated > 0) {
     void trackImport(user.id, {
@@ -385,31 +227,6 @@ export async function POST(req: NextRequest) {
     total_fetched: people.length,
   }
   return NextResponse.json(result)
-}
-
-// ----------------------------------------------------------------------------
-// DELETE — disconnect Google Contacts for this user
-// ----------------------------------------------------------------------------
-export async function DELETE() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return apiError(401, 'Unauthorized', undefined, 'unauthorized')
-  }
-
-  const { error } = await supabase
-    .from('user_integrations')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('provider', GOOGLE_CONTACTS_PROVIDER)
-
-  if (error) {
-    return apiError(500, error.message, undefined, 'disconnect_failed')
-  }
-
-  return NextResponse.json({ ok: true })
 }
 
 // ----------------------------------------------------------------------------

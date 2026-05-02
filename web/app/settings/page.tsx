@@ -5,7 +5,6 @@ import { DEFAULT_MODEL_ID, MODELS, PROVIDERS, type Provider } from '../../lib/pr
 import { SettingsClient } from './SettingsClient'
 import {
   GoogleContactsCard,
-  type GoogleContactsBanner,
   type GoogleContactsState,
 } from './GoogleContactsCard'
 import { ApolloCard, type ApolloState } from './ApolloCard'
@@ -26,28 +25,7 @@ function maskKey(key: string): string {
   return `${key.slice(0, 4)}${'•'.repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`
 }
 
-type SearchParams = Record<string, string | string[] | undefined>
-
-function parseGoogleBanner(sp: SearchParams): GoogleContactsBanner | null {
-  const status = sp.google_contacts
-  if (typeof status !== 'string') return null
-  if (status === 'connected') return { kind: 'connected' }
-  if (status === 'error') {
-    const reason = sp.reason
-    return {
-      kind: 'error',
-      reason: typeof reason === 'string' ? reason : 'unknown',
-    }
-  }
-  return null
-}
-
-export default async function SettingsPage({
-  searchParams,
-}: {
-  searchParams: Promise<SearchParams>
-}) {
-  const sp = await searchParams
+export default async function SettingsPage() {
   const supabase = await createClient()
   const {
     data: { user },
@@ -103,11 +81,9 @@ export default async function SettingsPage({
     }))
 
   const googleContacts: GoogleContactsState = {
-    connected: !!integrationRes.data,
     account_email: integrationRes.data?.account_email ?? null,
     last_synced_at: integrationRes.data?.last_synced_at ?? null,
   }
-  const googleBanner = parseGoogleBanner(sp)
 
   const apolloApiKey =
     typeof apolloRes.data?.access_token === 'string'
@@ -160,7 +136,7 @@ export default async function SettingsPage({
             </p>
           </div>
           <div className="space-y-3">
-            <GoogleContactsCard state={googleContacts} banner={googleBanner} />
+            <GoogleContactsCard state={googleContacts} />
             <ApolloCard state={apolloState} />
             <GmailSyncCard state={gmailState} />
           </div>
