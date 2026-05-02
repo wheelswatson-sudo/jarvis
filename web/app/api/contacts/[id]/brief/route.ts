@@ -8,6 +8,7 @@ import {
   getProviderEnvKey,
   streamCompletion,
 } from '../../../../../lib/providers'
+import { contactName } from '../../../../../lib/format'
 import type {
   Commitment,
   Contact,
@@ -104,7 +105,7 @@ function deterministicBrief(
   }
 
   return {
-    who_they_are: who.length > 0 ? who.join(' · ') : contact.name,
+    who_they_are: who.length > 0 ? who.join(' · ') : contactName(contact),
     recent_context: recentParts.join('. '),
     open_items: openItems,
     suggested_talking_points: talkingPoints,
@@ -132,7 +133,7 @@ async function polishBriefWithLLM(
     })
     .join('\n')
 
-  const prompt = `You are an executive assistant drafting a 30-second meeting prep brief for ${contact.name}.
+  const prompt = `You are an executive assistant drafting a 30-second meeting prep brief for ${contactName(contact)}.
 Use ONLY the data below. Be specific, not generic. Output strict JSON with these keys:
 who_they_are, recent_context, open_items (array of strings), suggested_talking_points (array of strings, max 4), relationship_health.
 

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Contact, Commitment, PersonalDetails } from '../types'
+import { contactName } from '../format'
 
 // ---------------------------------------------------------------------------
 // Daily intelligence briefing assembler.
@@ -65,7 +66,9 @@ export type BriefingResult = {
 type ContactRow = Pick<
   Contact,
   | 'id'
-  | 'name'
+  | 'first_name'
+  | 'last_name'
+  | 'email'
   | 'tier'
   | 'last_interaction_at'
   | 'relationship_score'
@@ -95,7 +98,7 @@ export async function buildDailyBriefing(
     service
       .from('contacts')
       .select(
-        'id, name, tier, last_interaction_at, relationship_score, sentiment_trajectory, reciprocity_ratio, metrics_computed_at, personal_details, updated_at, company',
+        'id, first_name, last_name, email, tier, last_interaction_at, relationship_score, sentiment_trajectory, reciprocity_ratio, metrics_computed_at, personal_details, updated_at, company',
       )
       .eq('user_id', userId)
       .limit(5000),
@@ -270,7 +273,7 @@ function buildOverdueItems(
           ? 'Due now.'
           : `Overdue by ${Math.round(overdueBy)} day${overdueBy >= 2 ? 's' : ''}.`,
       contact_id: c.contact_id ?? null,
-      contact_name: contact?.name ?? null,
+      contact_name: contact ? contactName(contact) : null,
       urgency: 'high',
       href: c.contact_id ? `/contacts/${c.contact_id}` : '/commitments',
       metadata: { due_at: c.due_at, owner: c.owner },
@@ -293,13 +296,14 @@ function buildCoolingItems(contacts: ContactRow[]): BriefingItem[] {
 
   return cooling.map((c) => {
     const slope = c.sentiment_trajectory ?? 0
+    const name = contactName(c)
     return {
       id: `cooling:${c.id}`,
       category: 'cooling',
-      action: `Check in with ${c.name}`,
+      action: `Check in with ${name}`,
       why: `Sentiment is trending down (slope ${slope.toFixed(3)}/day). Reset the tone before it hardens.`,
       contact_id: c.id,
-      contact_name: c.name,
+      contact_name: name,
       urgency: slope < -0.05 ? 'high' : 'medium',
       href: `/contacts/${c.id}`,
       metadata: { sentiment_trajectory: slope },
@@ -321,13 +325,14 @@ function buildReciprocityItems(contacts: ContactRow[]): BriefingItem[] {
 
   return flags.map((c) => {
     const ratio = c.reciprocity_ratio ?? 0
+    const name = contactName(c)
     return {
       id: `reciprocity:${c.id}`,
       category: 'reciprocity',
-      action: `Pause outreach to ${c.name}`,
+      action: `Pause outreach to ${name}`,
       why: `You're sending ${(ratio === 0 ? 0 : 1 / ratio).toFixed(1)}x what you get back. Consider waiting for them to surface, or asking a direct question that requires a reply.`,
       contact_id: c.id,
-      contact_name: c.name,
+      contact_name: name,
       urgency: 'medium',
       href: `/contacts/${c.id}`,
       metadata: { reciprocity_ratio: ratio },
@@ -356,16 +361,17 @@ function buildStaleItems(
     const days = c.last_interaction_at
       ? daysBetween(c.last_interaction_at, new Date())
       : null
+    const name = contactName(c)
     return {
       id: `stale:${c.id}`,
       category: 'stale',
-      action: `Reactivate ${c.name}`,
+      action: `Reactivate ${name}`,
       why:
         days != null
           ? `High-value relationship (${Math.round((c.relationship_score ?? 0) * 100)}/100) gone quiet for ${Math.round(days)} days. Dormant asset.`
           : `High-value relationship gone quiet. Dormant asset.`,
       contact_id: c.id,
-      contact_name: c.name,
+      contact_name: name,
       urgency: 'medium',
       href: `/contacts/${c.id}`,
       metadata: {
@@ -400,13 +406,14 @@ function buildSocialChangeItems(
       pd.facebook_workplace ||
       pd.facebook_current_city ||
       'updated profile'
+    const name = contactName(c)
     return {
       id: `social:${c.id}`,
       category: 'social',
-      action: `${c.name} has a social update`,
+      action: `${name} has a social update`,
       why: `Recent change spotted: ${truncate(headline, 100)}. Worth a "saw your update" note.`,
       contact_id: c.id,
-      contact_name: c.name,
+      contact_name: name,
       urgency: 'medium',
       href: `/contacts/${c.id}`,
       metadata: { headline },
@@ -435,17 +442,19 @@ function buildConnectorPlaceholders(contacts: ContactRow[]): BriefingItem[] {
     const a = sorted[0]
     const b = sorted[1]
     if (!a || !b || !a.company) continue
+    const aName = contactName(a)
+    const bName = contactName(b)
     return [
       {
         id: `connector:${a.id}:${b.id}`,
         category: 'connector',
-        action: `Connect ${a.name} ↔ ${b.name}`,
+        action: `Connect ${aName} ↔ ${bName}`,
         why: `Both at ${a.company}. Possible mutual benefit — confirm before introducing.`,
         contact_id: a.id,
-        contact_name: a.name,
+        contact_name: aName,
         urgency: 'low',
         href: `/contacts/${a.id}`,
-        metadata: { other_contact_id: b.id, other_contact_name: b.name },
+        metadata: { other_contact_id: b.id, other_contact_name: bName },
       },
     ]
   }

@@ -24,7 +24,8 @@ export type PersonalDetails = {
 export type Contact = {
   id: string
   user_id: string
-  name: string
+  first_name: string | null
+  last_name: string | null
   email: string | null
   phone: string | null
   company: string | null
@@ -124,7 +125,8 @@ export type Approval = {
 export type PendingChangeStatus = 'pending' | 'approved' | 'rejected'
 
 export type PendingChangeField =
-  | 'name'
+  | 'first_name'
+  | 'last_name'
   | 'email'
   | 'phone'
   | 'company'

@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { useMemo, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { HalfLifeGauge, SentimentSlope } from './Gauge'
-import { tierColor, tierLabel } from '../lib/format'
+import { contactName, tierColor, tierLabel } from '../lib/format'
 import type { Contact } from '../lib/types'
 
 const MAX_BATCH = 10
@@ -196,7 +196,7 @@ export function ContactsGrid({
             <>
               <div className="flex items-start justify-between">
                 <div className="min-w-0">
-                  <div className="truncate font-medium">{c.name}</div>
+                  <div className="truncate font-medium">{contactName(c)}</div>
                   <div className="truncate text-xs text-zinc-500">
                     {[c.title, c.company].filter(Boolean).join(' · ') || '—'}
                   </div>

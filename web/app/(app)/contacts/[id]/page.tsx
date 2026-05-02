@@ -7,7 +7,7 @@ import { QuickAddInteraction } from '../../../../components/QuickAddInteraction'
 import { InteractionTimeline } from '../../../../components/InteractionTimeline'
 import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
-import { formatRelative } from '../../../../lib/format'
+import { contactName, formatRelative } from '../../../../lib/format'
 import type {
   Commitment,
   Contact,
@@ -41,6 +41,7 @@ export default async function ContactDetailPage({
 
   const contact = contactData as Contact | null
   if (!contact) notFound()
+  const displayName = contactName(contact)
 
   const interactions = (ixRes.data ?? []) as Interaction[]
   const commitments = (comRes.data ?? []) as Commitment[]
@@ -67,7 +68,7 @@ export default async function ContactDetailPage({
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="bg-gradient-to-r from-indigo-300 via-violet-300 to-fuchsia-300 bg-clip-text text-3xl font-medium tracking-tight text-transparent">
-              {contact.name}
+              {displayName}
             </h1>
             <p className="mt-1 text-sm text-zinc-400">
               {[contact.title, contact.company].filter(Boolean).join(' · ') ||
@@ -76,7 +77,7 @@ export default async function ContactDetailPage({
           </div>
           <QuickAddInteraction
             contactId={contact.id}
-            contactName={contact.name}
+            contactName={displayName}
           />
         </header>
 
@@ -180,7 +181,7 @@ export default async function ContactDetailPage({
           <DarkCard>
             {openCommitments.length === 0 ? (
               <p className="text-sm text-zinc-500">
-                No open commitments for {contact.name}.
+                No open commitments for {displayName}.
               </p>
             ) : (
               <ul className="divide-y divide-zinc-800">

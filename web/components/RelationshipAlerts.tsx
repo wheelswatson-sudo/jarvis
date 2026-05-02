@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { contactName } from '../lib/format'
 import type { Commitment, Contact, Interaction } from '../lib/types'
 
 type Alert = {
@@ -52,7 +53,7 @@ export function buildAlerts(
       alerts.push({
         id: `decay-${c.id}`,
         tone: c.tier === 1 ? 'red' : 'amber',
-        title: `Haven't spoken to ${c.name} in ${days}d`,
+        title: `Haven't spoken to ${contactName(c)} in ${days}d`,
         detail: `T${c.tier}${topic}`,
         href: `/contacts/${c.id}`,
       })
@@ -74,7 +75,7 @@ export function buildAlerts(
       alerts.push({
         id: `overdue-${contactId}`,
         tone: 'fuchsia',
-        title: `${list.length} overdue commitments with ${contact.name}`,
+        title: `${list.length} overdue commitments with ${contactName(contact)}`,
         detail: list
           .slice(0, 2)
           .map((c) => truncate(c.description, 50))
@@ -93,7 +94,7 @@ export function buildAlerts(
     alerts.push({
       id: `follow-${c.id}`,
       tone: 'violet',
-      title: `Follow up with ${c.name}${dueIn < 0 ? ' (overdue)' : dueIn === 0 ? ' today' : ' tomorrow'}`,
+      title: `Follow up with ${contactName(c)}${dueIn < 0 ? ' (overdue)' : dueIn === 0 ? ' today' : ' tomorrow'}`,
       detail: 'You scheduled this from a previous interaction.',
       href: `/contacts/${c.id}`,
     })

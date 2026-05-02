@@ -12,7 +12,8 @@ type ResolveBody = {
 }
 
 const ALLOWED_FIELDS = new Set([
-  'name',
+  'first_name',
+  'last_name',
   'email',
   'phone',
   'company',

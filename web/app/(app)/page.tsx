@@ -4,6 +4,7 @@ import { Card, MetricCard, SectionHeader } from '../../components/cards'
 import { IntelligencePanel } from '../../components/IntelligencePanel'
 import { ContactsGrid } from '../../components/ContactsGrid'
 import {
+  contactName,
   formatCurrency,
   formatPercent,
   formatRelative,
@@ -177,7 +178,7 @@ export default async function DashboardPage() {
             items={needsAttention.cooling.slice(0, 5).map((c) => ({
               key: c.id,
               href: `/contacts/${c.id}`,
-              primary: c.name,
+              primary: contactName(c),
               secondary: `half-life ${c.half_life_days?.toFixed(0)}d`,
             }))}
           />
@@ -188,7 +189,7 @@ export default async function DashboardPage() {
             items={needsAttention.reactivation.slice(0, 5).map((c) => ({
               key: c.id,
               href: `/contacts/${c.id}`,
-              primary: c.name,
+              primary: contactName(c),
               secondary: `last seen ${formatRelative(c.last_interaction_at)}`,
             }))}
           />
@@ -216,7 +217,7 @@ export default async function DashboardPage() {
                     >
                       <div className="flex items-baseline justify-between text-sm">
                         <span className="font-medium group-hover:underline">
-                          {c.name}
+                          {contactName(c)}
                         </span>
                         <span className="tabular-nums text-zinc-500">
                           {formatCurrency(c.ltv_estimate)}

@@ -4,6 +4,7 @@ import {
   CommitmentTracker,
   type EnrichedCommitment,
 } from '../../../components/CommitmentTracker'
+import { contactName } from '../../../lib/format'
 import type { Commitment, Contact } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -18,12 +19,17 @@ export default async function CommitmentsPage() {
       .order('created_at', { ascending: false }),
     supabase
       .from('contacts')
-      .select('id, name')
-      .order('name', { ascending: true }),
+      .select('id, first_name, last_name, email')
+      .order('last_name', { ascending: true })
+      .order('first_name', { ascending: true }),
   ])
   const commitments = (cData ?? []) as Commitment[]
-  const contacts = (contactsData ?? []) as Pick<Contact, 'id' | 'name'>[]
-  const nameById = new Map(contacts.map((c) => [c.id, c.name]))
+  const contacts = (contactsData ?? []) as Pick<
+    Contact,
+    'id' | 'first_name' | 'last_name' | 'email'
+  >[]
+  const contactsForForm = contacts.map((c) => ({ id: c.id, name: contactName(c) }))
+  const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
 
   const enriched: EnrichedCommitment[] = commitments.map((c) => ({
     ...c,
@@ -42,7 +48,7 @@ export default async function CommitmentsPage() {
           </p>
         </header>
 
-        <AddCommitmentForm contacts={contacts} />
+        <AddCommitmentForm contacts={contactsForForm} />
 
         <CommitmentTracker commitments={enriched} showFilter />
       </div>

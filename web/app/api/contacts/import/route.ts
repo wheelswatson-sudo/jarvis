@@ -145,7 +145,7 @@ export async function POST(req: Request) {
       notes,
       tier,
       tags,
-      linkedin_url: linkedin,
+      linkedin,
     })
   })
 

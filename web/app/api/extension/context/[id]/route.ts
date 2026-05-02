@@ -5,6 +5,7 @@ import {
   getExtensionUser,
 } from '../../../../../lib/extension-auth'
 import { getServiceClient } from '../../../../../lib/supabase/service'
+import { contactName } from '../../../../../lib/format'
 import type {
   Commitment,
   Contact,
@@ -87,7 +88,7 @@ export async function GET(
   return corsJson({
     contact: {
       id: contact.id,
-      name: contact.name,
+      name: contactName(contact),
       company: contact.company,
       title: contact.title,
       relationship_score: contact.relationship_score,

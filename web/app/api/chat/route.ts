@@ -9,6 +9,7 @@ import {
   streamCompletion,
   type ChatMessage,
 } from '../../../lib/providers'
+import { contactName } from '../../../lib/format'
 import type { Commitment, Contact, Interaction } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -119,7 +120,7 @@ async function loadContext(
 
   const topContacts = contacts.slice(0, MAX_CONTACTS_IN_CONTEXT).map((c) => ({
     id: c.id,
-    name: c.name,
+    name: contactName(c),
     tier: c.tier,
     company: c.company,
     title: c.title,
@@ -132,11 +133,14 @@ async function loadContext(
   const iOweAll: RelationshipContext['iOwe'] = []
   const theyOweAll: RelationshipContext['theyOwe'] = []
   for (const c of commitments) {
-    const contactName = c.contact_id
-      ? (contactById.get(c.contact_id)?.name ?? null)
+    const cn = c.contact_id
+      ? (() => {
+          const ct = contactById.get(c.contact_id)
+          return ct ? contactName(ct) : null
+        })()
       : null
     const desc = c.description.toLowerCase()
-    const item = { description: c.description, due: c.due_at, contactName }
+    const item = { description: c.description, due: c.due_at, contactName: cn }
     if (desc.startsWith('they ') || desc.includes('they owe')) {
       theyOweAll.push(item)
     } else {
@@ -158,15 +162,16 @@ async function loadContext(
 
   const recentInteractions = interactions
     .slice(0, MAX_INTERACTIONS_IN_CONTEXT)
-    .map((i) => ({
-      contactName: i.contact_id
-        ? (contactById.get(i.contact_id)?.name ?? null)
-        : null,
-      channel: i.channel,
-      direction: i.direction,
-      summary: i.summary,
-      occurredAt: i.occurred_at,
-    }))
+    .map((i) => {
+      const ct = i.contact_id ? contactById.get(i.contact_id) : null
+      return {
+        contactName: ct ? contactName(ct) : null,
+        channel: i.channel,
+        direction: i.direction,
+        summary: i.summary,
+        occurredAt: i.occurred_at,
+      }
+    })
 
   return {
     userName: userMetaName?.trim() || userEmail.split('@')[0] || 'there',
