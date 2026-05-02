@@ -68,6 +68,32 @@ export async function POST(req: NextRequest) {
     return apiError(500, 'Service role key not configured', undefined, 'service_unavailable')
   }
 
+  // Pre-fetch all contacts with emails and build a case-insensitive lookup map.
+  // This avoids N+1 queries (one per message) and handles the fact that
+  // contacts.email is stored in mixed case but we normalize to lowercase.
+  const { data: allContactRows } = await service
+    .from('contacts')
+    .select('id, first_name, last_name, email, company')
+    .eq('user_id', user.id)
+    .not('email', 'is', null)
+
+  const contactsByLowercaseEmail = new Map<
+    string,
+    {
+      id: string
+      first_name: string | null
+      last_name: string | null
+      email: string | null
+      company: string | null
+    }
+  >()
+
+  for (const contact of allContactRows ?? []) {
+    if (contact.email) {
+      contactsByLowercaseEmail.set(contact.email.toLowerCase(), contact)
+    }
+  }
+
   const reports: SyncReport[] = []
   let totalCommitments = 0
 
@@ -90,22 +116,22 @@ export async function POST(req: NextRequest) {
         continue
       }
 
-      const { data: contactRows } = await service
-        .from('contacts')
-        .select('id, first_name, last_name, email, company')
-        .eq('user_id', user.id)
-        .in('email', counterpartyEmails)
-        .limit(5)
+      // Find the first matching contact using case-insensitive email lookup
+      let row: {
+        id: string
+        first_name: string | null
+        last_name: string | null
+        email: string | null
+        company: string | null
+      } | undefined
 
-      const row = (contactRows ?? [])[0] as
-        | {
-            id: string
-            first_name: string | null
-            last_name: string | null
-            email: string | null
-            company: string | null
-          }
-        | undefined
+      for (const emailToMatch of counterpartyEmails) {
+        const match = contactsByLowercaseEmail.get(emailToMatch)
+        if (match) {
+          row = match
+          break
+        }
+      }
 
       if (!row) {
         reports.push({ message_id: msg.id, status: 'skipped', error: 'no_matching_contact' })
