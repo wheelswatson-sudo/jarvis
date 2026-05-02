@@ -9,6 +9,7 @@ import {
   type GoogleContactsState,
 } from './GoogleContactsCard'
 import { ApolloCard, type ApolloState } from './ApolloCard'
+import { GmailSyncCard, type GmailSyncState } from './GmailSyncCard'
 import { APOLLO_PROVIDER } from '../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
@@ -53,7 +54,7 @@ export default async function SettingsPage({
   } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [profileRes, keysRes, integrationRes, apolloRes] = await Promise.all([
+  const [profileRes, keysRes, integrationRes, apolloRes, gmailRes] = await Promise.all([
     supabase
       .from('profiles')
       .select('preferred_model')
@@ -74,6 +75,14 @@ export default async function SettingsPage({
       .select('access_token, last_synced_at')
       .eq('user_id', user.id)
       .eq('provider', APOLLO_PROVIDER)
+      .maybeSingle(),
+    supabase
+      .from('interactions')
+      .select('occurred_at')
+      .eq('user_id', user.id)
+      .like('source', 'gmail:%')
+      .order('occurred_at', { ascending: false })
+      .limit(1)
       .maybeSingle(),
   ])
 
@@ -108,6 +117,10 @@ export default async function SettingsPage({
     connected: !!apolloApiKey,
     masked_key: apolloApiKey ? maskKey(apolloApiKey) : null,
     last_synced_at: apolloRes.data?.last_synced_at ?? null,
+  }
+
+  const gmailState: GmailSyncState = {
+    last_synced_at: gmailRes.data?.occurred_at ?? null,
   }
 
   return (
@@ -149,6 +162,7 @@ export default async function SettingsPage({
           <div className="space-y-3">
             <GoogleContactsCard state={googleContacts} banner={googleBanner} />
             <ApolloCard state={apolloState} />
+            <GmailSyncCard state={gmailState} />
           </div>
         </section>
       </div>
