@@ -9,6 +9,10 @@ const PUBLIC_PATHS = [
   // Cron-callable: route handler enforces auth via x-cron-secret OR user
   // session, so the proxy redirect would just block legitimate cron calls.
   '/api/intelligence/analyze',
+  // Chrome extension calls authenticate via Authorization: Bearer <token>,
+  // not session cookies — the proxy redirect would otherwise turn legitimate
+  // calls into a 307 → /login.
+  '/api/extension',
 ]
 const ONBOARDING_ALLOWED = ['/onboarding', '/api/onboarding', '/auth']
 

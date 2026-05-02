@@ -9,6 +9,16 @@ export type PersonalDetails = {
   career_history?: { role: string; company: string; years?: string | null }[] | null
   life_events?: { date?: string | null; event: string }[] | null
   notes?: string | null
+  // Social-monitoring fields (populated by the Chrome extension via the
+  // /api/extension/* endpoints). Stored in personal_details JSONB so we
+  // don't need a column migration.
+  linkedin_url?: string | null
+  facebook_url?: string | null
+  linkedin_headline?: string | null
+  linkedin_about?: string | null
+  facebook_current_city?: string | null
+  facebook_workplace?: string | null
+  social_last_checked_at?: string | null
 }
 
 export type Contact = {

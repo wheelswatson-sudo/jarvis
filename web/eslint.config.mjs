@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The Chrome extension lives under web/extension/ but has its own
+    // tsconfig + package.json + esbuild pipeline. Keep it out of the
+    // Next.js linter so chrome.* globals don't trip it.
+    "extension/**",
   ]),
 ]);
 
