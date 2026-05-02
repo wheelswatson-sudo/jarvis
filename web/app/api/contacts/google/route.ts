@@ -165,7 +165,6 @@ export async function POST(req: NextRequest) {
       company: m.company,
       title: m.title,
       personal_details: m.personal_details,
-      source: 'google_contacts',
     })
   }
 
