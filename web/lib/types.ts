@@ -35,6 +35,9 @@ export type Contact = {
   ltv_estimate: number | null
   half_life_days: number | null
   sentiment_slope: number | null
+  sentiment_trajectory: number | null
+  reciprocity_ratio: number | null
+  metrics_computed_at: string | null
   last_interaction_at: string | null
   personal_details: PersonalDetails | null
   relationship_score: number | null
