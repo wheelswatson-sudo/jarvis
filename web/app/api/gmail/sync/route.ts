@@ -162,11 +162,17 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  const errorReports = reports.filter((r) => r.status === 'error')
+  const sampleErrors = Array.from(
+    new Set(errorReports.map((r) => r.error ?? 'unknown')),
+  ).slice(0, 3)
+
   return NextResponse.json({
     processed: reports.filter((r) => r.status === 'processed').length,
     skipped: reports.filter((r) => r.status === 'skipped').length,
-    errors: reports.filter((r) => r.status === 'error').length,
+    errors: errorReports.length,
     commitments_created: totalCommitments,
+    sample_errors: sampleErrors,
     results: reports,
   })
 }
