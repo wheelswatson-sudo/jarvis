@@ -168,30 +168,38 @@ function parseTranscript(text: string): ParsedTranscript {
   }
 }
 
+type ContactMatchRow = Pick<Contact, 'id' | 'first_name' | 'last_name' | 'email'>
+
+function fullName(c: ContactMatchRow): string {
+  return [c.first_name, c.last_name].filter(Boolean).join(' ').trim()
+}
+
 function matchContact(
   participants: string[],
-  contacts: Pick<Contact, 'id' | 'name' | 'email'>[],
+  contacts: ContactMatchRow[],
 ): { id: string | null; name: string | null; confidence: ScanResult['match_confidence'] } {
   if (participants.length === 0 || contacts.length === 0) {
     return { id: null, name: null, confidence: 'none' }
   }
   const norm = (s: string) => s.toLowerCase().trim()
-  const byFull = new Map(contacts.map((c) => [norm(c.name), c]))
-  const byFirst = new Map<string, Pick<Contact, 'id' | 'name'>>()
+  const byFull = new Map<string, ContactMatchRow>()
+  const byFirst = new Map<string, ContactMatchRow>()
   for (const c of contacts) {
-    const first = norm(c.name).split(/\s+/)[0]
+    const full = norm(fullName(c))
+    if (full && !byFull.has(full)) byFull.set(full, c)
+    const first = norm(c.first_name ?? '').split(/\s+/)[0]
     if (first && !byFirst.has(first)) byFirst.set(first, c)
   }
 
   for (const p of participants) {
     const n = norm(p)
     const full = byFull.get(n)
-    if (full) return { id: full.id, name: full.name, confidence: 'high' }
+    if (full) return { id: full.id, name: fullName(full), confidence: 'high' }
   }
   for (const p of participants) {
     const first = norm(p).split(/\s+/)[0]
     const m = first ? byFirst.get(first) : undefined
-    if (m) return { id: m.id, name: m.name, confidence: 'medium' }
+    if (m) return { id: m.id, name: fullName(m), confidence: 'medium' }
   }
   return { id: null, name: null, confidence: 'low' }
 }
@@ -236,9 +244,9 @@ export async function POST(req: Request) {
 
   const { data: contactsData } = await supabase
     .from('contacts')
-    .select('id, name, email')
+    .select('id, first_name, last_name, email')
     .eq('user_id', user.id)
-  const contacts = (contactsData ?? []) as Pick<Contact, 'id' | 'name' | 'email'>[]
+  const contacts = (contactsData ?? []) as ContactMatchRow[]
   const match = matchContact(parsed.participants, contacts)
 
   const result: ScanResult = {

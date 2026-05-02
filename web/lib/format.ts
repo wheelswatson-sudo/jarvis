@@ -59,3 +59,17 @@ export function healthColor(score: number | null | undefined): string {
   if (score >= 0.4) return 'text-amber-600'
   return 'text-red-600'
 }
+
+export function contactName(
+  c: {
+    first_name?: string | null
+    last_name?: string | null
+    email?: string | null
+  } | null | undefined,
+): string {
+  if (!c) return 'Unknown'
+  const composed = [c.first_name, c.last_name].filter(Boolean).join(' ').trim()
+  if (composed) return composed
+  if (c.email) return c.email
+  return 'Unknown'
+}

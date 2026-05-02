@@ -32,7 +32,7 @@ export async function GET(req: Request) {
   const { data, error } = await svc
     .from('contacts')
     .select(
-      'id, name, last_interaction_at, linkedin, personal_details, relationship_score, tier',
+      'id, first_name, last_name, last_interaction_at, linkedin, personal_details, relationship_score, tier',
     )
     .eq('user_id', user.id)
   if (error) return corsError(500, error.message, 'query_failed')
@@ -40,7 +40,8 @@ export async function GET(req: Request) {
   const rows = (data ?? []) as Pick<
     Contact,
     | 'id'
-    | 'name'
+    | 'first_name'
+    | 'last_name'
     | 'last_interaction_at'
     | 'linkedin'
     | 'personal_details'
@@ -58,9 +59,10 @@ export async function GET(req: Request) {
       if (!social_url) return null
       const days = daysSince(c.last_interaction_at)
       if (days != null && days < STALE_DAYS) return null
+      const name = [c.first_name, c.last_name].filter(Boolean).join(' ').trim()
       return {
         id: c.id,
-        name: c.name,
+        name,
         days_since: days,
         social_url,
         source,

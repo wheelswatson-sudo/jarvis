@@ -31,21 +31,28 @@ export async function GET(req: Request) {
 
   const { data, error } = await svc
     .from('contacts')
-    .select('id, name, company, title, linkedin, personal_details')
+    .select('id, first_name, last_name, company, title, linkedin, personal_details')
     .eq('user_id', user.id)
     .or(
-      `name.ilike.${pattern},company.ilike.${pattern},title.ilike.${pattern}`,
+      `first_name.ilike.${pattern},last_name.ilike.${pattern},company.ilike.${pattern},title.ilike.${pattern}`,
     )
-    .order('name', { ascending: true })
+    .order('last_name', { ascending: true })
+    .order('first_name', { ascending: true })
     .limit(15)
   if (error) return corsError(500, error.message, 'query_failed')
 
   const contacts = ((data ?? []) as Pick<
     Contact,
-    'id' | 'name' | 'company' | 'title' | 'linkedin' | 'personal_details'
+    | 'id'
+    | 'first_name'
+    | 'last_name'
+    | 'company'
+    | 'title'
+    | 'linkedin'
+    | 'personal_details'
   >[]).map((c) => ({
     id: c.id,
-    name: c.name,
+    name: [c.first_name, c.last_name].filter(Boolean).join(' ').trim(),
     company: c.company,
     title: c.title,
     linkedin: c.linkedin,

@@ -8,6 +8,7 @@ import {
   type EnrichedCommitment,
 } from '../../../components/CommitmentTracker'
 import { computeHealth } from '../../../components/RelationshipHealth'
+import { contactName } from '../../../lib/format'
 import type { Commitment, Contact, Interaction } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -108,7 +109,7 @@ export default async function DashboardPage() {
     .sort((a, b) => a.score - b.score)
     .slice(0, ATTENTION_LIMIT)
 
-  const nameById = new Map(contacts.map((c) => [c.id, c.name]))
+  const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
   const enrichedCommitments: EnrichedCommitment[] = commitments
     .filter((c) => c.status === 'open')
     .map((c) => ({
@@ -222,7 +223,7 @@ export default async function DashboardPage() {
                         >
                           <div className="min-w-0">
                             <div className="truncate text-sm font-medium text-zinc-100 group-hover:text-violet-300">
-                              {row.contact.name}
+                              {contactName(row.contact)}
                             </div>
                             <div className="text-xs text-zinc-500">
                               T{row.contact.tier} ·{' '}

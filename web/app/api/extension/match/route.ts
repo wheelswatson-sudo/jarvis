@@ -71,14 +71,23 @@ export async function GET(req: Request) {
   // bespoke JSONB SQL — and it lets us match against contacts.linkedin too.
   const { data, error } = await svc
     .from('contacts')
-    .select('id, name, company, title, linkedin, personal_details')
+    .select('id, first_name, last_name, company, title, linkedin, personal_details')
     .eq('user_id', user.id)
   if (error) return corsError(500, error.message, 'query_failed')
 
-  const contacts = (data ?? []) as Pick<
+  type Row = Pick<
     Contact,
-    'id' | 'name' | 'company' | 'title' | 'linkedin' | 'personal_details'
-  >[]
+    | 'id'
+    | 'first_name'
+    | 'last_name'
+    | 'company'
+    | 'title'
+    | 'linkedin'
+    | 'personal_details'
+  >
+  const contacts = (data ?? []) as Row[]
+  const composedName = (c: Row): string =>
+    [c.first_name, c.last_name].filter(Boolean).join(' ').trim()
 
   const targetLinkedIn =
     source === 'linkedin' ? normalizeLinkedIn(url) : null
@@ -112,7 +121,7 @@ export async function GET(req: Request) {
     // if multiple share the same name to avoid logging into a stale dupe.
     const lower = name.toLowerCase()
     const candidates = contacts.filter(
-      (c) => c.name.toLowerCase() === lower,
+      (c) => composedName(c).toLowerCase() === lower,
     )
     if (candidates.length > 0) {
       matched = candidates[0]!
@@ -123,7 +132,7 @@ export async function GET(req: Request) {
     ? {
         match: {
           id: matched.id,
-          name: matched.name,
+          name: composedName(matched),
           company: matched.company,
           title: matched.title,
           linkedin: matched.linkedin,

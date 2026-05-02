@@ -1,6 +1,9 @@
 import { createClient } from '../../../lib/supabase/server'
 import { PendingChangesQueue } from '../../../components/PendingChangesQueue'
+import { contactName } from '../../../lib/format'
 import type { Contact, PendingChange } from '../../../lib/types'
+
+type ContactNameRow = Pick<Contact, 'id' | 'first_name' | 'last_name' | 'email'>
 
 export const dynamic = 'force-dynamic'
 
@@ -22,17 +25,14 @@ export default async function ApprovalsPage() {
   const changes = (changesData ?? []) as PendingChange[]
   const contactIds = Array.from(new Set(changes.map((c) => c.contact_id)))
 
-  let contactById = new Map<string, Pick<Contact, 'id' | 'name'>>()
+  let contactById = new Map<string, ContactNameRow>()
   if (contactIds.length > 0) {
     const { data: contacts } = await supabase
       .from('contacts')
-      .select('id, name')
+      .select('id, first_name, last_name, email')
       .in('id', contactIds)
     contactById = new Map(
-      ((contacts ?? []) as Pick<Contact, 'id' | 'name'>[]).map((c) => [
-        c.id,
-        c,
-      ]),
+      ((contacts ?? []) as ContactNameRow[]).map((c) => [c.id, c]),
     )
   }
 
@@ -45,15 +45,16 @@ export default async function ApprovalsPage() {
     }
   >()
   for (const c of changes) {
-    const contactName = contactById.get(c.contact_id)?.name ?? 'Unknown contact'
-    const enriched = { ...c, contact_name: contactName }
+    const row = contactById.get(c.contact_id)
+    const name = row ? contactName(row) : 'Unknown contact'
+    const enriched = { ...c, contact_name: name }
     const existing = groupMap.get(c.contact_id)
     if (existing) {
       existing.changes.push(enriched)
     } else {
       groupMap.set(c.contact_id, {
         contactId: c.contact_id,
-        contactName,
+        contactName: name,
         changes: [enriched],
       })
     }

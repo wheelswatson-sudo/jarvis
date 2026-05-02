@@ -19,6 +19,7 @@ import {
   WINDOWS,
 } from './config'
 import { logSystemEvent } from './system-health'
+import { contactName } from '../format'
 
 // ---------------------------------------------------------------------------
 // Experience engine
@@ -55,7 +56,10 @@ export type EngineRun = {
 
 type EngineDataset = {
   events: EventRow[]
-  contacts: Pick<Contact, 'id' | 'name' | 'tier' | 'last_interaction_at'>[]
+  contacts: Pick<
+    Contact,
+    'id' | 'first_name' | 'last_name' | 'email' | 'tier' | 'last_interaction_at'
+  >[]
   interactions: Pick<
     Interaction,
     'id' | 'contact_id' | 'channel' | 'direction' | 'occurred_at' | 'summary'
@@ -142,7 +146,7 @@ async function loadDataset(
         .limit(5000),
       supabase
         .from('contacts')
-        .select('id, name, tier, last_interaction_at')
+        .select('id, first_name, last_name, email, tier, last_interaction_at')
         .eq('user_id', userId)
         .limit(2000),
       supabase
@@ -327,7 +331,7 @@ function detectRelationshipDecay(d: EngineDataset): DetectorOutput[] {
       pattern_key: `decay_${c.id}`,
       pattern_data: {
         contact_id: c.id,
-        contact_name: c.name,
+        contact_name: contactName(c),
         tier,
         days_since: Math.round(daysSince),
         cadence_days: cadenceDays != null ? Math.round(cadenceDays) : null,
@@ -416,7 +420,7 @@ function detectEngagementClustering(d: EngineDataset): DetectorOutput[] {
     }
   }
 
-  const contactName = new Map(d.contacts.map((c) => [c.id, c.name]))
+  const nameById = new Map(d.contacts.map((c) => [c.id, contactName(c)]))
 
   return components.map((ids, idx) => {
     const sortedIds = ids.slice().sort()
@@ -426,7 +430,7 @@ function detectEngagementClustering(d: EngineDataset): DetectorOutput[] {
       pattern_data: {
         cluster_index: idx,
         contact_ids: sortedIds,
-        contact_names: sortedIds.map((id) => contactName.get(id) ?? null),
+        contact_names: sortedIds.map((id) => nameById.get(id) ?? null),
         size: sortedIds.length,
       },
       confidence: clamp01(0.4 + 0.1 * sortedIds.length),
@@ -515,7 +519,7 @@ function detectContactPriority(d: EngineDataset): DetectorOutput[] {
   for (const c of d.contacts) {
     stats.set(c.id, {
       contact_id: c.id,
-      contact_name: c.name,
+      contact_name: contactName(c),
       frequency: 0,
       recencyDays:
         c.last_interaction_at != null
