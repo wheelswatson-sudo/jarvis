@@ -125,6 +125,7 @@ export function GmailSyncCard({ state }: Props) {
           processed?: number
           commitments_created?: number
           errors?: number
+          sample_errors?: string[]
           error?: string
         }
         if (!syncRes.ok) {
@@ -136,6 +137,9 @@ export function GmailSyncCard({ state }: Props) {
             `${syncData.commitments_created ?? 0} commitments captured` +
             (syncData.errors ? `, ${syncData.errors} errors.` : '.'),
         )
+        if (syncData.errors && syncData.sample_errors?.length) {
+          setError(`First error: ${syncData.sample_errors[0]}`)
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Sync failed.')
       }
@@ -155,7 +159,7 @@ export function GmailSyncCard({ state }: Props) {
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Pulls the last 7 days of emails, extracts commitments + sentiment with
-            Llama 3.1 70B (Groq), and matches each thread to a contact in your
+            Llama 4 Maverick (Groq), and matches each thread to a contact in your
             graph. Reuses your Google sign-in — no extra OAuth.
           </p>
           <dl className="mt-3 space-y-1 text-xs text-zinc-400">

@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// Commitment extractor — Groq Llama 3.1 70B reads raw email text and returns
-// structured commitments + sentiment + key points + action items.
+// Commitment extractor — Groq Llama 4 Maverick reads raw email text and
+// returns structured commitments + sentiment + key points + action items.
 //
 // Owner mapping: the caller's perspective is "self". We coerce the model's
 // 'self'/'contact'/'mutual' labels to the commitments table's 'me'/'them'
@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const GROQ_MODEL = 'llama-3.1-70b-versatile'
+const GROQ_MODEL = 'meta-llama/llama-4-maverick-17b-128e-instruct'
 
 export type ExtractedCommitment = {
   description: string
