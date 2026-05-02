@@ -1,0 +1,235 @@
+.ri-sidebar-host {
+  position: fixed;
+  top: 96px;
+  right: 16px;
+  z-index: 2147483600;
+  width: 320px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #e4e4e7;
+  background: #09090b;
+  border: 1px solid #27272a;
+  border-radius: 12px;
+  box-shadow:
+    0 16px 48px -12px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(99, 102, 241, 0.08);
+  overflow: hidden;
+}
+
+.ri-sidebar-host * {
+  box-sizing: border-box;
+}
+
+.ri-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #18181b;
+  border-bottom: 1px solid #27272a;
+}
+
+.ri-sidebar-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 11px;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+
+.ri-sidebar-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 12px;
+  color: #d4d4d8;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.ri-sidebar-close,
+.ri-sidebar-collapse {
+  background: transparent;
+  border: none;
+  color: #71717a;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1;
+}
+.ri-sidebar-close:hover,
+.ri-sidebar-collapse:hover {
+  background: #27272a;
+  color: #e4e4e7;
+}
+
+.ri-sidebar-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+}
+
+.ri-sidebar-collapsed .ri-sidebar-body {
+  display: none;
+}
+
+.ri-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fafafa;
+}
+
+.ri-subtitle {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+
+.ri-health {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #18181b;
+  border: 1px solid #27272a;
+  font-size: 12px;
+}
+
+.ri-health-strong {
+  border-color: rgba(99, 102, 241, 0.4);
+  color: #c7d2fe;
+}
+.ri-health-cooling {
+  border-color: rgba(234, 179, 8, 0.3);
+  color: #fde68a;
+}
+.ri-health-cold {
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #fecaca;
+}
+
+.ri-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #71717a;
+  margin: 4px 0 -4px;
+}
+
+.ri-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ri-list-item {
+  padding: 8px 10px;
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #d4d4d8;
+}
+
+.ri-list-item .ri-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #71717a;
+}
+
+.ri-changes {
+  padding: 8px 10px;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #ddd6fe;
+}
+
+.ri-changes-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #c4b5fd;
+}
+
+.ri-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ri-button {
+  flex: 1;
+  padding: 8px 10px;
+  background: #6366f1;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ri-button:hover {
+  background: #4f46e5;
+}
+.ri-button:disabled {
+  background: #3f3f46;
+  color: #71717a;
+  cursor: not-allowed;
+}
+
+.ri-button-ghost {
+  flex: 1;
+  padding: 8px 10px;
+  background: transparent;
+  color: #a1a1aa;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ri-button-ghost:hover {
+  border-color: #3f3f46;
+  color: #e4e4e7;
+}
+
+.ri-empty {
+  font-size: 12px;
+  color: #71717a;
+  font-style: italic;
+}
+
+.ri-status {
+  font-size: 11px;
+  color: #71717a;
+  margin-top: 4px;
+}
+.ri-status-error {
+  color: #fca5a5;
+}
+.ri-status-success {
+  color: #86efac;
+}
+
+.ri-unmatched {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+  color: #a1a1aa;
+}

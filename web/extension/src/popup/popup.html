@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Relationship Intelligence</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="ri-pop-header">
+      <div class="ri-pop-logo">RI</div>
+      <div class="ri-pop-title">Relationship Intelligence</div>
+      <span id="ri-pop-status" class="ri-pop-status">…</span>
+    </header>
+
+    <main class="ri-pop-main">
+      <section class="ri-pop-card" id="ri-pop-attention">
+        <h2 class="ri-pop-section-title">Needs attention</h2>
+        <div id="ri-pop-stale-list" class="ri-pop-list">
+          <div class="ri-pop-empty">Sign in to see contacts.</div>
+        </div>
+      </section>
+
+      <section class="ri-pop-card">
+        <h2 class="ri-pop-section-title">Quick search</h2>
+        <input
+          id="ri-pop-search"
+          type="search"
+          placeholder="Find a contact…"
+          class="ri-pop-input"
+        />
+        <div id="ri-pop-search-results" class="ri-pop-list"></div>
+      </section>
+
+      <section class="ri-pop-card" id="ri-pop-settings">
+        <h2 class="ri-pop-section-title">Settings</h2>
+        <label class="ri-pop-label">RI instance URL</label>
+        <input
+          id="ri-pop-base-url"
+          type="url"
+          class="ri-pop-input"
+          placeholder="https://relationship-intelligence-blue.vercel.app"
+        />
+        <label class="ri-pop-label">Auth token</label>
+        <textarea
+          id="ri-pop-token"
+          rows="3"
+          class="ri-pop-input"
+          placeholder="Paste your Supabase access token"
+        ></textarea>
+        <div class="ri-pop-actions">
+          <button id="ri-pop-save" class="ri-pop-button">Save & connect</button>
+          <button id="ri-pop-test" class="ri-pop-button-ghost">Test</button>
+        </div>
+        <div id="ri-pop-settings-status" class="ri-pop-feedback"></div>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
