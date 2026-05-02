@@ -134,12 +134,20 @@ export function mergeSignalsIntoDetails(
   return base
 }
 
+// Score the imbalance between commitments the user takes on and commitments
+// the contact takes on. Until a completion lifecycle is wired up, we can't
+// distinguish 'completed' from 'pending' — but we CAN measure who is taking
+// on more accountability. Each non-overdue record counts as full investment;
+// overdue records count as half (broken promises still cost the investor
+// reputationally). Score in [-1, +1]: negative = user is overinvesting.
 export function computeReciprocity(
   toThem: RelationshipCommitmentRecord[] | null | undefined,
   fromThem: RelationshipCommitmentRecord[] | null | undefined,
 ): number {
-  const youDid = (toThem ?? []).filter((c) => c.status === 'completed').length
-  const theyDid = (fromThem ?? []).filter((c) => c.status === 'completed').length
+  const weight = (c: RelationshipCommitmentRecord): number =>
+    c.status === 'overdue' ? 0.5 : 1
+  const youDid = (toThem ?? []).reduce((s, c) => s + weight(c), 0)
+  const theyDid = (fromThem ?? []).reduce((s, c) => s + weight(c), 0)
   const total = youDid + theyDid
   if (total === 0) return 0
   return clampScore((theyDid - youDid) / total)
@@ -150,7 +158,10 @@ function commitmentExists(
   candidate: RelationshipCommitmentRecord,
 ): boolean {
   const key = candidate.action.toLowerCase().trim()
-  return list.some((c) => c.action.toLowerCase().trim() === key)
+  const due = candidate.due ?? ''
+  return list.some(
+    (c) => c.action.toLowerCase().trim() === key && (c.due ?? '') === due,
+  )
 }
 
 function milestoneExists(

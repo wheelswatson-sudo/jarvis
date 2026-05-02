@@ -98,11 +98,31 @@ export async function POST(req: NextRequest) {
     contactsById.set(contact.id, contact)
   }
 
+  // Idempotency: skip messages we've already imported. interactions.source
+  // has no UNIQUE constraint, so we pre-filter by querying for the sources
+  // we're about to write. One round trip beats N + duplicate rows.
+  const candidateSources = messages.map((m) => `gmail:${m.id}`)
+  const { data: existingRows } = await service
+    .from('interactions')
+    .select('source')
+    .eq('user_id', user.id)
+    .in('source', candidateSources)
+  const alreadySynced = new Set(
+    ((existingRows ?? []) as { source: string | null }[])
+      .map((r) => r.source)
+      .filter((s): s is string => typeof s === 'string'),
+  )
+
   const reports: SyncReport[] = []
   let totalCommitments = 0
 
   for (const msg of messages) {
     try {
+      if (alreadySynced.has(`gmail:${msg.id}`)) {
+        reports.push({ message_id: msg.id, status: 'skipped', error: 'already_synced' })
+        continue
+      }
+
       const fromEmail = normalizeEmail(msg.from)
       const toList: string[] = Array.isArray(msg.to)
         ? msg.to.map(normalizeEmail)
@@ -184,8 +204,20 @@ export async function POST(req: NextRequest) {
         status: 'open' as const,
       }))
 
+      let commitmentsInserted = 0
       if (commitmentRows.length > 0) {
-        await service.from('commitments').insert(commitmentRows)
+        const { error: cmtErr } = await service
+          .from('commitments')
+          .insert(commitmentRows)
+        if (cmtErr) {
+          console.warn('[gmail-sync] commitments insert failed', {
+            message_id: msg.id,
+            count: commitmentRows.length,
+            message: cmtErr.message,
+          })
+        } else {
+          commitmentsInserted = commitmentRows.length
+        }
       }
 
       // Schema-grounded merge: fold this email's signals into the contact's
@@ -213,12 +245,12 @@ export async function POST(req: NextRequest) {
 
       contactsById.set(row.id, { ...latestRow, personal_details: mergedDetails })
 
-      totalCommitments += commitmentRows.length
+      totalCommitments += commitmentsInserted
       reports.push({
         message_id: msg.id,
         status: 'processed',
         contact_id: contact.id,
-        commitments_created: commitmentRows.length,
+        commitments_created: commitmentsInserted,
       })
     } catch (err) {
       reports.push({

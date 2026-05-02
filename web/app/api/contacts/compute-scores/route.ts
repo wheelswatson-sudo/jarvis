@@ -100,6 +100,11 @@ export async function POST() {
   const distribution = { T1: 0, T2: 0, T3: 0, T4: 0 }
   let scoredCount = 0
 
+  // Build all updates first, then dispatch in parallel batches. Sequential
+  // updates blow past Vercel's 60s budget for power users with thousands
+  // of contacts.
+  type Plan = { id: string; relationship_score: number; tier: Tier | null }
+  const plans: Plan[] = []
   for (const c of contacts) {
     const pd = c.personal_details ?? {}
     const signals: number[] = []
@@ -125,25 +130,36 @@ export async function POST() {
 
     distribution[tier === 1 ? 'T1' : tier === 2 ? 'T2' : tier === 3 ? 'T3' : 'T4']++
 
-    const dbTier: Tier | null = tier === 4 ? null : (tier as Tier)
+    plans.push({
+      id: c.id,
+      relationship_score: composite,
+      tier: tier === 4 ? null : (tier as Tier),
+    })
+  }
 
-    const { error } = await service
-      .from('contacts')
-      .update({
-        relationship_score: composite,
-        tier: dbTier,
-      })
-      .eq('id', c.id)
-      .eq('user_id', user.id)
-
-    if (error) {
-      console.warn('[compute-scores] update failed', {
-        contact_id: c.id,
-        message: error.message,
-      })
-      continue
+  const BATCH_SIZE = 50
+  for (let i = 0; i < plans.length; i += BATCH_SIZE) {
+    const batch = plans.slice(i, i + BATCH_SIZE)
+    const results = await Promise.all(
+      batch.map((p) =>
+        service
+          .from('contacts')
+          .update({ relationship_score: p.relationship_score, tier: p.tier })
+          .eq('id', p.id)
+          .eq('user_id', user.id),
+      ),
+    )
+    for (let j = 0; j < results.length; j++) {
+      const r = results[j]
+      if (r.error) {
+        console.warn('[compute-scores] update failed', {
+          contact_id: batch[j]?.id,
+          message: r.error.message,
+        })
+        continue
+      }
+      scoredCount++
     }
-    scoredCount++
   }
 
   const summary: ScoreSummary = {
@@ -180,20 +196,26 @@ function sentimentTrend(
 }
 
 function commitmentCompletion(pd: PersonalDetails): number | null {
+  // Until a completion lifecycle is wired up, treat 'pending' as in-progress
+  // (partial credit), 'completed' as full credit, and 'overdue' as zero.
+  // This way contacts with commitments don't get tanked to ~0 by a missing
+  // completion signal.
   const lists = [
     pd.active_commitments_to_them ?? [],
     pd.active_commitments_from_them ?? [],
   ]
-  let completed = 0
+  let weighted = 0
   let total = 0
   for (const list of lists) {
     for (const c of list) {
       total++
-      if (c.status === 'completed') completed++
+      if (c.status === 'completed') weighted += 1
+      else if (c.status === 'overdue') weighted += 0
+      else weighted += 0.5
     }
   }
   if (total === 0) return null
-  return clamp01(completed / total)
+  return clamp01(weighted / total)
 }
 
 function recencySignal(

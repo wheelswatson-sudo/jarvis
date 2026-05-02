@@ -267,6 +267,7 @@ function buildOverdueItems(
   return commitments.slice(0, TOP_PER_SECTION * 2).map((c) => {
     const contact = c.contact_id ? contactsById.get(c.contact_id) : null
     const overdueBy = c.due_at ? daysBetween(c.due_at, new Date()) : 0
+    const days = Math.round(overdueBy)
     return {
       id: `overdue:${c.id}`,
       category: 'overdue',
@@ -274,7 +275,7 @@ function buildOverdueItems(
       why:
         overdueBy <= 0
           ? 'Due now.'
-          : `Overdue by ${Math.round(overdueBy)} day${overdueBy >= 2 ? 's' : ''}.`,
+          : `Overdue by ${days} day${days === 1 ? '' : 's'}.`,
       contact_id: c.contact_id ?? null,
       contact_name: contact ? contactName(contact) : null,
       urgency: 'high',
@@ -340,25 +341,21 @@ function buildReciprocityItems(contacts: ContactRow[]): BriefingItem[] {
     const pd = c.personal_details as PersonalDetails | null
     const score = pd?.reciprocity_score ?? 0
     const name = contactName(c)
-    const youDid = (pd?.active_commitments_to_them ?? []).filter(
-      (x) => x.status === 'completed',
-    ).length
-    const theyDid = (pd?.active_commitments_from_them ?? []).filter(
-      (x) => x.status === 'completed',
-    ).length
+    const youOwe = (pd?.active_commitments_to_them ?? []).length
+    const theyOwe = (pd?.active_commitments_from_them ?? []).length
     items.push({
       id: `reciprocity:${c.id}`,
       category: 'reciprocity',
       action: `Reciprocity debt: ${name}`,
-      why: `You've done ${youDid} for them, they've done ${theyDid} for you (score ${score.toFixed(2)}). Stop investing until they reciprocate, or ask for something specific.`,
+      why: `You've taken on ${youOwe} commitment${youOwe === 1 ? '' : 's'}, they've taken on ${theyOwe} (score ${score.toFixed(2)}). Hold the line until they reciprocate, or ask for something specific.`,
       contact_id: c.id,
       contact_name: name,
       urgency: 'medium',
       href: `/contacts/${c.id}`,
       metadata: {
         reciprocity_score: score,
-        you_did: youDid,
-        they_did: theyDid,
+        you_owe: youOwe,
+        they_owe: theyOwe,
         kind: 'commitment_debt',
       },
     })
