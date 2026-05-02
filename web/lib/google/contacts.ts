@@ -1,77 +1,38 @@
 // Google Contacts (People API) integration helpers.
 //
-// Two flows live here:
-//   1. OAuth — build the consent URL, exchange the auth code for tokens,
-//      and refresh access tokens. The refresh token is the long-lived
-//      credential we persist; the access token is short-lived and we
-//      mint a fresh one for every sync.
-//   2. Sync — page through people.connections.list and map each result
-//      onto the contacts-table row shape. Mapping is conservative:
-//      we only fill fields the user hasn't already populated, and we
-//      stash everything else (birthday, addresses, photo, the Google
-//      resourceName) under personal_details so nothing is lost.
+// We piggy-back on the Google access token already minted during the
+// Supabase login flow (the `contacts.readonly` scope is requested at
+// sign-in), so there's no separate OAuth dance for this integration.
+// The route receives the access token from the client (read out of the
+// Supabase session) and we build a bare OAuth2 client around it.
 //
-// This module never touches Supabase directly; the route file owns
-// persistence so this stays pure and easy to reason about.
+// Mapping is conservative: we only fill fields the user hasn't already
+// populated, and we stash everything else (birthday, addresses, photo,
+// the Google resourceName) under personal_details so nothing is lost.
 
 import { google, type people_v1, type Auth } from 'googleapis'
 
 type OAuth2Client = Auth.OAuth2Client
-type Credentials = Auth.Credentials
 
 export const GOOGLE_CONTACTS_PROVIDER = 'google_contacts'
-export const GOOGLE_CONTACTS_SCOPE =
-  'https://www.googleapis.com/auth/contacts.readonly'
 
 export const PEOPLE_API_PERSON_FIELDS =
   'names,emailAddresses,phoneNumbers,organizations,birthdays,photos,addresses'
 
-export type GoogleEnv = {
-  clientId: string
-  clientSecret: string
-}
-
-export function readGoogleEnv(): GoogleEnv | null {
-  const clientId = process.env.GOOGLE_CONTACTS_CLIENT_ID
-  const clientSecret = process.env.GOOGLE_CONTACTS_CLIENT_SECRET
-  if (!clientId || !clientSecret) return null
-  return { clientId, clientSecret }
-}
-
-export function buildOAuthClient(
-  env: GoogleEnv,
-  redirectUri: string,
+export function buildPeopleClientFromAccessToken(
+  accessToken: string,
 ): OAuth2Client {
-  return new google.auth.OAuth2(env.clientId, env.clientSecret, redirectUri)
-}
-
-export function buildAuthUrl(
-  client: OAuth2Client,
-  state: string,
-): string {
-  return client.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
-    scope: [GOOGLE_CONTACTS_SCOPE],
-    state,
-    include_granted_scopes: true,
-  })
-}
-
-export async function exchangeCode(
-  client: OAuth2Client,
-  code: string,
-): Promise<Credentials> {
-  const { tokens } = await client.getToken(code)
-  return tokens
+  const client = new google.auth.OAuth2()
+  client.setCredentials({ access_token: accessToken })
+  return client
 }
 
 export async function getConnectedAccountEmail(
   client: OAuth2Client,
 ): Promise<string | null> {
   // The People API exposes the authenticated user's own profile under
-  // people/me. Pulling email here lets the UI show *which* Google account
-  // the user connected — useful when they have multiple.
+  // people/me. Pulling email here lets us record *which* Google account
+  // sourced the contacts.
   try {
     const people = google.people({ version: 'v1', auth: client })
     const res = await people.people.get({

@@ -2,20 +2,15 @@
 
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
+import { createClient } from '../../lib/supabase/client'
 
 export type GoogleContactsState = {
-  connected: boolean
   account_email: string | null
   last_synced_at: string | null
 }
 
-export type GoogleContactsBanner =
-  | { kind: 'connected' }
-  | { kind: 'error'; reason: string }
-
 type Props = {
   state: GoogleContactsState
-  banner: GoogleContactsBanner | null
 }
 
 type SyncResult = {
@@ -25,21 +20,6 @@ type SyncResult = {
   total_fetched: number
 }
 
-const ERROR_REASONS: Record<string, string> = {
-  state_mismatch:
-    'OAuth state didn’t match — try connecting again from this device.',
-  token_exchange_failed:
-    'Google didn’t accept the authorization code. Try again.',
-  no_refresh_token:
-    'Google didn’t return a refresh token. Disconnect and reconnect with the consent screen.',
-  persist_failed: 'Couldn’t save the connection. Please retry.',
-  access_denied: 'You denied access on the Google consent screen.',
-}
-
-function explainReason(reason: string): string {
-  return ERROR_REASONS[reason] ?? `Connection failed (${reason}).`
-}
-
 function formatTimestamp(iso: string | null): string {
   if (!iso) return 'never'
   const date = new Date(iso)
@@ -47,34 +27,44 @@ function formatTimestamp(iso: string | null): string {
   return date.toLocaleString()
 }
 
-export function GoogleContactsCard({ state, banner }: Props) {
+export function GoogleContactsCard({ state }: Props) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
   const [syncStatus, setSyncStatus] = useState<string | null>(null)
   const [syncError, setSyncError] = useState<string | null>(null)
-  const [bannerDismissed, setBannerDismissed] = useState(false)
-
-  function connect() {
-    // Hand the browser off to the OAuth init route. That endpoint sets the
-    // state cookie and redirects to Google's consent screen — we don't
-    // need to do anything else from the client side.
-    window.location.href = '/api/contacts/google'
-  }
 
   function sync() {
     setSyncStatus(null)
     setSyncError(null)
     startTransition(async () => {
       try {
-        const res = await fetch('/api/contacts/google', { method: 'POST' })
+        const supabase = createClient()
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+        const token = session?.provider_token
+        if (!token) {
+          setSyncError(
+            'No Google access token. Sign out and back in with Google to grant Contacts access.',
+          )
+          return
+        }
+
+        setSyncStatus('Fetching Google Contacts…')
+        const res = await fetch('/api/contacts/google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ access_token: token }),
+        })
         const raw: Partial<SyncResult & { error: string }> = await res
           .json()
           .catch(() => ({}))
         if (!res.ok) {
+          setSyncStatus(null)
           setSyncError(
             raw.error ??
               (res.status === 401
-                ? 'Google rejected the saved credentials. Reconnect below.'
+                ? 'Google rejected the access token. Sign out and back in with Google.'
                 : `Sync failed (HTTP ${res.status}).`),
           )
           return
@@ -94,49 +84,8 @@ export function GoogleContactsCard({ state, banner }: Props) {
     })
   }
 
-  function disconnect() {
-    setSyncStatus(null)
-    setSyncError(null)
-    startTransition(async () => {
-      try {
-        const res = await fetch('/api/contacts/google', { method: 'DELETE' })
-        if (!res.ok) {
-          const raw: { error?: string } = await res.json().catch(() => ({}))
-          setSyncError(raw.error ?? `Disconnect failed (HTTP ${res.status}).`)
-          return
-        }
-        router.refresh()
-      } catch (err) {
-        setSyncError(err instanceof Error ? err.message : 'Disconnect failed.')
-      }
-    })
-  }
-
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
-      {banner && !bannerDismissed && (
-        <div
-          className={`mb-4 flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-xs ${
-            banner.kind === 'connected'
-              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-              : 'border-rose-500/30 bg-rose-500/10 text-rose-200'
-          }`}
-        >
-          <span>
-            {banner.kind === 'connected'
-              ? 'Google Contacts is now connected. Run a sync below to import.'
-              : explainReason(banner.reason)}
-          </span>
-          <button
-            type="button"
-            onClick={() => setBannerDismissed(true)}
-            className="text-zinc-400 hover:text-zinc-200"
-          >
-            ×
-          </button>
-        </div>
-      )}
-
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -144,71 +93,42 @@ export function GoogleContactsCard({ state, banner }: Props) {
             <span className="text-sm font-medium text-zinc-100">
               Google Contacts
             </span>
-            {state.connected ? (
-              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
-                Connected
-              </span>
-            ) : (
-              <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
-                Not connected
-              </span>
-            )}
+            <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+              Manual sync
+            </span>
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Pulls names, emails, phones, companies, titles, birthdays,
-            addresses, and photos via the Google People API. Re-syncing
-            won’t create duplicates — we match on email.
+            addresses, and photos via the Google People API. Reuses your
+            Google sign-in — no extra OAuth. Re-syncing won’t create
+            duplicates — we match on email.
           </p>
-          {state.connected && (
-            <dl className="mt-3 space-y-1 text-xs text-zinc-400">
-              {state.account_email && (
-                <div className="flex gap-2">
-                  <dt className="w-24 shrink-0 text-zinc-500">Account</dt>
-                  <dd className="truncate text-zinc-300">
-                    {state.account_email}
-                  </dd>
-                </div>
-              )}
+          <dl className="mt-3 space-y-1 text-xs text-zinc-400">
+            {state.account_email && (
               <div className="flex gap-2">
-                <dt className="w-24 shrink-0 text-zinc-500">Last sync</dt>
-                <dd className="text-zinc-300">
-                  {formatTimestamp(state.last_synced_at)}
+                <dt className="w-24 shrink-0 text-zinc-500">Account</dt>
+                <dd className="truncate text-zinc-300">
+                  {state.account_email}
                 </dd>
               </div>
-            </dl>
-          )}
+            )}
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-zinc-500">Last sync</dt>
+              <dd className="text-zinc-300">
+                {formatTimestamp(state.last_synced_at)}
+              </dd>
+            </div>
+          </dl>
         </div>
         <div className="flex shrink-0 flex-col gap-2">
-          {!state.connected && (
-            <button
-              type="button"
-              onClick={connect}
-              disabled={isPending}
-              className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
-            >
-              Connect Google
-            </button>
-          )}
-          {state.connected && (
-            <>
-              <button
-                type="button"
-                onClick={sync}
-                disabled={isPending}
-                className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
-              >
-                {isPending ? 'Syncing…' : 'Sync now'}
-              </button>
-              <button
-                type="button"
-                onClick={disconnect}
-                disabled={isPending}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-400 hover:border-rose-500 hover:text-rose-300 disabled:opacity-50 transition-colors"
-              >
-                Disconnect
-              </button>
-            </>
-          )}
+          <button
+            type="button"
+            onClick={sync}
+            disabled={isPending}
+            className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+          >
+            {isPending ? 'Syncing…' : 'Sync now'}
+          </button>
         </div>
       </div>
 
