@@ -13,7 +13,7 @@ import type { Commitment, Contact, Interaction } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
-const FALLBACK_MODEL_ID = 'groq-llama-4-maverick'
+const FALLBACK_MODEL_ID = 'groq-llama-4-scout'
 
 const MAX_TOKENS = 1024
 const MAX_CONTACTS_IN_CONTEXT = 40

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Commitment extractor — Groq Llama 4 Maverick reads raw email text and
+// Commitment extractor — Groq Llama 4 Scout reads raw email text and
 // returns structured commitments + sentiment + key points + action items.
 //
 // Owner mapping: the caller's perspective is "self". We coerce the model's
@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const GROQ_MODEL = 'meta-llama/llama-4-maverick-17b-128e-instruct'
+const GROQ_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct'
 
 export type ExtractedCommitment = {
   description: string

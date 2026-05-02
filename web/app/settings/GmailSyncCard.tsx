@@ -159,7 +159,7 @@ export function GmailSyncCard({ state }: Props) {
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Pulls the last 7 days of emails, extracts commitments + sentiment with
-            Llama 4 Maverick (Groq), and matches each thread to a contact in your
+            Llama 4 Scout (Groq), and matches each thread to a contact in your
             graph. Reuses your Google sign-in — no extra OAuth.
           </p>
           <dl className="mt-3 space-y-1 text-xs text-zinc-400">
