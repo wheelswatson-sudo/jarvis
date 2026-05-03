@@ -201,6 +201,8 @@ export async function POST(req: NextRequest) {
         description: c.description,
         due_at: c.due_at,
         owner: ownerToDb(c.owner),
+        // commitments.direction is NOT NULL in prod; mirror owner.
+        direction: ownerToDb(c.owner),
         status: 'open' as const,
       }))
 
