@@ -2,7 +2,6 @@
 
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '../../lib/supabase/client'
 
 export type GoogleContactsState = {
   account_email: string | null
@@ -38,34 +37,16 @@ export function GoogleContactsCard({ state }: Props) {
     setSyncError(null)
     startTransition(async () => {
       try {
-        const supabase = createClient()
-        const {
-          data: { session },
-        } = await supabase.auth.getSession()
-        const token = session?.provider_token
-        if (!token) {
-          setSyncError(
-            'No Google access token. Sign out and back in with Google to grant Contacts access.',
-          )
-          return
-        }
-
         setSyncStatus('Fetching Google Contacts…')
-        const res = await fetch('/api/contacts/google', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ access_token: token }),
-        })
-        const raw: Partial<SyncResult & { error: string }> = await res
-          .json()
-          .catch(() => ({}))
+        const res = await fetch('/api/contacts/google', { method: 'POST' })
+        const raw: Partial<SyncResult & { error: string; code: string }> =
+          await res.json().catch(() => ({}))
         if (!res.ok) {
           setSyncStatus(null)
           setSyncError(
-            raw.error ??
-              (res.status === 401
-                ? 'Google rejected the access token. Sign out and back in with Google.'
-                : `Sync failed (HTTP ${res.status}).`),
+            raw.code === 'reconnect_required'
+              ? 'Google connection expired or revoked. Click "Reconnect Google" above.'
+              : raw.error ?? `Sync failed (HTTP ${res.status}).`,
           )
           return
         }
@@ -99,9 +80,9 @@ export function GoogleContactsCard({ state }: Props) {
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Pulls names, emails, phones, companies, titles, birthdays,
-            addresses, and photos via the Google People API. Reuses your
-            Google sign-in — no extra OAuth. Re-syncing won’t create
-            duplicates — we match on email.
+            addresses, and photos via the Google People API. Authentication
+            is automatic — your Google connection refreshes silently.
+            Re-syncing won’t create duplicates (matched on email).
           </p>
           <dl className="mt-3 space-y-1 text-xs text-zinc-400">
             {state.account_email && (

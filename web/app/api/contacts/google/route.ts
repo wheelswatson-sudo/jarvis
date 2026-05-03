@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from 'next/server'
+import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
@@ -11,6 +11,7 @@ import {
   mapPersonToContact,
   type MappedContact,
 } from '../../../../lib/google/contacts'
+import { getValidAccessTokenForUser } from '../../../../lib/google/oauth'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -26,7 +27,7 @@ type SyncResult = {
 // POST — sync Google Contacts using the access token from the Supabase
 // session (granted at login via the contacts.readonly scope).
 // ----------------------------------------------------------------------------
-export async function POST(req: NextRequest) {
+export async function POST() {
   const supabase = await createClient()
   const {
     data: { user },
@@ -35,21 +36,9 @@ export async function POST(req: NextRequest) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
-  const body = (await req.json().catch(() => null)) as
-    | { access_token?: unknown }
-    | null
-  const accessToken =
-    typeof body?.access_token === 'string' && body.access_token.length > 0
-      ? body.access_token
-      : null
-  if (!accessToken) {
-    return apiError(
-      400,
-      'Missing Google access token. Sign out and back in with Google.',
-      undefined,
-      'missing_access_token',
-    )
-  }
+  const tok = await getValidAccessTokenForUser(user.id)
+  if ('error' in tok) return tok.error
+  const accessToken = tok.token
 
   const service = getServiceClient()
   if (!service) {

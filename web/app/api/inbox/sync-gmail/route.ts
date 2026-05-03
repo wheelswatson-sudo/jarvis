@@ -115,5 +115,17 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Record a "last synced" stamp for the unified Google Workspace card so
+  // the Settings UI knows Gmail is connected and how recently it pulled.
+  await service.from('user_integrations').upsert(
+    {
+      user_id: user.id,
+      provider: 'google_gmail',
+      last_synced_at: new Date().toISOString(),
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    },
+    { onConflict: 'user_id,provider' },
+  )
+
   return NextResponse.json({ ok: true, imported, skipped, errors })
 }

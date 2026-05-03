@@ -9,6 +9,7 @@ import {
 } from './GoogleContactsCard'
 import { ApolloCard, type ApolloState } from './ApolloCard'
 import { GmailSyncCard, type GmailSyncState } from './GmailSyncCard'
+import { GoogleConnectCard, type GoogleService } from './GoogleConnectCard'
 import { APOLLO_PROVIDER } from '../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
@@ -32,37 +33,44 @@ export default async function SettingsPage() {
   } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [profileRes, keysRes, integrationRes, apolloRes, gmailRes] = await Promise.all([
-    supabase
-      .from('profiles')
-      .select('preferred_model')
-      .eq('id', user.id)
-      .maybeSingle(),
-    supabase
-      .from('user_api_keys')
-      .select('provider, api_key, is_active, updated_at')
-      .eq('user_id', user.id),
-    supabase
-      .from('user_integrations')
-      .select('account_email, last_synced_at')
-      .eq('user_id', user.id)
-      .eq('provider', 'google_contacts')
-      .maybeSingle(),
-    supabase
-      .from('user_integrations')
-      .select('access_token, last_synced_at')
-      .eq('user_id', user.id)
-      .eq('provider', APOLLO_PROVIDER)
-      .maybeSingle(),
-    supabase
-      .from('interactions')
-      .select('occurred_at')
-      .eq('user_id', user.id)
-      .like('source', 'gmail:%')
-      .order('occurred_at', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ])
+  const [profileRes, keysRes, googleIntegrationsRes, apolloRes, gmailRes] =
+    await Promise.all([
+      supabase
+        .from('profiles')
+        .select('preferred_model')
+        .eq('id', user.id)
+        .maybeSingle(),
+      supabase
+        .from('user_api_keys')
+        .select('provider, api_key, is_active, updated_at')
+        .eq('user_id', user.id),
+      // One query for all four Google services. Each service writes its own
+      // user_integrations row on first successful API call.
+      supabase
+        .from('user_integrations')
+        .select('provider, account_email, last_synced_at')
+        .eq('user_id', user.id)
+        .in('provider', [
+          'google_contacts',
+          'google_calendar',
+          'google_tasks',
+          'google_gmail',
+        ]),
+      supabase
+        .from('user_integrations')
+        .select('access_token, last_synced_at')
+        .eq('user_id', user.id)
+        .eq('provider', APOLLO_PROVIDER)
+        .maybeSingle(),
+      supabase
+        .from('interactions')
+        .select('occurred_at')
+        .eq('user_id', user.id)
+        .like('source', 'gmail:%')
+        .order('occurred_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ])
 
   const preferredModel = profileRes.data?.preferred_model ?? DEFAULT_MODEL_ID
 
@@ -80,10 +88,58 @@ export default async function SettingsPage() {
       updated_at: k.updated_at,
     }))
 
-  const googleContacts: GoogleContactsState = {
-    account_email: integrationRes.data?.account_email ?? null,
-    last_synced_at: integrationRes.data?.last_synced_at ?? null,
+  type IntegrationRow = {
+    provider: string
+    account_email: string | null
+    last_synced_at: string | null
   }
+  const googleRows: IntegrationRow[] =
+    (googleIntegrationsRes.data as IntegrationRow[] | null) ?? []
+  const byProvider = new Map<string, IntegrationRow>(
+    googleRows.map((r) => [r.provider, r]),
+  )
+
+  const contactsRow = byProvider.get('google_contacts')
+  const googleContacts: GoogleContactsState = {
+    account_email: contactsRow?.account_email ?? null,
+    last_synced_at: contactsRow?.last_synced_at ?? null,
+  }
+
+  // Best-effort account email — pick the first row that has one. The
+  // contacts route is the only one that records account_email today, but
+  // future Gmail/Calendar/Tasks routes can populate it too.
+  const accountEmail =
+    googleRows.find((r) => r.account_email)?.account_email ?? null
+
+  const googleServices: GoogleService[] = [
+    {
+      key: 'gmail',
+      label: 'Gmail',
+      last_synced_at:
+        byProvider.get('google_gmail')?.last_synced_at ??
+        gmailRes.data?.occurred_at ??
+        null,
+      account_email: byProvider.get('google_gmail')?.account_email ?? null,
+    },
+    {
+      key: 'calendar',
+      label: 'Calendar',
+      last_synced_at: byProvider.get('google_calendar')?.last_synced_at ?? null,
+      account_email: byProvider.get('google_calendar')?.account_email ?? null,
+    },
+    {
+      key: 'tasks',
+      label: 'Tasks',
+      last_synced_at: byProvider.get('google_tasks')?.last_synced_at ?? null,
+      account_email: byProvider.get('google_tasks')?.account_email ?? null,
+    },
+    {
+      key: 'contacts',
+      label: 'Contacts',
+      last_synced_at: contactsRow?.last_synced_at ?? null,
+      account_email: contactsRow?.account_email ?? null,
+    },
+  ]
 
   const apolloApiKey =
     typeof apolloRes.data?.access_token === 'string'
@@ -136,9 +192,13 @@ export default async function SettingsPage() {
             </p>
           </div>
           <div className="space-y-3">
+            <GoogleConnectCard
+              account_email={accountEmail}
+              services={googleServices}
+            />
+            <GmailSyncCard state={gmailState} />
             <GoogleContactsCard state={googleContacts} />
             <ApolloCard state={apolloState} />
-            <GmailSyncCard state={gmailState} />
           </div>
         </section>
       </div>

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '../../lib/supabase/client'
 import { Brand } from '../../components/Brand'
+import { GOOGLE_OAUTH_SCOPES } from '../../lib/google/scopes'
 
 type Mode = 'signin' | 'signup'
 
@@ -26,12 +27,7 @@ export default function LoginPage() {
       provider: 'google',
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
-        scopes: [
-          'https://www.googleapis.com/auth/gmail.readonly',
-          'https://www.googleapis.com/auth/contacts.readonly',
-          'https://www.googleapis.com/auth/calendar.readonly',
-          'https://www.googleapis.com/auth/calendar.events.readonly',
-        ].join(' '),
+        scopes: GOOGLE_OAUTH_SCOPES.join(' '),
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
