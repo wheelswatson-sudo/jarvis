@@ -7,7 +7,7 @@ import { QuickAddInteraction } from '../../../../components/QuickAddInteraction'
 import { InteractionTimeline } from '../../../../components/InteractionTimeline'
 import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
-import { contactName, formatRelative } from '../../../../lib/format'
+import { contactName, formatRelative, formatPhone } from '../../../../lib/format'
 import type {
   Commitment,
   Contact,
@@ -112,7 +112,7 @@ export default async function ContactDetailPage({
             </h2>
             <dl className="space-y-2 text-sm">
               <Field label="Email" value={contact.email} mono />
-              <Field label="Phone" value={contact.phone} mono />
+              <Field label="Phone" value={formatPhone(contact.phone)} mono />
               <Field label="Company" value={contact.company} />
               <Field label="Title" value={contact.title} />
               <Field

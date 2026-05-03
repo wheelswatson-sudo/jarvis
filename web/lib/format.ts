@@ -27,6 +27,20 @@ export function formatDate(iso: string | null | undefined): string {
   })
 }
 
+export function formatPhone(raw: string | null | undefined): string {
+  if (!raw) return '—'
+  const digits = raw.replace(/\D/g, '')
+  // US numbers: +1XXXXXXXXXX or 1XXXXXXXXXX
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+  }
+  // International: just add spaces for readability
+  return raw
+}
+
 export function formatCurrency(n: number | null | undefined): string {
   if (n == null) return '—'
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`

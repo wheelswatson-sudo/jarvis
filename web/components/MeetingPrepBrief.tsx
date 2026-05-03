@@ -51,7 +51,7 @@ export function MeetingPrepBrief({ contactId }: { contactId: string }) {
           </h3>
           {generatedAt && (
             <p className="mt-0.5 text-[11px] text-zinc-500">
-              Generated {new Date(generatedAt).toLocaleTimeString()}
+              Generated {new Date(generatedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
             </p>
           )}
         </div>

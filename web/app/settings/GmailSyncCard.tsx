@@ -21,6 +21,7 @@ export function GmailSyncCard({ state }: Props) {
   const [isPending, startTransition] = useTransition()
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [lastSyncedAt, setLastSyncedAt] = useState(state.last_synced_at)
 
   function syncNow() {
     setStatus(null)
@@ -60,6 +61,7 @@ export function GmailSyncCard({ state }: Props) {
         const imported = data.imported ?? 0
         const skipped = data.skipped ?? 0
         const commitments = data.commitments_created ?? 0
+        setLastSyncedAt(new Date().toISOString())
         if (fetched === 0) {
           setStatus('No recent emails found.')
           return
@@ -97,7 +99,7 @@ export function GmailSyncCard({ state }: Props) {
           <dl className="mt-3 space-y-1 text-xs text-zinc-400">
             <div className="flex gap-2">
               <dt className="w-24 shrink-0 text-zinc-500">Last sync</dt>
-              <dd className="text-zinc-300">{formatTimestamp(state.last_synced_at)}</dd>
+              <dd className="text-zinc-300">{formatTimestamp(lastSyncedAt)}</dd>
             </div>
           </dl>
         </div>

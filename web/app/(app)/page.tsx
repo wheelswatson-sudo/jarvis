@@ -138,7 +138,7 @@ export default async function DashboardPage() {
         <MetricCard
           label="Network health"
           value={formatPercent(metrics.networkHealth)}
-          hint="avg half-life vs 90d"
+          hint="how actively you maintain connections"
         />
         <MetricCard
           label="Commitments due"

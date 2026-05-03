@@ -103,7 +103,7 @@ export function BriefingView({ initial }: Props) {
           </div>
           <p className="mt-1 text-sm text-zinc-400">
             {briefing
-              ? `${totalActions} action${totalActions === 1 ? '' : 's'} for ${payload?.briefing_date}. Generated ${formatRelative(briefing.generated_at)}.`
+              ? `${totalActions} action${totalActions === 1 ? '' : 's'} for ${payload?.briefing_date ? new Date(payload.briefing_date + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) : 'today'}. Generated ${formatRelative(briefing.generated_at)}.`
               : 'No briefing yet. Generate one to see what the network needs from you today.'}
           </p>
         </div>
