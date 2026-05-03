@@ -162,6 +162,8 @@ export async function POST(req: Request) {
       description: a.description,
       due_at: a.due_date ?? null,
       owner: a.owner,
+      // commitments.direction is NOT NULL in prod; mirror owner.
+      direction: a.owner,
       status: 'open' as const,
     }))
     await supabase.from('commitments').insert(commitmentRows)

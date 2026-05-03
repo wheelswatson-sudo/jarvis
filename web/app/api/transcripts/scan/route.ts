@@ -314,6 +314,8 @@ export async function POST(req: Request) {
         description: a.description,
         due_at: a.due_date ?? null,
         owner: 'me',
+        // commitments.direction is NOT NULL in prod; mirror owner.
+        direction: 'me',
         status: 'open' as const,
       })),
     )

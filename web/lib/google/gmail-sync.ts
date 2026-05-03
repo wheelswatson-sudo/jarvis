@@ -322,15 +322,20 @@ export async function extractAndStoreCommitments(
         continue
       }
 
-      const commitmentRows = signals.commitments.map((c) => ({
-        user_id: userId,
-        contact_id: contact.id,
-        interaction_id: interactionRow.id,
-        description: c.description,
-        due_at: c.due_at,
-        owner: ownerToDb(c.owner),
-        status: 'open' as const,
-      }))
+      const commitmentRows = signals.commitments.map((c) => {
+        const owner = ownerToDb(c.owner)
+        return {
+          user_id: userId,
+          contact_id: contact.id,
+          interaction_id: interactionRow.id,
+          description: c.description,
+          due_at: c.due_at,
+          owner,
+          // commitments.direction is NOT NULL in prod; mirror owner.
+          direction: owner,
+          status: 'open' as const,
+        }
+      })
 
       if (commitmentRows.length > 0) {
         const { error: cmtErr } = await service

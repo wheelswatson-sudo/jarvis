@@ -100,6 +100,9 @@ export async function syncTasksForUser(
       status,
       completed_at: status === 'done' ? completedAt ?? new Date().toISOString() : null,
       owner: 'me' as const,
+      // commitments.direction is NOT NULL in prod (added out-of-band, not in
+      // /web/migrations). Google Tasks are always self-assigned, so 'me'.
+      direction: 'me' as const,
       source: SOURCE,
       external_id: externalId,
     }
