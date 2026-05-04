@@ -120,7 +120,10 @@ export async function POST(req: Request) {
     const c = raw as Incoming
     const first = clean(c.first_name)
     const last = clean(c.last_name)
-    const email = clean(c.email)
+    // Lowercase emails on insert so downstream sync paths (Gmail, Calendar)
+    // can match by lowercase without a case-insensitive query. The Google
+    // Contacts importer already does this — keep imports consistent.
+    const email = clean(c.email)?.toLowerCase() ?? null
     const phone = clean(c.phone)
     const company = clean(c.company)
     const title = clean(c.title)

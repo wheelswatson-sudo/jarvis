@@ -16,6 +16,30 @@ import type {
 
 export const dynamic = 'force-dynamic'
 
+type CalendarEventRow = {
+  id: string
+  title: string | null
+  start_at: string
+  end_at: string | null
+  location: string | null
+  conference_url: string | null
+  html_link: string | null
+  attendees: unknown
+}
+
+type MessageRow = {
+  id: string
+  channel: string
+  direction: 'inbound' | 'outbound' | null
+  sender: string | null
+  recipient: string | null
+  subject: string | null
+  snippet: string | null
+  thread_id: string | null
+  external_url: string | null
+  sent_at: string
+}
+
 export default async function ContactDetailPage({
   params,
 }: {
@@ -24,7 +48,19 @@ export default async function ContactDetailPage({
   const { id } = await params
   const supabase = await createClient()
 
-  const [{ data: contactData }, ixRes, comRes] = await Promise.all([
+  // The contact profile is the single pane of glass — pull every signal that
+  // links back to this contact: interactions, commitments, calendar events,
+  // and unified-inbox messages. Calendar/messages probes tolerate a missing
+  // table (per-user setup may not have them yet) so the page never 500s.
+  const nowIso = new Date().toISOString()
+  const [
+    { data: contactData },
+    ixRes,
+    comRes,
+    upcomingEventsRes,
+    pastEventsRes,
+    messagesRes,
+  ] = await Promise.all([
     supabase.from('contacts').select('*').eq('id', id).maybeSingle(),
     supabase
       .from('interactions')
@@ -37,6 +73,31 @@ export default async function ContactDetailPage({
       .select('*')
       .eq('contact_id', id)
       .order('due_at', { ascending: true, nullsFirst: false }),
+    supabase
+      .from('calendar_events')
+      .select(
+        'id, title, start_at, end_at, location, conference_url, html_link, attendees',
+      )
+      .eq('contact_id', id)
+      .gte('start_at', nowIso)
+      .order('start_at', { ascending: true })
+      .limit(10),
+    supabase
+      .from('calendar_events')
+      .select('id, title, start_at, end_at')
+      .eq('contact_id', id)
+      .lt('start_at', nowIso)
+      .order('start_at', { ascending: false })
+      .limit(1),
+    supabase
+      .from('messages')
+      .select(
+        'id, channel, direction, sender, recipient, subject, snippet, thread_id, external_url, sent_at',
+      )
+      .eq('contact_id', id)
+      .eq('is_archived', false)
+      .order('sent_at', { ascending: false })
+      .limit(20),
   ])
 
   const contact = contactData as Contact | null
@@ -46,6 +107,44 @@ export default async function ContactDetailPage({
   const interactions = (ixRes.data ?? []) as Interaction[]
   const commitments = (comRes.data ?? []) as Commitment[]
   const openCommitments = commitments.filter((c) => c.status === 'open')
+  const myOpen = openCommitments.filter((c) => c.owner === 'me')
+  const theirOpen = openCommitments.filter((c) => c.owner === 'them')
+  const upcomingMeetings = (
+    upcomingEventsRes.error ? [] : (upcomingEventsRes.data ?? [])
+  ) as CalendarEventRow[]
+  const lastMeeting = (
+    pastEventsRes.error
+      ? []
+      : ((pastEventsRes.data ?? []) as Pick<
+          CalendarEventRow,
+          'id' | 'title' | 'start_at' | 'end_at'
+        >[])
+  )[0]
+  const messages = (
+    messagesRes.error ? [] : (messagesRes.data ?? [])
+  ) as MessageRow[]
+
+  // Last contact across every signal we know about. interactions covers
+  // logged calls / extracted emails; messages covers raw inbox; calendar
+  // covers past meetings. Take the most recent.
+  const lastContactCandidates: number[] = []
+  if (contact.last_interaction_at) {
+    lastContactCandidates.push(new Date(contact.last_interaction_at).getTime())
+  }
+  if (interactions[0]) {
+    lastContactCandidates.push(new Date(interactions[0].occurred_at).getTime())
+  }
+  if (messages[0]) {
+    lastContactCandidates.push(new Date(messages[0].sent_at).getTime())
+  }
+  if (lastMeeting) {
+    lastContactCandidates.push(new Date(lastMeeting.start_at).getTime())
+  }
+  const lastContactAt = lastContactCandidates.length
+    ? new Date(Math.max(...lastContactCandidates)).toISOString()
+    : null
+
+  const nextMeeting = upcomingMeetings[0] ?? null
 
   const followUp = contact.next_follow_up
     ? new Date(contact.next_follow_up)
@@ -131,10 +230,16 @@ export default async function ContactDetailPage({
                 }
               />
               <Field
-                label="Last seen"
+                label="Last contact"
+                value={lastContactAt ? formatRelative(lastContactAt) : null}
+              />
+              <Field
+                label="Next meeting"
                 value={
-                  contact.last_interaction_at
-                    ? formatRelative(contact.last_interaction_at)
+                  nextMeeting
+                    ? `${formatMeetingDate(nextMeeting.start_at)}${
+                        nextMeeting.title ? ` · ${nextMeeting.title}` : ''
+                      }`
                     : null
                 }
               />
@@ -173,47 +278,117 @@ export default async function ContactDetailPage({
           </DarkCard>
         </section>
 
+        {upcomingMeetings.length > 0 && (
+          <section>
+            <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+              Upcoming meetings{' '}
+              <span className="text-zinc-600">({upcomingMeetings.length})</span>
+            </h2>
+            <DarkCard>
+              <ul className="divide-y divide-zinc-800">
+                {upcomingMeetings.map((m) => (
+                  <li
+                    key={m.id}
+                    className="flex items-center justify-between gap-3 py-3 text-sm"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-zinc-100">
+                        {m.title || 'Untitled meeting'}
+                      </div>
+                      <div className="mt-0.5 text-xs text-zinc-500">
+                        {formatMeetingDate(m.start_at)}
+                        {m.location ? ` · ${m.location}` : ''}
+                      </div>
+                    </div>
+                    {m.conference_url && (
+                      <a
+                        href={m.conference_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="shrink-0 rounded-md border border-violet-500/40 bg-violet-500/10 px-2.5 py-1 text-xs text-violet-200 hover:border-violet-400"
+                      >
+                        Join
+                      </a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </DarkCard>
+          </section>
+        )}
+
         <section>
           <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
             Open commitments{' '}
             <span className="text-zinc-600">({openCommitments.length})</span>
           </h2>
-          <DarkCard>
-            {openCommitments.length === 0 ? (
-              <p className="text-sm text-zinc-500">
-                No open commitments for {displayName}.
-              </p>
-            ) : (
-              <ul className="divide-y divide-zinc-800">
-                {openCommitments.map((c) => {
-                  const overdue =
-                    c.due_at != null && new Date(c.due_at) < new Date()
-                  return (
-                    <li
-                      key={c.id}
-                      className="flex items-center justify-between gap-3 py-3 text-sm"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-zinc-100">
-                          {c.description}
-                        </div>
-                        <div className="mt-0.5 text-xs text-zinc-500">
-                          {c.owner === 'them' ? 'they owe' : 'you owe'}
-                          {c.due_at && (
-                            <span className={overdue ? ' text-red-400' : ''}>
-                              {' · '}due{' '}
-                              {new Date(c.due_at).toLocaleDateString()}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-          </DarkCard>
+          <div className="grid gap-4 md:grid-cols-2">
+            <DarkCard>
+              <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wide text-violet-300">
+                You owe {displayName}{' '}
+                <span className="text-zinc-600">({myOpen.length})</span>
+              </h3>
+              {myOpen.length === 0 ? (
+                <p className="text-sm text-zinc-500">Nothing on your plate.</p>
+              ) : (
+                <ul className="divide-y divide-zinc-800">
+                  {myOpen.map((c) => (
+                    <CommitmentLi key={c.id} c={c} />
+                  ))}
+                </ul>
+              )}
+            </DarkCard>
+            <DarkCard>
+              <h3 className="mb-2 text-[11px] font-medium uppercase tracking-wide text-fuchsia-300">
+                {displayName} owes you{' '}
+                <span className="text-zinc-600">({theirOpen.length})</span>
+              </h3>
+              {theirOpen.length === 0 ? (
+                <p className="text-sm text-zinc-500">Nothing pending.</p>
+              ) : (
+                <ul className="divide-y divide-zinc-800">
+                  {theirOpen.map((c) => (
+                    <CommitmentLi key={c.id} c={c} />
+                  ))}
+                </ul>
+              )}
+            </DarkCard>
+          </div>
         </section>
+
+        {messages.length > 0 && (
+          <section>
+            <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+              Recent messages{' '}
+              <span className="text-zinc-600">({messages.length})</span>
+            </h2>
+            <DarkCard>
+              <ul className="divide-y divide-zinc-800">
+                {messages.map((m) => (
+                  <li key={m.id} className="py-3 text-sm">
+                    <div className="flex items-baseline justify-between gap-3 text-xs text-zinc-500">
+                      <span className="font-medium uppercase tracking-wide text-zinc-400">
+                        {m.channel}
+                        {m.direction ? ` · ${m.direction}` : ''}
+                      </span>
+                      <span>{formatRelative(m.sent_at)}</span>
+                    </div>
+                    {m.subject && (
+                      <div className="mt-1 truncate text-zinc-100">
+                        {m.subject}
+                      </div>
+                    )}
+                    {m.snippet && (
+                      <p className="mt-0.5 line-clamp-2 text-xs text-zinc-400">
+                        {m.snippet}
+                      </p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </DarkCard>
+          </section>
+        )}
 
         <section>
           <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
@@ -264,4 +439,43 @@ function Field({
       </dd>
     </div>
   )
+}
+
+function CommitmentLi({ c }: { c: Commitment }) {
+  const overdue = c.due_at != null && new Date(c.due_at) < new Date()
+  return (
+    <li className="py-3 text-sm">
+      <div className="truncate text-zinc-100">{c.description}</div>
+      {c.due_at && (
+        <div
+          className={`mt-0.5 text-xs ${overdue ? 'text-red-400' : 'text-zinc-500'}`}
+        >
+          due {new Date(c.due_at).toLocaleDateString()}
+        </div>
+      )}
+    </li>
+  )
+}
+
+function formatMeetingDate(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  const after = new Date(tomorrow)
+  after.setDate(after.getDate() + 1)
+
+  const time = d.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  if (d >= today && d < tomorrow) return `Today, ${time}`
+  if (d >= tomorrow && d < after) return `Tomorrow, ${time}`
+  return `${d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })}, ${time}`
 }

@@ -140,12 +140,14 @@ export async function fetchAndStoreGmail(
   let imported = 0
   let skipped = 0
   let errors = 0
+  const latestByContact = new Map<string, string>()
   for (const msg of messages) {
     const fromEmail = normalizeEmail(msg.from)
     const toEmail = normalizeEmail(msg.to)
     const isInbound = fromEmail !== lowerUserEmail
     const otherEmail = isInbound ? fromEmail : toEmail
     const contactId = emailToContactId.get(otherEmail) ?? null
+    const sentAt = new Date(msg.date).toISOString()
 
     const row = {
       user_id: userId,
@@ -160,7 +162,7 @@ export async function fetchAndStoreGmail(
       thread_id: msg.threadId || null,
       external_id: msg.id,
       is_read: true,
-      sent_at: new Date(msg.date).toISOString(),
+      sent_at: sentAt,
     }
 
     const { error } = await service
@@ -177,10 +179,50 @@ export async function fetchAndStoreGmail(
       }
     } else {
       imported++
+      if (contactId) {
+        const prev = latestByContact.get(contactId)
+        if (!prev || sentAt > prev) latestByContact.set(contactId, sentAt)
+      }
     }
   }
 
+  await bumpLastInteractionAt(service, userId, latestByContact)
+
   return { fetched: messages.length, imported, skipped, errors, messages }
+}
+
+// Bump contacts.last_interaction_at to the most recent message timestamp for
+// each contact we just touched. Only writes when the new timestamp is newer
+// than what's already there — a stale resync of older mail must not regress
+// the field.
+export async function bumpLastInteractionAt(
+  service: SupabaseClient,
+  userId: string,
+  latestByContact: Map<string, string>,
+): Promise<void> {
+  if (latestByContact.size === 0) return
+  const ids = Array.from(latestByContact.keys())
+  const { data: existing } = await service
+    .from('contacts')
+    .select('id, last_interaction_at')
+    .eq('user_id', userId)
+    .in('id', ids)
+  const existingById = new Map<string, string | null>()
+  for (const r of (existing ?? []) as {
+    id: string
+    last_interaction_at: string | null
+  }[]) {
+    existingById.set(r.id, r.last_interaction_at)
+  }
+  for (const [cid, ts] of latestByContact) {
+    const cur = existingById.get(cid)
+    if (cur && cur >= ts) continue
+    await service
+      .from('contacts')
+      .update({ last_interaction_at: ts })
+      .eq('id', cid)
+      .eq('user_id', userId)
+  }
 }
 
 export type ExtractionResult = {

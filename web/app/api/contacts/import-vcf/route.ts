@@ -105,7 +105,7 @@ export async function POST(req: NextRequest) {
       user_id: user.id,
       first_name: c.first_name || null,
       last_name: c.last_name || null,
-      email: c.email || null,
+      email: c.email ? c.email.toLowerCase() : null,
       phone: c.phone || null,
       company: c.company || null,
       title: c.title || null,

@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
+import { bumpLastInteractionAt } from '../../../../lib/google/gmail-sync'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -75,6 +76,7 @@ export async function POST(req: NextRequest) {
   let imported = 0
   let skipped = 0
   let errors = 0
+  const latestByContact = new Map<string, string>()
 
   for (const msg of messages) {
     const fromEmail = normalizeEmail(msg.from)
@@ -82,6 +84,7 @@ export async function POST(req: NextRequest) {
     const isInbound = fromEmail !== userEmail
     const otherEmail = isInbound ? fromEmail : toEmail
     const contactId = emailToContactId.get(otherEmail) ?? null
+    const sentAt = new Date(msg.date).toISOString()
 
     const row = {
       user_id: user.id,
@@ -96,7 +99,7 @@ export async function POST(req: NextRequest) {
       thread_id: msg.threadId || null,
       external_id: msg.id,
       is_read: true, // Emails from Gmail are already "read"
-      sent_at: new Date(msg.date).toISOString(),
+      sent_at: sentAt,
     }
 
     const { error } = await service
@@ -112,8 +115,14 @@ export async function POST(req: NextRequest) {
       }
     } else {
       imported++
+      if (contactId) {
+        const prev = latestByContact.get(contactId)
+        if (!prev || sentAt > prev) latestByContact.set(contactId, sentAt)
+      }
     }
   }
+
+  await bumpLastInteractionAt(service, user.id, latestByContact)
 
   // Record a "last synced" stamp for the unified Google Workspace card so
   // the Settings UI knows Gmail is connected and how recently it pulled.

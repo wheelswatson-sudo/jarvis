@@ -8,6 +8,7 @@ import {
   getValidAccessTokenForUser,
   googleApiError,
 } from '../../../../../lib/google/oauth'
+import { bumpLastInteractionAt } from '../../../../../lib/google/gmail-sync'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -197,12 +198,14 @@ export async function POST(req: NextRequest) {
   let imported = 0
   let skipped = 0
   let errors = 0
+  const latestByContact = new Map<string, string>()
   for (const msg of messages) {
     const fromEmail = normalizeEmail(msg.from)
     const toEmail = normalizeEmail(msg.to)
     const isInbound = fromEmail !== userEmail
     const otherEmail = isInbound ? fromEmail : toEmail
     const contactId = emailToContactId.get(otherEmail) ?? null
+    const sentAt = new Date(msg.date).toISOString()
 
     const row = {
       user_id: user.id,
@@ -217,7 +220,7 @@ export async function POST(req: NextRequest) {
       thread_id: msg.threadId || null,
       external_id: msg.id,
       is_read: true,
-      sent_at: new Date(msg.date).toISOString(),
+      sent_at: sentAt,
     }
 
     const { error } = await service
@@ -234,8 +237,14 @@ export async function POST(req: NextRequest) {
       }
     } else {
       imported++
+      if (contactId) {
+        const prev = latestByContact.get(contactId)
+        if (!prev || sentAt > prev) latestByContact.set(contactId, sentAt)
+      }
     }
   }
+
+  await bumpLastInteractionAt(service, user.id, latestByContact)
 
   // 5. Kick the commitment-extractor with the same payload (fire and
   //    forget — the client doesn't need to wait for AI extraction to
