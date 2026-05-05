@@ -113,12 +113,31 @@ function deterministicBrief(
   }
 }
 
+type RelationshipEdgeRow = {
+  strength: number
+  trend: string
+  interaction_count_30d: number
+  interaction_count_90d: number
+  reciprocity_score: number | null
+  avg_response_time_hours: number | null
+  initiated_by_me_pct: number | null
+  last_interaction_at: string | null
+}
+
+type OpenCommitment = {
+  description: string
+  owner: 'me' | 'them'
+  due_at: string | null
+}
+
 async function polishBriefWithLLM(
   apiKey: string,
   modelId: string,
   contact: Contact,
   base: MeetingBrief,
   interactions: Interaction[],
+  edge: RelationshipEdgeRow | null,
+  openCommitments: OpenCommitment[],
 ): Promise<MeetingBrief> {
   const model = getModel(modelId)
   const interactionDigest = interactions
@@ -133,8 +152,37 @@ async function polishBriefWithLLM(
     })
     .join('\n')
 
+  const edgeBlock = edge
+    ? [
+        `- Strength: ${edge.strength.toFixed(2)} / 1.00`,
+        `- Trend: ${edge.trend}`,
+        `- Interactions: ${edge.interaction_count_30d} (30d) / ${edge.interaction_count_90d} (90d)`,
+        edge.reciprocity_score != null
+          ? `- Reciprocity: ${(edge.reciprocity_score * 100).toFixed(0)}% outbound (0.5 = balanced)`
+          : null,
+        edge.initiated_by_me_pct != null
+          ? `- Threads you initiated: ${(edge.initiated_by_me_pct * 100).toFixed(0)}%`
+          : null,
+        edge.avg_response_time_hours != null
+          ? `- Their avg reply time: ${edge.avg_response_time_hours.toFixed(1)}h`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : '(no relationship edge computed yet)'
+
+  const commitmentsBlock = openCommitments.length
+    ? openCommitments
+        .map((c) => {
+          const tag = c.owner === 'me' ? '[you owe]' : '[they owe]'
+          const due = c.due_at ? ` (due ${c.due_at.slice(0, 10)})` : ''
+          return `- ${tag} ${c.description}${due}`
+        })
+        .join('\n')
+    : '(none open)'
+
   const prompt = `You are an executive assistant drafting a 30-second meeting prep brief for ${contactName(contact)}.
-Use ONLY the data below. Be specific, not generic. Output strict JSON with these keys:
+Use ONLY the data below. Be specific, not generic. Reflect the relationship signals — if reciprocity is one-sided or the trend is cooling, say so plainly in relationship_health. Output strict JSON with these keys:
 who_they_are, recent_context, open_items (array of strings), suggested_talking_points (array of strings, max 4), relationship_health.
 
 Current draft (replace anything weak):
@@ -142,6 +190,12 @@ ${JSON.stringify(base, null, 2)}
 
 Recent interactions:
 ${interactionDigest || '(none)'}
+
+Relationship edge signals (recomputed daily from messages + meetings):
+${edgeBlock}
+
+Open commitments between you:
+${commitmentsBlock}
 
 Personal details: ${JSON.stringify(contact.personal_details ?? {})}
 Title/company: ${[contact.title, contact.company].filter(Boolean).join(' @ ') || '(unknown)'}
@@ -223,7 +277,7 @@ export async function GET(
   }
   const contact = contactRow as Contact
 
-  const [ixRes, comRes, insightsRes] = await Promise.all([
+  const [ixRes, comRes, insightsRes, edgeRes] = await Promise.all([
     supabase
       .from('interactions')
       .select('*')
@@ -246,11 +300,27 @@ export async function GET(
       .contains('metadata', { contact_id: id })
       .order('priority', { ascending: false })
       .limit(3),
+    supabase
+      .from('relationship_edges')
+      .select(
+        'strength, trend, interaction_count_30d, interaction_count_90d, reciprocity_score, avg_response_time_hours, initiated_by_me_pct, last_interaction_at',
+      )
+      .eq('user_id', user.id)
+      .eq('contact_id', id)
+      .maybeSingle(),
   ])
 
   const interactions = (ixRes.data ?? []) as Interaction[]
   const commitments = (comRes.data ?? []) as Commitment[]
   const insights = (insightsRes.data ?? []) as IntelligenceInsight[]
+  const edge = (edgeRes.data ?? null) as RelationshipEdgeRow | null
+  const openCommitmentsForPrompt: OpenCommitment[] = commitments
+    .slice(0, 8)
+    .map((c) => ({
+      description: c.description,
+      owner: c.owner,
+      due_at: c.due_at,
+    }))
 
   const base = deterministicBrief(contact, interactions, commitments, insights)
 
@@ -265,7 +335,15 @@ export async function GET(
 
   const brief =
     apiKey != null
-      ? await polishBriefWithLLM(apiKey, modelId, contact, base, interactions)
+      ? await polishBriefWithLLM(
+          apiKey,
+          modelId,
+          contact,
+          base,
+          interactions,
+          edge,
+          openCommitmentsForPrompt,
+        )
       : base
 
   // Cache the brief (best-effort; service role since meeting_briefs has no

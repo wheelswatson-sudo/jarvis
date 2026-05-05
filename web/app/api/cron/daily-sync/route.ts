@@ -9,6 +9,8 @@ import {
 import { syncCalendarForUser } from '../../../../lib/google/calendar-sync'
 import { syncTasksForUser } from '../../../../lib/google/tasks-sync'
 import { buildDailyBriefing } from '../../../../lib/intelligence/daily-briefing'
+import { computeUserProfile } from '../../../../lib/intelligence/compute-profiles'
+import { computeRelationshipEdges } from '../../../../lib/intelligence/compute-relationships'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -80,6 +82,8 @@ export async function GET(req: NextRequest) {
     extract?: unknown
     calendar?: unknown
     tasks?: unknown
+    profile?: { computed: boolean; top_contacts: number }
+    edges?: { computed: number }
     briefing?: { briefing_date: string; counts: Record<string, number> }
     error?: string
   }> = []
@@ -123,6 +127,36 @@ export async function GET(req: NextRequest) {
         tok.token,
         { includeCompleted: true },
       )
+
+      // AIEA Layer 1 (Observation): compute behavioral profile + relationship
+      // edges from the freshly synced data so the briefing LLM can reason
+      // over current signals.
+      let profileSummary: { computed: boolean; top_contacts: number } = {
+        computed: false,
+        top_contacts: 0,
+      }
+      let edgesSummary: { computed: number } = { computed: 0 }
+      try {
+        const profile = await computeUserProfile(service, u.user_id)
+        profileSummary = {
+          computed: true,
+          top_contacts: profile.top_contacts.length,
+        }
+      } catch (err) {
+        console.error('[cron daily-sync] computeUserProfile failed', {
+          user_id: u.user_id,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+      try {
+        const edges = await computeRelationshipEdges(service, u.user_id)
+        edgesSummary = { computed: edges.length }
+      } catch (err) {
+        console.error('[cron daily-sync] computeRelationshipEdges failed', {
+          user_id: u.user_id,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
 
       const briefing = await buildDailyBriefing(service, u.user_id)
       const { error: briefingErr } = await service
@@ -171,6 +205,8 @@ export async function GET(req: NextRequest) {
           upserted: tasks.upserted,
           errors: tasks.errors,
         },
+        profile: profileSummary,
+        edges: edgesSummary,
         briefing: {
           briefing_date: briefing.payload.briefing_date,
           counts: briefing.payload.counts,

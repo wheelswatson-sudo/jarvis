@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Contact, Commitment, PersonalDetails } from '../types'
 import { contactName } from '../format'
+import { enrichBriefingWithIntelligence } from './briefing-intelligence'
 
 // ---------------------------------------------------------------------------
 // Daily intelligence briefing assembler.
@@ -49,6 +50,9 @@ export type BriefingSections = {
   stale_relationships: BriefingItem[]
   social_changes: BriefingItem[]
   connector_opportunities: BriefingItem[]
+  // Personalized observations from the LLM enrichment step (AIEA Layer 1).
+  // Optional so older cached payloads still parse.
+  personalized_observations?: BriefingItem[]
 }
 
 export type BriefingPayload = {
@@ -157,6 +161,7 @@ export async function buildDailyBriefing(
     stale_relationships: sections.stale_relationships.length,
     social_changes: sections.social_changes.length,
     connector_opportunities: sections.connector_opportunities.length,
+    personalized_observations: 0,
   }
 
   // Ranked action list — flatten and sort by urgency, then by category
@@ -199,7 +204,13 @@ export async function buildDailyBriefing(
     notes,
   }
 
-  return { payload, markdown: renderMarkdown(payload) }
+  // AIEA Layer 1 enrichment: ask the LLM to surface personalized observations
+  // grounded in the user_profile + relationship_edges that the daily cron
+  // recomputed before this briefing. Best-effort — falls back to the
+  // deterministic payload if the API key is missing or the call fails.
+  const enriched = await enrichBriefingWithIntelligence(service, userId, payload)
+
+  return { payload: enriched, markdown: renderMarkdown(enriched) }
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +587,9 @@ function renderMarkdown(p: BriefingPayload): string {
   lines.push(`**${totalActions} action${totalActions === 1 ? '' : 's'} ranked by urgency.**`)
   lines.push('')
 
+  if (p.sections.personalized_observations && p.sections.personalized_observations.length > 0) {
+    appendSection(lines, 'AI observations', p.sections.personalized_observations)
+  }
   appendSection(lines, 'Today\'s meetings', p.sections.todays_meetings)
   appendSection(lines, 'Overdue commitments', p.sections.overdue_commitments)
   appendSection(lines, 'Cooling relationships', p.sections.cooling_relationships)

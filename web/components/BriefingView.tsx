@@ -27,6 +27,11 @@ const SECTION_META: Array<{
   blurb: string
 }> = [
   {
+    key: 'personalized_observations',
+    title: 'AI observations',
+    blurb: 'Patterns the rules can’t see — grounded in your profile and relationship graph.',
+  },
+  {
     key: 'todays_meetings',
     title: "Today's meetings",
     blurb: 'Walk in prepared.',
@@ -152,7 +157,7 @@ function BriefingBody({ payload }: { payload: BriefingPayload }) {
             key={meta.key}
             title={meta.title}
             blurb={meta.blurb}
-            items={payload.sections[meta.key]}
+            items={payload.sections[meta.key] ?? []}
           />
         ))}
       </div>
