@@ -92,15 +92,15 @@ export function CommitmentTracker({
   return (
     <div className="space-y-6">
       {showFilter && (
-        <div className="flex gap-2 text-xs">
+        <div className="flex gap-1 rounded-lg border border-white/[0.06] bg-white/[0.02] p-1 text-xs w-fit">
           {(['open', 'overdue', 'all'] as const).map((f) => (
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`rounded-full border px-3 py-1 transition ${
+              className={`rounded-md px-3 py-1 capitalize transition-all ${
                 filter === f
-                  ? 'border-violet-500 bg-violet-500/20 text-white'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-white'
+                  ? 'bg-gradient-to-br from-indigo-500/20 to-fuchsia-500/15 text-white ring-1 ring-inset ring-violet-500/30'
+                  : 'text-zinc-400 hover:text-zinc-100'
               }`}
             >
               {f}
@@ -116,13 +116,13 @@ export function CommitmentTracker({
             <span className="text-xs text-zinc-500">({b.items.length})</span>
           </header>
           {b.items.length === 0 ? (
-            <p className="rounded-lg border border-dashed border-zinc-800 bg-zinc-900/50 p-3 text-xs text-zinc-500">
+            <p className="rounded-xl border border-dashed border-white/[0.06] bg-white/[0.015] p-3 text-xs text-zinc-500">
               {b.key === 'overdue'
                 ? 'Nothing overdue. Clean.'
                 : 'Nothing here.'}
             </p>
           ) : (
-            <ul className="divide-y divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
+            <ul className="divide-y divide-white/[0.05] overflow-hidden rounded-xl aiea-glass">
               {b.items.map((c) => (
                 <Row key={c.id} commitment={c} />
               ))}
@@ -151,34 +151,46 @@ function Row({ commitment }: { commitment: EnrichedCommitment }) {
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 px-4 py-3 text-sm hover:bg-zinc-800/40">
+    <li className="group flex items-center justify-between gap-3 px-4 py-3 text-sm transition-colors hover:bg-white/[0.025]">
       <div className="min-w-0 flex-1">
         <div className="truncate text-zinc-100">{commitment.description}</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500">
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-zinc-500">
           {commitment.contact_name && commitment.contact_id ? (
             <Link
               href={`/contacts/${commitment.contact_id}`}
-              className="text-violet-400 hover:underline"
+              className="text-violet-300 transition-colors hover:text-violet-200 hover:underline"
             >
               {commitment.contact_name}
             </Link>
           ) : (
             <span>no contact</span>
           )}
-          <span>{commitment.owner === 'them' ? 'they owe' : 'you owe'}</span>
+          <span aria-hidden="true">·</span>
+          <span
+            className={
+              commitment.owner === 'them'
+                ? 'text-fuchsia-300'
+                : 'text-indigo-300'
+            }
+          >
+            {commitment.owner === 'them' ? 'they owe' : 'you owe'}
+          </span>
           {commitment.due_at && (
-            <span className={overdue ? 'text-red-400' : ''}>
-              due {new Date(commitment.due_at).toLocaleDateString()}
-              {overdue ? ` · ${overdue}d overdue` : ''}
-            </span>
+            <>
+              <span aria-hidden="true">·</span>
+              <span className={overdue ? 'text-rose-300' : ''}>
+                due {new Date(commitment.due_at).toLocaleDateString()}
+                {overdue ? ` · ${overdue}d overdue` : ''}
+              </span>
+            </>
           )}
         </div>
       </div>
-      <div className="flex shrink-0 gap-1">
+      <div className="flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100">
         <button
           disabled={pending}
           onClick={() => patch({ status: 'done' })}
-          className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300 transition hover:bg-emerald-500/20 disabled:opacity-50"
+          className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
         >
           Done
         </button>
@@ -189,7 +201,7 @@ function Row({ commitment }: { commitment: EnrichedCommitment }) {
             next.setDate(next.getDate() + 7)
             patch({ status: 'snoozed', due_at: next.toISOString() })
           }}
-          className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-300 transition hover:border-zinc-500 disabled:opacity-50"
+          className="rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-1 text-[11px] text-zinc-300 transition-colors hover:border-white/[0.18] disabled:opacity-50"
         >
           Snooze 7d
         </button>

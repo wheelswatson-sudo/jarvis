@@ -136,7 +136,7 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
         )}
         <button
           onClick={() => setEditing(true)}
-          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 transition hover:border-violet-500 hover:text-white"
+          className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition-colors hover:border-violet-500/50 hover:text-white"
         >
           {hasAny ? 'Edit details' : 'Add details'}
         </button>
@@ -187,14 +187,14 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
         <button
           onClick={save}
           disabled={pending}
-          className="rounded-md bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-violet-500/20 disabled:opacity-50"
+          className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
         >
           {pending ? 'Saving…' : 'Save'}
         </button>
         <button
           onClick={() => setEditing(false)}
           disabled={pending}
-          className="rounded-md border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-zinc-500"
+          className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-white/[0.18]"
         >
           Cancel
         </button>
@@ -234,7 +234,7 @@ function Field({
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
+        className="w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
       />
     </label>
   )
@@ -261,7 +261,7 @@ function TextArea({
         rows={3}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
+        className="w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
       />
     </label>
   )

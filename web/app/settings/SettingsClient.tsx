@@ -81,9 +81,9 @@ export function SettingsClient({
     <div className="space-y-12">
       <Section
         title="Default model"
-        subtitle="Used by every Jarvis chat unless you override it later."
+        subtitle="Used by every AIEA chat unless you override it later."
       >
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+        <div className="rounded-2xl aiea-glass p-5">
           <label className="block text-xs uppercase tracking-wide text-zinc-500">
             Model
           </label>
@@ -194,7 +194,7 @@ function ProviderKeyRow({
   }
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+    <div className="rounded-2xl aiea-glass p-5">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">

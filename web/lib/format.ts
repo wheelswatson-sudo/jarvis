@@ -61,17 +61,19 @@ export function tierLabel(t: number | null | undefined): string {
 }
 
 export function tierColor(t: number | null | undefined): string {
-  if (t === 1) return 'bg-zinc-900 text-white'
-  if (t === 2) return 'bg-zinc-200 text-zinc-700'
-  if (t === 3) return 'bg-zinc-100 text-zinc-500'
-  return 'bg-zinc-100 text-zinc-400'
+  if (t === 1)
+    return 'bg-gradient-to-br from-indigo-500/20 to-fuchsia-500/15 text-violet-200 ring-1 ring-inset ring-violet-500/30'
+  if (t === 2)
+    return 'bg-white/[0.06] text-zinc-200 ring-1 ring-inset ring-white/10'
+  if (t === 3) return 'bg-white/[0.03] text-zinc-400 ring-1 ring-inset ring-white/[0.06]'
+  return 'bg-white/[0.02] text-zinc-500 ring-1 ring-inset ring-white/[0.05]'
 }
 
 export function healthColor(score: number | null | undefined): string {
   if (score == null) return 'text-zinc-400'
-  if (score >= 0.7) return 'text-emerald-600'
-  if (score >= 0.4) return 'text-amber-600'
-  return 'text-red-600'
+  if (score >= 0.7) return 'text-emerald-300'
+  if (score >= 0.4) return 'text-amber-300'
+  return 'text-rose-300'
 }
 
 export function contactName(

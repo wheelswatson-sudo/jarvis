@@ -36,9 +36,5 @@ async function loadLatestBriefing(): Promise<CachedBriefing | null> {
 
 export default async function BriefingPage() {
   const initial = await loadLatestBriefing()
-  return (
-    <div className="space-y-6">
-      <BriefingView initial={initial} />
-    </div>
-  )
+  return <BriefingView initial={initial} />
 }

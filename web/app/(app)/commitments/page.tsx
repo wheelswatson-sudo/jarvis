@@ -4,6 +4,7 @@ import {
   CommitmentTracker,
   type EnrichedCommitment,
 } from '../../../components/CommitmentTracker'
+import { PageHeader } from '../../../components/cards'
 import { contactName } from '../../../lib/format'
 import type { Commitment, Contact } from '../../../lib/types'
 
@@ -36,22 +37,26 @@ export default async function CommitmentsPage() {
     contact_name: c.contact_id ? (nameById.get(c.contact_id) ?? null) : null,
   }))
 
+  const open = enriched.filter((c) => c.status === 'open')
+  const overdue = open.filter(
+    (c) => c.due_at && new Date(c.due_at) < new Date(),
+  )
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6">
-        <header>
-          <h1 className="bg-gradient-to-r from-indigo-300 via-violet-300 to-fuchsia-300 bg-clip-text text-3xl font-medium tracking-tight text-transparent">
-            Commitments
-          </h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            Promises you&apos;ve made. Keep the loop closed.
-          </p>
-        </header>
+    <div className="space-y-8 animate-fade-up">
+      <PageHeader
+        eyebrow="Loop"
+        title="Commitments"
+        subtitle={
+          open.length === 0
+            ? 'No open commitments. Clean slate.'
+            : `${open.length} open${overdue.length ? ` — ${overdue.length} overdue` : ''}. Keep the loop closed.`
+        }
+      />
 
-        <AddCommitmentForm contacts={contactsForForm} />
+      <AddCommitmentForm contacts={contactsForForm} />
 
-        <CommitmentTracker commitments={enriched} showFilter />
-      </div>
+      <CommitmentTracker commitments={enriched} showFilter />
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import { Geist } from 'next/font/google'
 import './globals.css'
 
@@ -8,14 +8,23 @@ const geistSans = Geist({
 })
 
 export const metadata: Metadata = {
-  title: 'Jarvis',
-  description: 'Relationship intelligence',
+  title: {
+    default: 'AIEA — AI Executive Assistant',
+    template: '%s · AIEA',
+  },
+  description:
+    'AIEA is your AI executive assistant for relationship intelligence, commitments, and the daily briefing.',
+}
+
+export const viewport: Viewport = {
+  themeColor: '#07070b',
+  colorScheme: 'dark',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${geistSans.variable} h-full antialiased`}>
-      <body className="min-h-full bg-white text-zinc-900">{children}</body>
+      <body className="min-h-full bg-[#07070b] text-zinc-100">{children}</body>
     </html>
   )
 }

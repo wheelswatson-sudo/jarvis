@@ -156,23 +156,31 @@ export default async function SettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-3xl px-6 py-10">
-        <header className="mb-10 flex items-center justify-between">
+    <div className="relative min-h-screen overflow-x-clip bg-[#07070b] text-zinc-100">
+      <div className="aiea-aurora-bg" aria-hidden="true" />
+      <div className="aiea-grid pointer-events-none fixed inset-0 z-0 opacity-50" aria-hidden="true" />
+      <div className="relative z-10 mx-auto max-w-3xl px-6 py-12 animate-fade-up">
+        <header className="mb-10 flex flex-wrap items-end justify-between gap-4">
           <div>
             <Link
               href="/"
-              className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+              className="inline-flex items-center gap-1 text-xs text-zinc-500 transition-colors hover:text-zinc-200"
             >
-              ← Back to dashboard
+              <span aria-hidden="true">←</span> Back to dashboard
             </Link>
-            <h1 className="mt-2 text-2xl font-medium tracking-tight">Settings</h1>
-            <p className="mt-1 text-sm text-zinc-400">
+            <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
+              <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400" />
+              Configuration
+            </div>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
+              Settings
+            </h1>
+            <p className="mt-2 text-sm text-zinc-400">
               Choose your model and bring your own API keys.
             </p>
           </div>
           <div className="text-right text-xs text-zinc-500">
-            <div>{user.email}</div>
+            <div className="font-mono">{user.email}</div>
           </div>
         </header>
 

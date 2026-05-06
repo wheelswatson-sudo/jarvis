@@ -37,6 +37,19 @@ type Props = {
   pageSize?: number
 }
 
+function initials(c: Contact): string {
+  const parts = [c.first_name, c.last_name].filter(Boolean) as string[]
+  if (parts.length > 0) {
+    return parts
+      .map((p) => p[0]!)
+      .slice(0, 2)
+      .join('')
+      .toUpperCase()
+  }
+  if (c.email) return c.email[0]!.toUpperCase()
+  return '·'
+}
+
 export function ContactsGrid({
   contacts,
   apolloConnected,
@@ -48,10 +61,27 @@ export function ContactsGrid({
   const [isPending, startTransition] = useTransition()
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return contacts
+    return contacts.filter((c) => {
+      const haystack = [
+        contactName(c),
+        c.email ?? '',
+        c.title ?? '',
+        c.company ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [contacts, query])
 
   const visible = useMemo(
-    () => contacts.slice(0, pageSize),
-    [contacts, pageSize],
+    () => filtered.slice(0, pageSize),
+    [filtered, pageSize],
   )
 
   function toggleSelectMode() {
@@ -117,30 +147,64 @@ export function ContactsGrid({
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          {selectMode ? (
-            <>
-              <span className="tabular-nums">
-                {selected.size} / {MAX_BATCH} selected
-              </span>
-              {selected.size > 0 && (
-                <button
-                  type="button"
-                  onClick={clearSelection}
-                  className="text-zinc-500 underline-offset-2 hover:text-zinc-700 hover:underline"
-                  disabled={isPending}
-                >
-                  clear
-                </button>
-              )}
-            </>
-          ) : (
-            <span className="text-zinc-400">
-              Showing {visible.length} of {contacts.length}
+        <div className="flex flex-1 items-center gap-3">
+          <div className="relative w-full max-w-xs">
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-zinc-500"
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
             </span>
-          )}
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search name, email, company…"
+              className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] py-2 pl-9 pr-3 text-sm text-zinc-100 transition-colors placeholder:text-zinc-500 focus:border-violet-500/50 focus:outline-none"
+            />
+          </div>
+          <div className="text-xs text-zinc-500">
+            {selectMode ? (
+              <>
+                <span className="tabular-nums text-zinc-300">
+                  {selected.size} / {MAX_BATCH}
+                </span>{' '}
+                selected
+                {selected.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearSelection}
+                    className="ml-2 text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+                    disabled={isPending}
+                  >
+                    clear
+                  </button>
+                )}
+              </>
+            ) : (
+              <span className="text-zinc-500">
+                <span className="text-zinc-300">{visible.length}</span> of{' '}
+                {filtered.length}
+                {filtered.length !== contacts.length && (
+                  <span className="text-zinc-600"> · {contacts.length} total</span>
+                )}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {selectMode && (
@@ -153,7 +217,7 @@ export function ContactsGrid({
                   ? 'Connect Apollo in Settings first'
                   : undefined
               }
-              className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-indigo-500/20 transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-lg aiea-cta px-3.5 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               {isPending
                 ? 'Enriching…'
@@ -164,7 +228,7 @@ export function ContactsGrid({
             type="button"
             onClick={toggleSelectMode}
             disabled={isPending}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:border-zinc-400 disabled:opacity-50"
+            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-white/[0.15] hover:text-white disabled:opacity-50"
           >
             {selectMode ? 'Cancel' : 'Select to enrich'}
           </button>
@@ -172,7 +236,7 @@ export function ContactsGrid({
       </div>
 
       {!apolloConnected && selectMode && (
-        <p className="text-xs text-amber-600">
+        <p className="text-xs text-amber-300">
           Apollo isn&apos;t connected.{' '}
           <Link href="/settings" className="underline">
             Add your API key in Settings
@@ -180,37 +244,46 @@ export function ContactsGrid({
           to enable enrichment.
         </p>
       )}
-      {statusMsg && <p className="text-xs text-emerald-600">{statusMsg}</p>}
-      {errorMsg && <p className="text-xs text-rose-600">{errorMsg}</p>}
+      {statusMsg && <p className="text-xs text-emerald-300">{statusMsg}</p>}
+      {errorMsg && <p className="text-xs text-rose-300">{errorMsg}</p>}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 aiea-stagger">
         {visible.map((c) => {
           const isSelected = selected.has(c.id)
           const atLimit = selected.size >= MAX_BATCH && !isSelected
           const cardBase =
-            'group relative rounded-lg border p-4 transition-colors'
+            'group relative overflow-hidden rounded-2xl p-4 transition-all duration-300'
           const cardTone = isSelected
-            ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-500/30'
-            : 'border-zinc-200 bg-white hover:border-zinc-300'
+            ? 'aiea-glass aiea-ring border-violet-500/40 shadow-[0_0_0_1px_rgba(139,92,246,0.5)]'
+            : 'aiea-glass aiea-lift'
           const inner = (
             <>
-              <div className="flex items-start justify-between">
-                <div className="min-w-0">
-                  <div className="truncate font-medium">{contactName(c)}</div>
-                  <div className="truncate text-xs text-zinc-500">
-                    {[c.title, c.company].filter(Boolean).join(' · ') || '—'}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-gradient-to-br from-indigo-500/0 via-violet-500/0 to-fuchsia-500/0 opacity-0 blur-2xl transition-opacity duration-500 group-hover:from-indigo-500/15 group-hover:via-violet-500/10 group-hover:to-fuchsia-500/15 group-hover:opacity-100"
+              />
+              <div className="relative flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <Avatar contact={c} />
+                  <div className="min-w-0">
+                    <div className="truncate font-medium text-zinc-100">
+                      {contactName(c)}
+                    </div>
+                    <div className="truncate text-xs text-zinc-500">
+                      {[c.title, c.company].filter(Boolean).join(' · ') || '—'}
+                    </div>
                   </div>
                 </div>
                 <span
-                  className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${tierColor(c.tier)}`}
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${tierColor(c.tier)}`}
                 >
                   {tierLabel(c.tier)}
                 </span>
               </div>
-              <div className="mt-4">
-                <div className="mb-1 flex items-center justify-between text-xs text-zinc-500">
+              <div className="relative mt-4">
+                <div className="mb-1.5 flex items-center justify-between text-[11px] uppercase tracking-wider text-zinc-500">
                   <span>Half-life</span>
-                  <span className="tabular-nums">
+                  <span className="tabular-nums text-zinc-400">
                     {c.half_life_days != null
                       ? `${c.half_life_days.toFixed(0)}d`
                       : '—'}
@@ -218,9 +291,9 @@ export function ContactsGrid({
                 </div>
                 <HalfLifeGauge days={c.half_life_days} />
               </div>
-              <div className="mt-3 flex items-center justify-between text-xs text-zinc-500">
+              <div className="relative mt-3 flex items-center justify-between text-[11px] text-zinc-500">
                 <SentimentSlope slope={c.sentiment_slope} />
-                <span>
+                <span className="tabular-nums">
                   {c.open_commitments > 0
                     ? `${c.open_commitments} open`
                     : 'no commitments'}
@@ -238,12 +311,12 @@ export function ContactsGrid({
                 className={`${cardBase} ${cardTone} text-left disabled:cursor-not-allowed disabled:opacity-50`}
               >
                 <span
-                  className={`absolute right-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded border ${
+                  className={`absolute right-3 top-3 z-10 inline-flex h-5 w-5 items-center justify-center rounded-md text-[11px] font-semibold transition-all ${
                     isSelected
-                      ? 'border-indigo-500 bg-indigo-500 text-white'
-                      : 'border-zinc-300 bg-white text-transparent'
+                      ? 'bg-gradient-to-br from-indigo-500 to-fuchsia-500 text-white shadow-lg shadow-violet-500/40'
+                      : 'border border-white/[0.08] bg-white/[0.02] text-transparent'
                   }`}
-                  aria-hidden
+                  aria-hidden="true"
                 >
                   ✓
                 </span>
@@ -262,6 +335,23 @@ export function ContactsGrid({
           )
         })}
       </div>
+
+      {visible.length === 0 && (
+        <div className="rounded-2xl aiea-glass p-10 text-center text-sm text-zinc-500">
+          No contacts match &ldquo;{query}&rdquo;.
+        </div>
+      )}
     </div>
+  )
+}
+
+function Avatar({ contact }: { contact: Contact }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500/30 via-violet-500/25 to-fuchsia-500/30 text-[11px] font-semibold text-white ring-1 ring-inset ring-white/10"
+    >
+      {initials(contact)}
+    </span>
   )
 }

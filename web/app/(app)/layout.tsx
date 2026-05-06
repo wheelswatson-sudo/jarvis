@@ -15,10 +15,23 @@ export default async function AppLayout({
   if (!user) redirect('/login')
 
   return (
-    <div className="min-h-screen bg-white">
-      <NavBar email={user.email ?? null} />
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">{children}</main>
-      <Chat />
+    <div className="relative min-h-screen overflow-x-clip bg-[#07070b] text-zinc-100">
+      {/* Ambient aurora — fixed page background */}
+      <div className="aiea-aurora-bg" aria-hidden="true" />
+      <div
+        className="pointer-events-none fixed inset-0 z-0 opacity-60"
+        aria-hidden="true"
+      >
+        <div className="aiea-grid h-full w-full" />
+      </div>
+
+      <div className="relative z-10">
+        <NavBar email={user.email ?? null} />
+        <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6 lg:px-8">
+          {children}
+        </main>
+        <Chat />
+      </div>
     </div>
   )
 }

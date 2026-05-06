@@ -1,6 +1,12 @@
 import Link from 'next/link'
 import { createClient } from '../../lib/supabase/server'
-import { Card, MetricCard, SectionHeader } from '../../components/cards'
+import {
+  Card,
+  EmptyState,
+  MetricCard,
+  PageHeader,
+  SectionHeader,
+} from '../../components/cards'
 import { IntelligencePanel } from '../../components/IntelligencePanel'
 import { ContactsGrid } from '../../components/ContactsGrid'
 import {
@@ -73,12 +79,14 @@ async function loadDashboard() {
 
   const totalLtv = enriched.reduce((sum, c) => sum + (c.ltv_estimate ?? 0), 0)
 
-  // Health = average half-life / 90, clamped 0..1.
   const halfLifes = enriched
     .map((c) => c.half_life_days)
     .filter((v): v is number => typeof v === 'number')
   const networkHealth = halfLifes.length
-    ? Math.max(0, Math.min(1, halfLifes.reduce((s, v) => s + v, 0) / halfLifes.length / 90))
+    ? Math.max(
+        0,
+        Math.min(1, halfLifes.reduce((s, v) => s + v, 0) / halfLifes.length / 90),
+      )
     : null
 
   const cooling = enriched.filter(
@@ -115,54 +123,92 @@ async function loadDashboard() {
   }
 }
 
+function greeting(): string {
+  const h = new Date().getHours()
+  if (h < 5) return 'Up late'
+  if (h < 12) return 'Good morning'
+  if (h < 17) return 'Good afternoon'
+  if (h < 21) return 'Good evening'
+  return 'Working late'
+}
+
 export default async function DashboardPage() {
   const data = await loadDashboard()
   const { metrics, needsAttention, topByLtv, enriched, apolloConnected } = data
   const maxLtv = topByLtv[0]?.ltv_estimate ?? 1
 
   return (
-    <div className="space-y-10">
-      <div>
-        <h1 className="text-2xl font-medium tracking-tight">Dashboard</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          {metrics.activeRelationships} relationships in your network.
-        </p>
+    <div className="space-y-12">
+      {/* Hero */}
+      <div className="animate-fade-up">
+        <PageHeader
+          eyebrow={greeting()}
+          title="Here's what your network needs"
+          subtitle={
+            metrics.activeRelationships > 0
+              ? `Tracking ${metrics.activeRelationships} relationships. ${metrics.openCount} open commitment${metrics.openCount === 1 ? '' : 's'}${metrics.overdueCount ? ` — ${metrics.overdueCount} overdue.` : '.'}`
+              : 'AIEA is ready when you are. Connect Google in Settings to seed your network.'
+          }
+          action={
+            <Link
+              href="/contacts/import"
+              className="inline-flex items-center gap-1.5 rounded-xl aiea-cta px-4 py-2 text-sm font-medium text-white"
+            >
+              <span aria-hidden="true">＋</span> Import contacts
+            </Link>
+          }
+        />
       </div>
 
       {/* Metrics row */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 aiea-stagger">
         <MetricCard
           label="Active relationships"
           value={metrics.activeRelationships.toString()}
+          tone="indigo"
+          icon={<NetworkIcon />}
         />
         <MetricCard
           label="Network health"
           value={formatPercent(metrics.networkHealth)}
-          hint="how actively you maintain connections"
+          hint="how warm your network is"
+          tone="violet"
+          icon={<PulseIcon />}
         />
         <MetricCard
           label="Commitments due"
           value={metrics.openCount.toString()}
-          hint={`${metrics.overdueCount} overdue`}
+          hint={
+            metrics.overdueCount > 0
+              ? `${metrics.overdueCount} overdue`
+              : 'on track'
+          }
+          tone={metrics.overdueCount > 0 ? 'rose' : 'emerald'}
+          icon={<CheckIcon />}
         />
         <MetricCard
           label="Predicted network LTV"
           value={formatCurrency(metrics.totalLtv)}
+          tone="fuchsia"
+          icon={<SparklesIcon />}
         />
       </div>
 
       {/* Intelligence — self-improving insights */}
-      <IntelligencePanel />
+      <div className="animate-fade-up">
+        <IntelligencePanel />
+      </div>
 
       {/* Needs attention */}
-      <section>
+      <section className="animate-fade-up">
         <SectionHeader
+          eyebrow="Triage"
           title="Needs attention"
           subtitle="Where to spend your time first."
         />
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-3 aiea-stagger">
           <AttentionList
-            tone="red"
+            tone="rose"
             title="Overdue commitments"
             empty="Nothing overdue."
             items={needsAttention.overdue.map((c) => ({
@@ -183,7 +229,7 @@ export default async function DashboardPage() {
             }))}
           />
           <AttentionList
-            tone="blue"
+            tone="indigo"
             title="Reactivation opportunities"
             empty="No T1 contacts gone cold."
             items={needsAttention.reactivation.slice(0, 5).map((c) => ({
@@ -197,8 +243,9 @@ export default async function DashboardPage() {
       </section>
 
       {/* LTV ranking */}
-      <section>
+      <section className="animate-fade-up">
         <SectionHeader
+          eyebrow="Compounding"
           title="Relationship LTV ranking"
           subtitle="Top contacts by predicted lifetime value."
         />
@@ -206,26 +253,34 @@ export default async function DashboardPage() {
           {topByLtv.length === 0 ? (
             <p className="text-sm text-zinc-500">No LTV estimates yet.</p>
           ) : (
-            <ul className="space-y-3">
-              {topByLtv.map((c) => {
-                const pct = Math.max(0, Math.min(1, (c.ltv_estimate ?? 0) / maxLtv))
+            <ul className="space-y-4 aiea-stagger">
+              {topByLtv.map((c, idx) => {
+                const pct = Math.max(
+                  0,
+                  Math.min(1, (c.ltv_estimate ?? 0) / maxLtv),
+                )
                 return (
                   <li key={c.id}>
                     <Link
                       href={`/contacts/${c.id}`}
-                      className="group block"
+                      className="group block rounded-lg p-2 -m-2 transition-colors hover:bg-white/[0.025]"
                     >
-                      <div className="flex items-baseline justify-between text-sm">
-                        <span className="font-medium group-hover:underline">
-                          {contactName(c)}
+                      <div className="flex items-baseline justify-between gap-3 text-sm">
+                        <span className="flex items-baseline gap-3 truncate">
+                          <span className="w-5 shrink-0 font-mono text-[11px] tabular-nums text-zinc-600">
+                            {(idx + 1).toString().padStart(2, '0')}
+                          </span>
+                          <span className="truncate font-medium text-zinc-100 group-hover:text-white">
+                            {contactName(c)}
+                          </span>
                         </span>
-                        <span className="tabular-nums text-zinc-500">
+                        <span className="shrink-0 tabular-nums text-zinc-400 group-hover:text-zinc-200">
                           {formatCurrency(c.ltv_estimate)}
                         </span>
                       </div>
-                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100">
+                      <div className="mt-2 ml-8 h-1.5 w-[calc(100%-2rem)] overflow-hidden rounded-full bg-white/[0.04]">
                         <div
-                          className="h-full bg-zinc-900"
+                          className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 shadow-[0_0_8px_rgba(139,92,246,0.45)] transition-[width] duration-700"
                           style={{ width: `${pct * 100}%` }}
                         />
                       </div>
@@ -239,25 +294,34 @@ export default async function DashboardPage() {
       </section>
 
       {/* Contact grid */}
-      <section>
+      <section className="animate-fade-up">
         <SectionHeader
-          title="Contacts"
+          eyebrow="People"
+          title="Your network"
           subtitle="Click a card to drill in."
           action={
             <Link
               href="/contacts/import"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-3.5 py-1.5 text-sm font-medium text-white shadow-sm shadow-violet-500/20 transition-opacity hover:opacity-90"
+              className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-3.5 py-1.5 text-sm font-medium text-white"
             >
-              <span className="text-base leading-none">+</span> Import contacts
+              <span aria-hidden="true">＋</span> Import
             </Link>
           }
         />
         {enriched.length === 0 ? (
-          <Card>
-            <p className="text-sm text-zinc-500">
-              No contacts yet. The sync scripts will populate this.
-            </p>
-          </Card>
+          <EmptyState
+            icon={<NetworkIcon />}
+            title="No contacts yet"
+            body="The sync scripts populate this. Connect Google in Settings, or import a CSV to get started."
+            action={
+              <Link
+                href="/settings"
+                className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-4 py-2 text-sm font-medium text-white"
+              >
+                Open settings →
+              </Link>
+            }
+          />
         ) : (
           <ContactsGrid
             contacts={enriched}
@@ -283,37 +347,52 @@ function AttentionList({
   empty,
 }: {
   title: string
-  tone: 'red' | 'amber' | 'blue'
+  tone: 'rose' | 'amber' | 'indigo'
   items: AttentionItem[]
   empty: string
 }) {
   const dot =
-    tone === 'red' ? 'bg-red-500' : tone === 'amber' ? 'bg-amber-500' : 'bg-blue-500'
+    tone === 'rose'
+      ? 'bg-rose-400 shadow-rose-500/50'
+      : tone === 'amber'
+        ? 'bg-amber-400 shadow-amber-500/50'
+        : 'bg-indigo-400 shadow-indigo-500/50'
   return (
     <Card>
-      <div className="mb-3 flex items-center gap-2">
-        <span className={`h-2 w-2 rounded-full ${dot}`} />
-        <h3 className="text-sm font-medium">{title}</h3>
+      <div className="mb-4 flex items-center gap-2">
+        <span
+          className={`inline-block h-2 w-2 rounded-full shadow-[0_0_8px_currentColor] ${dot}`}
+          aria-hidden="true"
+        />
+        <h3 className="text-sm font-medium text-zinc-200">{title}</h3>
+        <span className="ml-auto text-[10px] tabular-nums text-zinc-600">
+          {items.length}
+        </span>
       </div>
       {items.length === 0 ? (
-        <p className="text-sm text-zinc-400">{empty}</p>
+        <p className="text-sm text-zinc-500">{empty}</p>
       ) : (
         <ul className="space-y-3">
           {items.map((item) => {
             const inner = (
               <>
-                <div className="truncate text-sm font-medium">{item.primary}</div>
+                <div className="truncate text-sm font-medium text-zinc-100">
+                  {item.primary}
+                </div>
                 <div className="text-xs text-zinc-500">{item.secondary}</div>
               </>
             )
             return (
               <li key={item.key}>
                 {item.href ? (
-                  <Link href={item.href} className="block hover:underline">
+                  <Link
+                    href={item.href}
+                    className="-mx-2 block rounded-md px-2 py-1.5 transition-colors hover:bg-white/[0.025]"
+                  >
                     {inner}
                   </Link>
                 ) : (
-                  <div>{inner}</div>
+                  <div className="px-0">{inner}</div>
                 )}
               </li>
             )
@@ -321,5 +400,80 @@ function AttentionList({
         </ul>
       )}
     </Card>
+  )
+}
+
+function NetworkIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="2.5" />
+      <circle cx="5" cy="6" r="1.8" />
+      <circle cx="19" cy="6" r="1.8" />
+      <circle cx="5" cy="18" r="1.8" />
+      <circle cx="19" cy="18" r="1.8" />
+      <path d="M12 12L5 6m7 6l7-6m-7 6l-7 6m7-6l7 6" />
+    </svg>
+  )
+}
+function PulseIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 12h4l2-6 4 12 2-6h6" />
+    </svg>
+  )
+}
+function CheckIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m4 12 5 5L20 6" />
+    </svg>
+  )
+}
+function SparklesIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z" />
+      <path d="M19 16l.6 1.6L21 18l-1.4.4L19 20l-.6-1.6L17 18l1.4-.4z" />
+    </svg>
   )
 }

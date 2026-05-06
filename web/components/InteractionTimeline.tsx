@@ -1,13 +1,13 @@
 import type { Interaction } from '../lib/types'
 import { formatRelative } from '../lib/format'
 
-const TYPE_DOT: Record<string, string> = {
-  call: 'bg-indigo-400',
-  meeting: 'bg-violet-400',
-  email: 'bg-fuchsia-400',
-  text: 'bg-pink-400',
-  'in-person': 'bg-emerald-400',
-  other: 'bg-zinc-500',
+const TYPE_TONE: Record<string, { dot: string; text: string }> = {
+  call: { dot: 'bg-indigo-400', text: 'text-indigo-300' },
+  meeting: { dot: 'bg-violet-400', text: 'text-violet-300' },
+  email: { dot: 'bg-fuchsia-400', text: 'text-fuchsia-300' },
+  text: { dot: 'bg-pink-400', text: 'text-pink-300' },
+  'in-person': { dot: 'bg-emerald-400', text: 'text-emerald-300' },
+  other: { dot: 'bg-zinc-500', text: 'text-zinc-400' },
 }
 
 export function InteractionTimeline({
@@ -18,35 +18,45 @@ export function InteractionTimeline({
   if (interactions.length === 0) {
     return (
       <p className="text-sm text-zinc-500">
-        No interactions logged yet. Use “Log interaction” above to start the
-        timeline.
+        No interactions logged yet. Use &ldquo;Log interaction&rdquo; above to
+        start the timeline.
       </p>
     )
   }
   return (
-    <ul className="space-y-5">
+    <ul className="relative space-y-6 pl-1">
+      {/* Vertical timeline rail */}
+      <span
+        aria-hidden="true"
+        className="absolute left-[5px] top-2 bottom-2 w-px bg-gradient-to-b from-violet-500/50 via-white/[0.05] to-transparent"
+      />
       {interactions.map((it) => {
         const t = it.type ?? it.channel ?? 'other'
-        const dot = TYPE_DOT[t] ?? TYPE_DOT.other
+        const tone = TYPE_TONE[t] ?? TYPE_TONE.other
         return (
-          <li key={it.id} className="relative pl-6">
+          <li key={it.id} className="relative pl-7">
             <span
-              className={`absolute left-0 top-1.5 h-2.5 w-2.5 rounded-full ${dot}`}
+              className={`absolute left-0 top-1.5 h-2.5 w-2.5 rounded-full ring-4 ring-[#07070b] shadow-[0_0_10px_currentColor] ${tone.dot}`}
+              aria-hidden="true"
             />
-            <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-zinc-500">
-              <span className="font-medium uppercase tracking-wide text-zinc-400">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 text-[10px] uppercase tracking-[0.16em]">
+              <span className={`font-medium ${tone.text}`}>
                 {t}
                 {it.direction ? ` · ${it.direction}` : ''}
               </span>
-              <span>{formatRelative(it.occurred_at)}</span>
+              <span className="text-zinc-500">{formatRelative(it.occurred_at)}</span>
             </div>
             {it.summary && (
-              <p className="mt-1 text-sm text-zinc-200">{it.summary}</p>
+              <p className="mt-1.5 text-sm leading-relaxed text-zinc-200">
+                {it.summary}
+              </p>
             )}
             {it.key_points && it.key_points.length > 0 && (
               <ul className="mt-2 space-y-0.5 text-xs text-zinc-400">
                 {it.key_points.slice(0, 5).map((kp, i) => (
-                  <li key={i}>· {kp}</li>
+                  <li key={i} className="leading-relaxed">
+                    <span className="text-zinc-600">·</span> {kp}
+                  </li>
                 ))}
               </ul>
             )}
@@ -55,13 +65,14 @@ export function InteractionTimeline({
                 {it.action_items.map((a, i) => (
                   <span
                     key={i}
-                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
+                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ring-1 ring-inset ${
                       a.owner === 'me'
-                        ? 'border-violet-500/40 bg-violet-500/10 text-violet-200'
-                        : 'border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-200'
+                        ? 'bg-indigo-500/10 text-indigo-200 ring-indigo-500/30'
+                        : 'bg-fuchsia-500/10 text-fuchsia-200 ring-fuchsia-500/30'
                     }`}
                   >
-                    {a.owner === 'me' ? 'you' : 'they'} · {a.description.slice(0, 60)}
+                    {a.owner === 'me' ? 'you' : 'they'} ·{' '}
+                    {a.description.slice(0, 60)}
                   </span>
                 ))}
               </div>

@@ -50,29 +50,29 @@ export function CommitmentRow({
   return (
     <li className="flex items-center justify-between gap-4 py-3">
       <div className="min-w-0">
-        <div className="truncate text-sm">
+        <div className="truncate text-sm text-zinc-100">
           {commitment.description}
           {commitment.status === 'done' && (
-            <span className="ml-2 text-xs text-emerald-600">✓ done</span>
+            <span className="ml-2 text-xs text-emerald-300">✓ done</span>
           )}
           {commitment.status === 'snoozed' && (
             <span className="ml-2 text-xs text-zinc-500">snoozed</span>
           )}
           {commitment.status === 'cancelled' && (
-            <span className="ml-2 text-xs text-zinc-400">cancelled</span>
+            <span className="ml-2 text-xs text-zinc-600">cancelled</span>
           )}
         </div>
         <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-500">
           {commitment.contact_id && commitment.contact_name && (
             <Link
               href={`/contacts/${commitment.contact_id}`}
-              className="hover:underline"
+              className="text-violet-300 hover:underline"
             >
               {commitment.contact_name}
             </Link>
           )}
-          <span>·</span>
-          <span className={overdue ? 'text-red-600' : ''}>
+          <span aria-hidden="true">·</span>
+          <span className={overdue ? 'text-rose-300' : ''}>
             due {formatDate(commitment.due_at)}
           </span>
         </div>
@@ -88,7 +88,7 @@ export function CommitmentRow({
               })
             }
             disabled={pending}
-            className="rounded-md bg-zinc-900 px-3 py-1 text-xs text-white disabled:opacity-50"
+            className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
           >
             Done
           </button>
@@ -100,7 +100,7 @@ export function CommitmentRow({
               update({ status: 'snoozed', due_at: next.toISOString() })
             }}
             disabled={pending}
-            className="rounded-md border border-zinc-200 px-3 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+            className="rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-1 text-xs text-zinc-300 transition-colors hover:border-white/[0.18] disabled:opacity-50"
           >
             Snooze
           </button>
@@ -108,7 +108,7 @@ export function CommitmentRow({
             type="button"
             onClick={() => update({ status: 'cancelled' })}
             disabled={pending}
-            className="rounded-md border border-zinc-200 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-50 disabled:opacity-50"
+            className="rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-1 text-xs text-zinc-500 transition-colors hover:border-white/[0.18] hover:text-zinc-300 disabled:opacity-50"
           >
             Cancel
           </button>

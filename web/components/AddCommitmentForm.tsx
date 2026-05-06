@@ -56,28 +56,25 @@ export function AddCommitmentForm({
   }
 
   return (
-    <form
-      onSubmit={submit}
-      className="rounded-lg border border-zinc-700 bg-zinc-900/60 p-4"
-    >
+    <form onSubmit={submit} className="rounded-2xl aiea-glass p-4">
       <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto_auto]">
         <input
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="New commitment…"
           required
-          className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-violet-500"
+          className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none transition-colors focus:border-violet-500/50"
         />
         <input
           type="date"
           value={dueAt}
           onChange={(e) => setDueAt(e.target.value)}
-          className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
+          className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
         />
         <select
           value={contactId}
           onChange={(e) => setContactId(e.target.value)}
-          className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-violet-500"
+          className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
         >
           <option value="">No contact</option>
           {contacts.map((c) => (
@@ -89,14 +86,12 @@ export function AddCommitmentForm({
         <button
           type="submit"
           disabled={pending || !description.trim()}
-          className="rounded-md bg-gradient-to-r from-indigo-500 to-violet-500 px-4 py-2 text-sm font-medium text-white shadow-sm shadow-violet-500/20 disabled:opacity-50"
+          className="rounded-lg aiea-cta px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
         >
           Add
         </button>
       </div>
-      {error && (
-        <p className="mt-3 text-sm text-rose-400">{error}</p>
-      )}
+      {error && <p className="mt-3 text-sm text-rose-300">{error}</p>}
     </form>
   )
 }

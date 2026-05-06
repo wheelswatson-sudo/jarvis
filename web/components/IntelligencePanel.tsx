@@ -103,15 +103,19 @@ export function IntelligencePanel() {
   })()
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-white/5 bg-zinc-950 p-6 shadow-2xl shadow-black/40">
-      <header className="mb-5 flex items-start justify-between gap-3">
+    <section className="relative overflow-hidden rounded-2xl aiea-glass-strong p-6 shadow-2xl shadow-violet-500/5">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 bg-gradient-to-br from-indigo-500/[0.06] via-violet-500/[0.04] to-fuchsia-500/[0.06]"
+      />
+      <header className="relative mb-5 flex items-start justify-between gap-3">
         <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400" />
+          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
+            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 animate-pulse" />
             Intelligence
           </div>
-          <h2 className="mt-3 bg-gradient-to-r from-indigo-200 via-violet-200 to-fuchsia-200 bg-clip-text text-xl font-semibold tracking-tight text-transparent">
-            What the system is noticing
+          <h2 className="mt-3 text-xl font-semibold tracking-tight aiea-gradient-text">
+            What AIEA is noticing
           </h2>
           <p className="mt-1 text-sm text-zinc-400">
             Patterns learned from your activity. Tap to act, dismiss to teach
@@ -122,18 +126,19 @@ export function IntelligencePanel() {
           type="button"
           onClick={runAnalysis}
           disabled={analyzing}
-          className="shrink-0 rounded-md border border-white/10 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-violet-400/50 hover:text-white disabled:opacity-40"
+          className="shrink-0 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-violet-400/40 hover:text-white disabled:opacity-40"
         >
           {analyzing ? 'Analyzing…' : 'Refresh'}
         </button>
       </header>
 
+      <div className="relative">
       {mode === 'loading' && <SkeletonRows />}
       {mode === 'error' && <ErrorState message={error ?? 'Unknown'} />}
       {mode === 'learning' && <LearningState eventsCount={eventsCount ?? 0} />}
       {mode === 'empty' && <EmptyState onAnalyze={runAnalysis} />}
       {mode === 'ready' && insights && (
-        <ul className="space-y-3">
+        <ul className="space-y-3 aiea-stagger">
           {insights.map((i) => (
             <InsightCard
               key={i.id}
@@ -146,6 +151,7 @@ export function IntelligencePanel() {
           ))}
         </ul>
       )}
+      </div>
     </section>
   )
 }

@@ -1,8 +1,24 @@
 @import "tailwindcss";
 
+/* ─────────────────────────────────────────────────────────────────────────
+   AIEA design tokens — dark aurora aesthetic
+   ───────────────────────────────────────────────────────────────────────── */
+
 :root {
-  --background: #ffffff;
-  --foreground: #18181b;
+  --background: #07070b;
+  --background-soft: #0c0c12;
+  --foreground: #fafafa;
+  --muted: #a1a1aa;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.10);
+
+  --accent-indigo: #6366f1;
+  --accent-violet: #8b5cf6;
+  --accent-fuchsia: #d946ef;
+
+  --shadow-glow:
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 30px 60px -30px rgba(99, 102, 241, 0.25);
 }
 
 @theme inline {
@@ -16,6 +32,278 @@ html, body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11";
+  text-rendering: optimizeLegibility;
 }
 
-* { border-color: rgb(228 228 231); } /* zinc-200 */
+* { border-color: var(--border); }
+
+/* Selection */
+::selection {
+  background: rgba(139, 92, 246, 0.35);
+  color: white;
+}
+
+/* Scrollbars — subtle, dark, modern */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* Form controls — dark by default */
+input, textarea, select {
+  color-scheme: dark;
+}
+input::placeholder,
+textarea::placeholder {
+  color: rgba(244, 244, 245, 0.35);
+}
+
+/* Focus ring — violet accent */
+*:focus-visible {
+  outline: 2px solid rgba(139, 92, 246, 0.55);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Animations
+   ───────────────────────────────────────────────────────────────────────── */
+
+@keyframes aiea-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes aiea-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes aiea-pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.45); }
+  50%      { box-shadow: 0 0 0 10px rgba(139, 92, 246, 0); }
+}
+@keyframes aiea-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes aiea-aurora {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  33%      { transform: translate3d(20px, -30px, 0) rotate(2deg); }
+  66%      { transform: translate3d(-20px, 20px, 0) rotate(-2deg); }
+}
+@keyframes aiea-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+@keyframes aiea-spin-slow {
+  to { transform: rotate(360deg); }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Utility classes
+   ───────────────────────────────────────────────────────────────────────── */
+
+.animate-fade-up { animation: aiea-fade-up 480ms cubic-bezier(0.21, 0.97, 0.56, 0.99) both; }
+.animate-fade-in { animation: aiea-fade-in 480ms ease-out both; }
+.animate-aurora  { animation: aiea-aurora 22s ease-in-out infinite; }
+.animate-float   { animation: aiea-float 4s ease-in-out infinite; }
+.animate-pulse-glow { animation: aiea-pulse-glow 2.4s ease-out infinite; }
+
+/* Stagger helpers for lists (apply with class plus inline delay) */
+.aiea-stagger > * { animation: aiea-fade-up 520ms cubic-bezier(0.21, 0.97, 0.56, 0.99) both; }
+.aiea-stagger > *:nth-child(1) { animation-delay: 30ms; }
+.aiea-stagger > *:nth-child(2) { animation-delay: 80ms; }
+.aiea-stagger > *:nth-child(3) { animation-delay: 130ms; }
+.aiea-stagger > *:nth-child(4) { animation-delay: 180ms; }
+.aiea-stagger > *:nth-child(5) { animation-delay: 230ms; }
+.aiea-stagger > *:nth-child(6) { animation-delay: 280ms; }
+.aiea-stagger > *:nth-child(7) { animation-delay: 330ms; }
+.aiea-stagger > *:nth-child(8) { animation-delay: 380ms; }
+.aiea-stagger > *:nth-child(n+9) { animation-delay: 430ms; }
+
+/* Shimmer skeleton */
+.aiea-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.10) 50%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  background-size: 200% 100%;
+  animation: aiea-shimmer 1.6s ease-in-out infinite;
+}
+
+/* Glass-morphism card surface */
+.aiea-glass {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.015) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+.aiea-glass-strong {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.02) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+}
+
+/* Radiant border — gradient outline that survives rounded corners */
+.aiea-ring {
+  position: relative;
+  isolation: isolate;
+}
+.aiea-ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.45), rgba(217, 70, 239, 0.25) 50%, rgba(255, 255, 255, 0) 80%);
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+/* Card hover lift */
+.aiea-lift {
+  transition:
+    transform 240ms cubic-bezier(0.21, 0.97, 0.56, 0.99),
+    border-color 240ms ease,
+    box-shadow 240ms ease;
+}
+.aiea-lift:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 24px 48px -24px rgba(99, 102, 241, 0.45);
+}
+
+/* Gradient text */
+.aiea-gradient-text {
+  background: linear-gradient(135deg, #c7d2fe 0%, #ddd6fe 40%, #f5d0fe 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.aiea-gradient-text-vivid {
+  background: linear-gradient(135deg, #818cf8 0%, #a78bfa 50%, #e879f9 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Primary action gradient — used for CTAs */
+.aiea-cta {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+  background-size: 200% 200%;
+  background-position: 0% 50%;
+  transition:
+    background-position 480ms ease,
+    transform 200ms ease,
+    box-shadow 240ms ease;
+  box-shadow:
+    0 8px 24px -10px rgba(139, 92, 246, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+}
+.aiea-cta:hover:not(:disabled) {
+  background-position: 100% 50%;
+  box-shadow:
+    0 16px 32px -12px rgba(139, 92, 246, 0.7),
+    0 0 0 1px rgba(255, 255, 255, 0.12) inset;
+}
+.aiea-cta:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+/* Aurora background — page-level ambient orbs */
+.aiea-aurora-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.aiea-aurora-bg::before,
+.aiea-aurora-bg::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  opacity: 0.55;
+}
+.aiea-aurora-bg::before {
+  width: 60vw;
+  height: 60vw;
+  top: -20vw;
+  left: -10vw;
+  background: radial-gradient(circle at 30% 30%, rgba(99, 102, 241, 0.45), transparent 70%);
+  animation: aiea-aurora 24s ease-in-out infinite;
+}
+.aiea-aurora-bg::after {
+  width: 50vw;
+  height: 50vw;
+  bottom: -15vw;
+  right: -10vw;
+  background: radial-gradient(circle at 60% 40%, rgba(217, 70, 239, 0.30), transparent 70%);
+  animation: aiea-aurora 32s ease-in-out infinite reverse;
+}
+
+/* Grid dot field — subtle texture */
+.aiea-grid {
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.045) 1px, transparent 0);
+  background-size: 28px 28px;
+}
+
+/* Nav active pill */
+.aiea-nav-pill {
+  position: relative;
+}
+.aiea-nav-pill::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -10px;
+  height: 2px;
+  width: 0;
+  background: linear-gradient(90deg, #6366f1, #d946ef);
+  border-radius: 2px;
+  transform: translateX(-50%);
+  transition: width 260ms ease;
+}
+.aiea-nav-pill[data-active="true"]::after {
+  width: 24px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

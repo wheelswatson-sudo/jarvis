@@ -37,10 +37,10 @@ export function TierSelector({ contact }: { contact: Contact }) {
           type="button"
           onClick={() => update(t)}
           disabled={pending}
-          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
             t === tier
               ? tierColor(t)
-              : 'bg-zinc-50 text-zinc-500 hover:bg-zinc-100'
+              : 'bg-white/[0.03] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200 ring-1 ring-inset ring-white/[0.06]'
           }`}
         >
           T{t}
@@ -89,19 +89,19 @@ export function TagEditor({ contact }: { contact: Contact }) {
     <div>
       <div className="flex flex-wrap gap-1.5">
         {tags.length === 0 && (
-          <span className="text-sm text-zinc-400">No tags.</span>
+          <span className="text-sm text-zinc-500">No tags.</span>
         )}
         {tags.map((t) => (
           <span
             key={t}
-            className="inline-flex items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-xs text-zinc-700"
+            className="inline-flex items-center gap-1 rounded-full bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-200 ring-1 ring-inset ring-white/[0.08]"
           >
             {t}
             <button
               type="button"
               onClick={() => remove(t)}
               disabled={pending}
-              className="text-zinc-400 hover:text-zinc-700"
+              className="text-zinc-500 transition-colors hover:text-rose-300"
               aria-label={`Remove ${t}`}
             >
               ×
@@ -114,12 +114,12 @@ export function TagEditor({ contact }: { contact: Contact }) {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Add tag…"
-          className="flex-1 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-zinc-400"
+          className="flex-1 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none transition-colors focus:border-violet-500/50"
         />
         <button
           type="submit"
           disabled={pending || !draft.trim()}
-          className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+          className="rounded-lg aiea-cta px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
         >
           Add
         </button>

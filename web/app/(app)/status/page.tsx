@@ -78,14 +78,14 @@ export default function StatusPage() {
   }, [])
 
   return (
-    <div className="-mx-4 -my-8 min-h-[calc(100vh-3.5rem)] bg-zinc-950 px-4 py-10 sm:-mx-6 sm:px-6">
+    <div className="space-y-8 animate-fade-up">
       <div className="mx-auto max-w-4xl space-y-8">
         <header>
-          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400" />
-            System Status
+          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
+            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 animate-pulse" />
+            System status
           </div>
-          <h1 className="mt-3 bg-gradient-to-r from-indigo-200 via-violet-200 to-fuchsia-200 bg-clip-text text-3xl font-semibold tracking-tight text-transparent">
+          <h1 className="mt-3 text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
             Status
           </h1>
           <p className="mt-2 text-sm text-zinc-400">
