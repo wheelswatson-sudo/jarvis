@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
 import { apiError } from '../../../lib/api-errors'
 import { trackEvent } from '../../../lib/events'
+import { bumpLastInteractionAt } from '../../../lib/google/gmail-sync'
 import type { ActionItem, InteractionType } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -169,8 +170,17 @@ export async function POST(req: Request) {
     await supabase.from('commitments').insert(commitmentRows)
   }
 
-  // Update contact rollups: last_interaction_at, next_follow_up if new is sooner.
-  const updates: Record<string, unknown> = { last_interaction_at: occurredAt }
+  // Bump last_interaction_at via the freshness-gated helper so a back-
+  // dated interaction (user logging an old call) can't regress the field.
+  // Same single-writer contract as gmail-sync / imessage-sync.
+  await bumpLastInteractionAt(
+    supabase,
+    user.id,
+    new Map([[contactId, occurredAt]]),
+  )
+
+  // next_follow_up is independent of the freshness gate — only update when
+  // the new follow-up is sooner than what's already there.
   if (followUp) {
     const { data: existing } = await supabase
       .from('contacts')
@@ -180,9 +190,13 @@ export async function POST(req: Request) {
     const cur = existing?.next_follow_up
       ? new Date(existing.next_follow_up).getTime()
       : Infinity
-    if (new Date(followUp).getTime() < cur) updates.next_follow_up = followUp
+    if (new Date(followUp).getTime() < cur) {
+      await supabase
+        .from('contacts')
+        .update({ next_follow_up: followUp })
+        .eq('id', contactId)
+    }
   }
-  await supabase.from('contacts').update(updates).eq('id', contactId)
 
   void trackEvent({
     userId: user.id,

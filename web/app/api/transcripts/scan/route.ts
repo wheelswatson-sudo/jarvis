@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { apiError } from '../../../../lib/api-errors'
 import { trackEvent } from '../../../../lib/events'
+import { bumpLastInteractionAt } from '../../../../lib/google/gmail-sync'
 import type { ActionItem, Contact, InteractionType } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -321,10 +322,14 @@ export async function POST(req: Request) {
     )
   }
 
-  await supabase
-    .from('contacts')
-    .update({ last_interaction_at: occurredAt })
-    .eq('id', overrideContactId)
+  // Bump via the freshness-gated helper. A re-scan of an old transcript
+  // (or a transcript with an older `occurred_at` than recent activity)
+  // can't regress the field.
+  await bumpLastInteractionAt(
+    supabase,
+    user.id,
+    new Map([[overrideContactId, occurredAt]]),
+  )
 
   void trackEvent({
     userId: user.id,
