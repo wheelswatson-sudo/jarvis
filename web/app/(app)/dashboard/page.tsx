@@ -7,6 +7,9 @@ import {
   CommitmentTracker,
   type EnrichedCommitment,
 } from '../../../components/CommitmentTracker'
+import { EscalatedCommitments } from '../../../components/EscalatedCommitments'
+import { UpcomingMeetingsCards } from '../../../components/UpcomingMeetingsCards'
+import { loadUpcomingMeetings } from '../../../lib/contacts/upcoming-meetings'
 import { computeHealth } from '../../../components/RelationshipHealth'
 import { contactName } from '../../../lib/format'
 import type { Commitment, Contact, Interaction } from '../../../lib/types'
@@ -21,7 +24,11 @@ export default async function DashboardPage() {
     Date.now() - 30 * 24 * 60 * 60 * 1000,
   ).toISOString()
 
-  const [contactsRes, commitmentsRes, interactionsRes, recentRes] =
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  const [contactsRes, commitmentsRes, interactionsRes, recentRes, meetings] =
     await Promise.all([
       supabase.from('contacts').select('*').limit(2000),
       supabase.from('commitments').select('*'),
@@ -36,6 +43,9 @@ export default async function DashboardPage() {
         .select('id, contact_id, summary, occurred_at')
         .order('occurred_at', { ascending: false })
         .limit(60),
+      user
+        ? loadUpcomingMeetings(supabase, user.id)
+        : Promise.resolve({ meetings: [], calendarConnected: false }),
     ])
 
   const contacts = (contactsRes.data ?? []) as Contact[]
@@ -179,6 +189,17 @@ export default async function DashboardPage() {
 
         <section>
           <SectionHeader
+            title="Today's meetings"
+            subtitle="Upcoming in the next 24 hours, with relationship context."
+          />
+          <UpcomingMeetingsCards
+            meetings={meetings.meetings}
+            calendarConnected={meetings.calendarConnected}
+          />
+        </section>
+
+        <section>
+          <SectionHeader
             title="Needs your attention"
             subtitle="Decay alerts, overdue items, and follow-ups due now."
           />
@@ -287,6 +308,14 @@ export default async function DashboardPage() {
             </DarkCard>
           </section>
         </div>
+
+        <section>
+          <SectionHeader
+            title="Commitments needing action"
+            subtitle="Within 3 days of due, or overdue. Sorted by urgency."
+          />
+          <EscalatedCommitments commitments={enrichedCommitments} />
+        </section>
 
         <section>
           <SectionHeader

@@ -7,6 +7,7 @@ import { QuickAddInteraction } from '../../../../components/QuickAddInteraction'
 import { InteractionTimeline } from '../../../../components/InteractionTimeline'
 import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
+import { CadenceBadge } from '../../../../components/CadenceBadge'
 import { Card, SectionHeader } from '../../../../components/cards'
 import {
   contactName,
@@ -230,6 +231,12 @@ export default async function ContactDetailPage({
                   Last contact {formatRelative(lastContactAt)}
                 </p>
               )}
+              <div className="mt-3">
+                <CadenceBadge
+                  tier={contact.tier}
+                  lastInteractionAt={lastContactAt}
+                />
+              </div>
             </div>
           </div>
           <QuickAddInteraction

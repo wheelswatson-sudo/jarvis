@@ -4,8 +4,12 @@ import Link from 'next/link'
 import { useMemo, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { HalfLifeGauge, SentimentSlope } from './Gauge'
+import { CadenceBadge } from './CadenceBadge'
 import { contactName, tierColor, tierLabel } from '../lib/format'
+import { getCadenceInfo } from '../lib/contacts/cadence'
 import type { Contact } from '../lib/types'
+
+type SortMode = 'default' | 'overdue'
 
 const MAX_BATCH = 10
 
@@ -62,22 +66,63 @@ export function ContactsGrid({
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [sortMode, setSortMode] = useState<SortMode>('default')
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return contacts
-    return contacts.filter((c) => {
-      const haystack = [
-        contactName(c),
-        c.email ?? '',
-        c.title ?? '',
-        c.company ?? '',
-      ]
-        .join(' ')
-        .toLowerCase()
-      return haystack.includes(q)
-    })
-  }, [contacts, query])
+    let list = q
+      ? contacts.filter((c) => {
+          const haystack = [
+            contactName(c),
+            c.email ?? '',
+            c.title ?? '',
+            c.company ?? '',
+          ]
+            .join(' ')
+            .toLowerCase()
+          return haystack.includes(q)
+        })
+      : contacts
+
+    if (sortMode === 'overdue') {
+      const now = Date.now()
+      const scored = list
+        .map((c) => {
+          const info = getCadenceInfo(c.tier, c.last_interaction_at, now)
+          // Surface only contacts that are approaching or overdue, with a known
+          // tier — "default" mode keeps the LTV-based ordering for everyone else.
+          if (info.state !== 'overdue' && info.state !== 'approaching') {
+            return null
+          }
+          // Higher score = more urgent. Overdue T1 outranks overdue T3.
+          const overshoot =
+            info.daysSinceLast == null || info.cadenceDays == null
+              ? 0
+              : info.daysSinceLast - info.cadenceDays
+          const tierWeight = c.tier === 1 ? 1000 : c.tier === 2 ? 100 : 10
+          const score =
+            (info.state === 'overdue' ? 10000 : 0) + tierWeight + overshoot
+          return { c, score }
+        })
+        .filter((x): x is { c: ContactWithStats; score: number } => x !== null)
+        .sort((a, b) => b.score - a.score)
+        .map((x) => x.c)
+      list = scored
+    }
+
+    return list
+  }, [contacts, query, sortMode])
+
+  // Count contacts the cadence engine couldn't evaluate (no tier set).
+  // Surfaced in the empty-state copy so the user knows we silently dropped
+  // them rather than confidently claiming "everyone is on cadence".
+  const untieredCount = useMemo(
+    () =>
+      sortMode === 'overdue'
+        ? contacts.filter((c) => c.tier == null).length
+        : 0,
+    [contacts, sortMode],
+  )
 
   const visible = useMemo(
     () => filtered.slice(0, pageSize),
@@ -207,6 +252,30 @@ export function ContactsGrid({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <div className="flex gap-1 rounded-lg border border-white/[0.06] bg-white/[0.02] p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setSortMode('default')}
+              className={`rounded-md px-2.5 py-1 transition-all ${
+                sortMode === 'default'
+                  ? 'bg-gradient-to-br from-indigo-500/20 to-fuchsia-500/15 text-white ring-1 ring-inset ring-violet-500/30'
+                  : 'text-zinc-400 hover:text-zinc-100'
+              }`}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => setSortMode('overdue')}
+              className={`rounded-md px-2.5 py-1 transition-all ${
+                sortMode === 'overdue'
+                  ? 'bg-gradient-to-br from-rose-500/20 to-fuchsia-500/15 text-white ring-1 ring-inset ring-rose-500/30'
+                  : 'text-zinc-400 hover:text-zinc-100'
+              }`}
+            >
+              Overdue for contact
+            </button>
+          </div>
           {selectMode && (
             <button
               type="button"
@@ -299,6 +368,13 @@ export function ContactsGrid({
                     : 'no commitments'}
                 </span>
               </div>
+              <div className="relative mt-2">
+                <CadenceBadge
+                  tier={c.tier}
+                  lastInteractionAt={c.last_interaction_at}
+                  variant="compact"
+                />
+              </div>
             </>
           )
           if (selectMode) {
@@ -338,7 +414,21 @@ export function ContactsGrid({
 
       {visible.length === 0 && (
         <div className="rounded-2xl aiea-glass p-10 text-center text-sm text-zinc-500">
-          No contacts match &ldquo;{query}&rdquo;.
+          {sortMode === 'overdue' ? (
+            <>
+              <div>Nobody is overdue for contact. Network is on cadence.</div>
+              {untieredCount > 0 && (
+                <div className="mt-2 text-xs text-zinc-600">
+                  {untieredCount} contact{untieredCount === 1 ? '' : 's'} have
+                  no tier set — set tiers to evaluate cadence.
+                </div>
+              )}
+            </>
+          ) : query ? (
+            `No contacts match "${query}".`
+          ) : (
+            'No contacts to show.'
+          )}
         </div>
       )}
     </div>
