@@ -1,113 +1,32 @@
 import { NextResponse, type NextRequest } from 'next/server'
-import { google, type gmail_v1 } from 'googleapis'
 import { createClient } from '../../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../../lib/supabase/service'
 import { apiError } from '../../../../../lib/api-errors'
 import {
-  buildOAuthClient,
   getValidAccessTokenForUser,
   googleApiError,
 } from '../../../../../lib/google/oauth'
 import {
-  bumpLastInteractionAt,
+  fetchAndStoreGmail,
   extractAndStoreCommitments,
-  type SyncedMessage,
 } from '../../../../../lib/google/gmail-sync'
 
 export const dynamic = 'force-dynamic'
-export const maxDuration = 60
+// Inline extractor: 25 messages × ~1-3s/Groq call + Gmail fetches + DB
+// upserts can creep toward 60s. Match imessage/sync's headroom.
+export const maxDuration = 120
 
 // POST /api/google/gmail/sync
 //
-// Pulls recent Gmail messages using the persisted Google access token
-// (refreshing silently if it's expired) and inserts them into the unified
-// `messages` table. Optionally accepts { days, max, query } to tune the
-// fetch.
+// Browser-driven Gmail sync. Pulls recent messages with the persisted
+// Google access token (silent refresh) and runs the commitment extractor
+// in-process. Replaces the old client-driven flow that read
+// session.provider_token directly — now the browser just hits this and
+// the server owns token handling end-to-end.
 //
-// This is the "automatic auth" replacement for the old client-driven flow
-// where GmailSyncCard read session.provider_token and called Gmail directly.
-// With persistent tokens the client just hits this endpoint — no token
-// handling on the browser at all.
-
-// Default filter — strip the obvious automated senders so the unified inbox
-// stays focused on real contact conversations. Callers can override by
-// passing `query` in the body.
-const DEFAULT_FILTER_TOKENS = [
-  '-from:noreply',
-  '-from:no-reply',
-  '-from:notifications',
-  '-from:hello@',
-  '-from:info@',
-  '-from:support@',
-  '-from:service@',
-  '-from:marketing',
-  '-from:newsletter',
-  '-from:digest',
-  '-from:venmo.com',
-  '-from:square.com',
-  '-from:paypal.com',
-  '-label:promotions',
-  '-label:social',
-] as const
-
-function buildGmailQuery(days: number, override?: string | null): string {
-  const trimmed = override?.trim()
-  if (trimmed) return trimmed
-  return [`newer_than:${days}d`, ...DEFAULT_FILTER_TOKENS].join(' ')
-}
-
-type GmailMessage = {
-  id: string
-  threadId: string
-  from: string
-  to: string
-  subject: string
-  body: string
-  date: string
-}
-
-function getHeader(
-  headers: gmail_v1.Schema$MessagePartHeader[] | undefined,
-  name: string,
-): string {
-  if (!Array.isArray(headers)) return ''
-  return (
-    headers.find((h) => (h.name ?? '').toLowerCase() === name.toLowerCase())
-      ?.value ?? ''
-  )
-}
-
-function decodeBody(payload: gmail_v1.Schema$MessagePart | undefined): string {
-  if (!payload) return ''
-  if (payload.body?.data) {
-    try {
-      return Buffer.from(payload.body.data, 'base64').toString('utf-8')
-    } catch {
-      return ''
-    }
-  }
-  if (Array.isArray(payload.parts)) {
-    for (const part of payload.parts) {
-      const text = decodeBody(part)
-      if (text) return text
-    }
-  }
-  return ''
-}
-
-function normalizeEmail(s: string): string {
-  const m = s.match(/<([^>]+)>/)
-  return (m?.[1] ?? s).trim().toLowerCase()
-}
-
-function makeSnippet(body: string): string {
-  return body
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 140)
-}
-
+// All real work is delegated to lib/google/gmail-sync.ts so the cron path
+// (/api/cron/daily-sync) and this interactive path execute identical
+// logic. Body is optional: { days?, max?, query? }.
 export async function POST(req: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -121,139 +40,26 @@ export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => null)) as
     | { days?: number; max?: number; query?: string }
     | null
-  const days = clampInt(body?.days, 1, 365, 90)
-  const max = clampInt(body?.max, 1, 100, 25)
-  const query = buildGmailQuery(days, body?.query ?? null)
 
-  // Resolve a valid access token (refresh silently if needed).
   const tok = await getValidAccessTokenForUser(user.id)
   if ('error' in tok) return tok.error
 
-  const gmail = google.gmail({ version: 'v1', auth: buildOAuthClient(tok.token) })
+  const userEmail = (user.email ?? '').toLowerCase()
 
-  // 1. List recent message ids.
-  let ids: string[]
+  // 1. Fetch + persist messages.
+  let store
   try {
-    const listRes = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults: max,
-      q: query,
+    store = await fetchAndStoreGmail(service, user.id, userEmail, tok.token, {
+      days: body?.days,
+      max: body?.max,
+      query: body?.query,
     })
-    ids = (listRes.data.messages ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === 'string')
   } catch (err) {
     return googleApiError(err)
   }
 
-  if (ids.length === 0) {
-    await touchGmailIntegration(user.id)
-    return NextResponse.json({
-      ok: true,
-      fetched: 0,
-      imported: 0,
-      skipped: 0,
-      errors: 0,
-    })
-  }
-
-  // 2. Fetch each message's headers + body in parallel.
-  const fetched = await Promise.all(
-    ids.map(async (id): Promise<GmailMessage | null> => {
-      try {
-        const r = await gmail.users.messages.get({
-          userId: 'me',
-          id,
-          format: 'full',
-        })
-        const headers = r.data.payload?.headers ?? []
-        const text = decodeBody(r.data.payload as gmail_v1.Schema$MessagePart | undefined)
-        if (!text) return null
-        return {
-          id: r.data.id ?? id,
-          threadId: r.data.threadId ?? id,
-          from: getHeader(headers, 'From'),
-          to: getHeader(headers, 'To'),
-          subject: getHeader(headers, 'Subject'),
-          body: text.slice(0, 20000),
-          date: getHeader(headers, 'Date') || new Date().toISOString(),
-        }
-      } catch {
-        return null
-      }
-    }),
-  )
-  const messages = fetched.filter((m): m is GmailMessage => m !== null)
-
-  // 3. Build email→contact_id lookup so messages join to contacts.
-  const userEmail = (user.email ?? '').toLowerCase()
-  const { data: contacts } = await service
-    .from('contacts')
-    .select('id, email')
-    .eq('user_id', user.id)
-    .not('email', 'is', null)
-    .limit(5000)
-  const emailToContactId = new Map<string, string>()
-  for (const c of contacts ?? []) {
-    if (c.email) emailToContactId.set(c.email.toLowerCase().trim(), c.id)
-  }
-
-  // 4. Upsert into the unified messages table.
-  let imported = 0
-  let skipped = 0
-  let errors = 0
-  const latestByContact = new Map<string, string>()
-  for (const msg of messages) {
-    const fromEmail = normalizeEmail(msg.from)
-    const toEmail = normalizeEmail(msg.to)
-    const isInbound = fromEmail !== userEmail
-    const otherEmail = isInbound ? fromEmail : toEmail
-    const contactId = emailToContactId.get(otherEmail) ?? null
-    const sentAt = new Date(msg.date).toISOString()
-
-    const row = {
-      user_id: user.id,
-      contact_id: contactId,
-      channel: 'email',
-      direction: isInbound ? 'inbound' : 'outbound',
-      sender: msg.from,
-      recipient: msg.to,
-      subject: msg.subject || null,
-      body: msg.body,
-      snippet: makeSnippet(msg.body),
-      thread_id: msg.threadId || null,
-      external_id: msg.id,
-      is_read: true,
-      sent_at: sentAt,
-    }
-
-    const { error } = await service
-      .from('messages')
-      .upsert(row, {
-        onConflict: 'user_id,channel,external_id',
-        ignoreDuplicates: true,
-      })
-    if (error) {
-      if (error.code === '23505') skipped++
-      else {
-        errors++
-        console.warn('[gmail-sync] insert error:', error.message)
-      }
-    } else {
-      imported++
-      if (contactId) {
-        const prev = latestByContact.get(contactId)
-        if (!prev || sentAt > prev) latestByContact.set(contactId, sentAt)
-      }
-    }
-  }
-
-  await bumpLastInteractionAt(service, user.id, latestByContact)
-
-  // 5. Run the commitment extractor in-process. Mirrors the cron path —
-  //    no HTTP loopback, no cookie passthrough, no second copy of the
-  //    extraction loop. Failures here must not break ingestion: raw
-  //    messages are already persisted above.
+  // 2. Run the commitment extractor over the same payload. Failures here
+  //    must not break ingestion — raw messages are already persisted.
   let commitments_created: number | null = null
   let commitment_errors = 0
   try {
@@ -261,7 +67,7 @@ export async function POST(req: NextRequest) {
       service,
       user.id,
       userEmail,
-      messages as SyncedMessage[],
+      store.messages,
     )
     commitments_created = extract.commitments_created
     commitment_errors = extract.errors
@@ -276,24 +82,13 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
-    fetched: messages.length,
-    imported,
-    skipped,
-    errors,
+    fetched: store.fetched,
+    imported: store.imported,
+    skipped: store.skipped,
+    errors: store.errors,
     commitments_created,
     commitment_errors,
   })
-}
-
-function clampInt(
-  raw: unknown,
-  min: number,
-  max: number,
-  fallback: number,
-): number {
-  const n = typeof raw === 'number' ? raw : NaN
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(min, Math.min(max, Math.trunc(n)))
 }
 
 async function touchGmailIntegration(userId: string): Promise<void> {
