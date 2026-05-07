@@ -94,12 +94,17 @@ export async function POST(req: NextRequest) {
 async function touchGmailIntegration(userId: string): Promise<void> {
   const service = getServiceClient()
   if (!service) return
+  // provider='google' is the unified row written by lib/google/oauth.ts
+  // (token storage) and updated by /api/cron/daily-sync. The interactive
+  // route used to write a separate provider='google_gmail' row, leaving
+  // two distinct user_integrations entries for the same connection — the
+  // Settings UI then showed conflicting "last synced" timestamps depending
+  // on which row it queried. Stick to the canonical key.
   await service.from('user_integrations').upsert(
     {
       user_id: userId,
-      provider: 'google_gmail',
+      provider: 'google',
       last_synced_at: new Date().toISOString(),
-      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
     },
     { onConflict: 'user_id,provider' },
   )
