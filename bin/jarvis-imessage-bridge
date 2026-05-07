@@ -42,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sqlite3
@@ -58,6 +59,9 @@ CHAT_DB = HOME / "Library" / "Messages" / "chat.db"
 ENV_FILE = HOME / ".jarvis" / "config" / ".env"
 STATE_DIR = HOME / ".jarvis" / "state"
 STATE_FILE = STATE_DIR / "imessage-bridge.json"
+LOCK_FILE = STATE_DIR / "imessage-bridge.lock"
+LOG_DIR = HOME / ".jarvis" / "logs"
+LOG_FILE = LOG_DIR / "imessage-bridge.log"
 
 # Apple stores message.date as nanoseconds since 2001-01-01 UTC. Convert by
 # adding the unix epoch offset.
@@ -65,6 +69,50 @@ APPLE_EPOCH = 978307200  # 2001-01-01T00:00:00Z
 
 DEFAULT_BATCH = 200
 MAX_BATCH = 500
+
+# Exit codes — distinct so cron can tell config errors from network blips.
+EXIT_OK = 0
+EXIT_SERVER_REPORTED_ERRORS = 1
+EXIT_NETWORK_TRANSIENT = 2
+EXIT_CONFIG = 3
+EXIT_ALREADY_RUNNING = 0  # not an error — the other instance is doing the work
+
+
+# ---------------------------------------------------------------------------
+# logging
+# ---------------------------------------------------------------------------
+def _log(line: str) -> None:
+    """Append one line to ~/.jarvis/logs/imessage-bridge.log AND echo to
+    stderr so a manual run still shows progress. Cron captures stderr to
+    mail/devnull depending on MAILTO; the log file is the durable record."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+    msg = f"[{ts}] {line}"
+    try:
+        with LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass  # disk full, etc. — don't crash the bridge over a log write
+    print(msg, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# concurrency lock
+# ---------------------------------------------------------------------------
+def acquire_lock():
+    """fcntl.flock on a sentinel file. Cron may overlap with a manual run
+    or a previous tick that ran long; both reading the same last_rowid and
+    POSTing overlapping ranges wastes extractor budget. The lock file
+    handle must outlive this function — return it to keep the lock
+    held."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    fh = LOCK_FILE.open("w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +281,14 @@ def fetch_messages(
 # ---------------------------------------------------------------------------
 # server push
 # ---------------------------------------------------------------------------
+class TransientServerError(Exception):
+    """5xx or network failure — try again next tick."""
+
+
+class FatalServerError(Exception):
+    """4xx — config / auth issue. Don't retry blindly."""
+
+
 def post_batch(
     api_base: str,
     cron_secret: str,
@@ -258,15 +314,20 @@ def post_batch(
             "Authorization": f"Bearer {cron_secret}",
         },
     )
+    # Translate urllib errors into transient vs fatal so the main loop
+    # can preserve in-flight progress + emit the JSON summary instead of
+    # sys.exit'ing mid-pagination.
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             return json.loads(body)
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        sys.exit(f"server returned {e.code}: {body}")
+        body = e.read().decode("utf-8", errors="replace")[:500]
+        if 500 <= e.code < 600:
+            raise TransientServerError(f"HTTP {e.code}: {body}") from e
+        raise FatalServerError(f"HTTP {e.code}: {body}") from e
     except urllib.error.URLError as e:
-        sys.exit(f"network error: {e}")
+        raise TransientServerError(f"network error: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -318,20 +379,34 @@ def main() -> int:
             if not v
         ]
         if missing:
-            sys.exit(
-                "Missing env: " + ", ".join(missing) + "\n"
-                "Set them in ~/.jarvis/config/.env or your shell environment."
+            _log(
+                "config error: missing env: "
+                + ", ".join(missing)
+                + " (set in ~/.jarvis/config/.env)"
             )
+            return EXIT_CONFIG
 
     batch = max(1, min(MAX_BATCH, args.batch))
 
     if args.reset and STATE_FILE.exists():
         STATE_FILE.unlink()
 
+    # Concurrency lock — bail cleanly if another instance is already running.
+    # Skip the lock for dry-run since it doesn't write state and is often run
+    # interactively while a cron tick is mid-flight.
+    lock_handle = None
+    if not args.dry_run:
+        lock_handle = acquire_lock()
+        if lock_handle is None:
+            _log("another bridge instance is already running; skipping this tick")
+            return EXIT_ALREADY_RUNNING
+
     state = load_state()
     last_rowid = int(state.get("last_rowid") or 0)
     since_apple_ns = parse_since(args.since)
 
+    transient_failure: str | None = None
+    fatal_failure: str | None = None
     conn = open_chat_db()
     try:
         total_fetched = 0
@@ -347,10 +422,9 @@ def main() -> int:
             if not messages:
                 break
             total_fetched += len(messages)
-            print(
-                f"[bridge] page {page}: {len(messages)} msgs "
-                f"(rowid {messages[0]['rowid']}..{messages[-1]['rowid']})",
-                file=sys.stderr,
+            _log(
+                f"page {page}: {len(messages)} msgs "
+                f"(rowid {messages[0]['rowid']}..{messages[-1]['rowid']})"
             )
             if args.dry_run:
                 last_rowid = messages[-1]["rowid"]
@@ -365,13 +439,24 @@ def main() -> int:
                 break
 
             assert api_base and cron_secret and user_id  # narrow for mypy
-            res = post_batch(
-                api_base,
-                cron_secret,
-                user_id,
-                messages,
-                extract=not args.no_extract,
-            )
+            try:
+                res = post_batch(
+                    api_base,
+                    cron_secret,
+                    user_id,
+                    messages,
+                    extract=not args.no_extract,
+                )
+            except TransientServerError as e:
+                # 5xx / network blip. Don't sys.exit — break out of the loop
+                # so prior pages' watermark + the JSON summary still surface.
+                transient_failure = str(e)
+                _log(f"transient error on page {page}: {e}")
+                break
+            except FatalServerError as e:
+                fatal_failure = str(e)
+                _log(f"fatal error on page {page}: {e}")
+                break
             store = res.get("store") or {}
             extract_res = res.get("extract") or {}
             total_imported += int(store.get("imported", 0))
@@ -379,12 +464,11 @@ def main() -> int:
             total_errors += int(store.get("errors", 0))
             total_processed += int(extract_res.get("processed", 0))
             total_commitments += int(extract_res.get("commitments_created", 0))
-            print(
-                f"[bridge]   server: imported={store.get('imported')} "
+            _log(
+                f"  server: imported={store.get('imported')} "
                 f"skipped={store.get('skipped')} errors={store.get('errors')} "
                 f"extracted={extract_res.get('processed', 0)} "
-                f"commitments={extract_res.get('commitments_created', 0)}",
-                file=sys.stderr,
+                f"commitments={extract_res.get('commitments_created', 0)}"
             )
 
             # Advance watermark only on the rowid path. In --since mode the
@@ -401,24 +485,34 @@ def main() -> int:
             time.sleep(0.25)  # gentle on the server / extractor
     finally:
         conn.close()
+        if lock_handle is not None:
+            lock_handle.close()
 
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "fetched": total_fetched,
-                "imported": total_imported,
-                "skipped": total_skipped,
-                "errors": total_errors,
-                "extracted": total_processed,
-                "commitments_created": total_commitments,
-                "last_rowid": last_rowid,
-                "dry_run": args.dry_run,
-            },
-            indent=2,
-        )
+    summary = {
+        "ok": fatal_failure is None and transient_failure is None,
+        "fetched": total_fetched,
+        "imported": total_imported,
+        "skipped": total_skipped,
+        "errors": total_errors,
+        "extracted": total_processed,
+        "commitments_created": total_commitments,
+        "last_rowid": last_rowid,
+        "dry_run": args.dry_run,
+        "transient_error": transient_failure,
+        "fatal_error": fatal_failure,
+    }
+    print(json.dumps(summary, indent=2))
+    _log(
+        f"summary: fetched={total_fetched} imported={total_imported} "
+        f"errors={total_errors} extracted={total_processed} "
+        f"commitments={total_commitments} last_rowid={last_rowid}"
     )
-    return 0 if total_errors == 0 else 1
+
+    if fatal_failure is not None:
+        return EXIT_CONFIG
+    if transient_failure is not None:
+        return EXIT_NETWORK_TRANSIENT
+    return EXIT_OK if total_errors == 0 else EXIT_SERVER_REPORTED_ERRORS
 
 
 if __name__ == "__main__":
