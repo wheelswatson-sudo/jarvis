@@ -234,6 +234,10 @@ export async function extractAndStoreImessageCommitments(
           msg.handle_name ||
           null,
         email: row.email,
+        // For iMessage-only contacts the email is usually null; pass phone
+        // (or the chat.db handle as fallback) so the extractor's prompt
+        // still has a stable identifier in the counterparty block.
+        phone: row.phone ?? (msg.handle.includes('@') ? null : msg.handle),
         company: row.company,
       }
 

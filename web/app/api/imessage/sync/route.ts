@@ -162,7 +162,12 @@ function sanitizeBatch(raw: unknown): IncomingImessage[] {
     const m = item as Record<string, unknown>
     const guid = typeof m.guid === 'string' ? m.guid.trim() : ''
     const handle = typeof m.handle === 'string' ? m.handle.trim() : ''
-    const text = typeof m.text === 'string' ? m.text : ''
+    // Cap text early — the storeImessages helper will trim further to 4000
+    // before insert, but the request body shouldn't carry MB-sized strings
+    // through Vercel + Node's JSON parse. Slack to ~50k accommodates the
+    // longest plausible text-message paste.
+    const text =
+      typeof m.text === 'string' ? m.text.slice(0, 50_000) : ''
     const sentAtRaw =
       typeof m.sent_at === 'string' ? m.sent_at : null
     const direction =
@@ -187,9 +192,12 @@ function sanitizeBatch(raw: unknown): IncomingImessage[] {
       text,
       sent_at: sentAt.toISOString(),
       is_read: typeof m.is_read === 'boolean' ? m.is_read : undefined,
+      // chat.db service is informational ("iMessage" / "SMS"). Cap at 32
+      // chars so a poisoned chat.db can't push arbitrary payloads through
+      // an otherwise-typed pipeline.
       service:
         typeof m.service === 'string' && m.service.length > 0
-          ? m.service
+          ? m.service.slice(0, 32)
           : null,
     })
     if (out.length >= MAX_BATCH) break

@@ -125,6 +125,12 @@ def load_dotenv(path: Path) -> None:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # ~/.jarvis/config/.env is sometimes hand-edited as a shell script
+        # with `export FOO=bar` lines. Strip the prefix so we don't end up
+        # setting os.environ["export AIEA_API_BASE"]. Matches the loader
+        # in bin/jarvis-contacts.py.
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 

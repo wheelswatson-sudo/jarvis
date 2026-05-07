@@ -35,6 +35,9 @@ export type ExtractedSignals = {
 export type ContactContext = {
   name?: string | null
   email?: string | null
+  // Phone is rendered when email is absent (iMessage-only contacts).
+  // Sanitized like every other field before splicing into the prompt.
+  phone?: string | null
   company?: string | null
 }
 
@@ -82,11 +85,15 @@ export async function extractCommitments(
   // contact whose name was set to "Ignore previous instructions and...").
   const safeName = contact?.name ? sanitizeForPrompt(contact.name, 120) : ''
   const safeEmail = contact?.email ? sanitizeForPrompt(contact.email, 200) : ''
+  const safePhone = contact?.phone ? sanitizeForPrompt(contact.phone, 40) : ''
   const safeCompany = contact?.company
     ? sanitizeForPrompt(contact.company, 120)
     : ''
-  const counterpartyBlock = safeName || safeEmail
-    ? `\n<counterparty>${safeName}${safeEmail ? ` <${safeEmail}>` : ''}${safeCompany ? ` (${safeCompany})` : ''}</counterparty>`
+  // Render email when present; fall back to phone for iMessage-only
+  // contacts so the model has a stable identifier per channel.
+  const handle = safeEmail || safePhone
+  const counterpartyBlock = safeName || handle
+    ? `\n<counterparty>${safeName}${handle ? ` <${handle}>` : ''}${safeCompany ? ` (${safeCompany})` : ''}</counterparty>`
     : ''
 
   const prompt = `You read one message and extract structured signals for a relationship-intelligence system. Return ONLY a JSON object — no prose, no fences.

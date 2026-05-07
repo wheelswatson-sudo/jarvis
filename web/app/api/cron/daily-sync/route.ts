@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server'
+import { timingSafeEqual } from 'crypto'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
 import { getValidAccessTokenForUser } from '../../../../lib/google/oauth'
@@ -24,9 +25,11 @@ export const maxDuration = 300
 //   3. Mirror Google Tasks into commitments
 //   4. Generate today's daily briefing
 //
-// Auth: Vercel cron sends `Authorization: Bearer <CRON_SECRET>` when
-// CRON_SECRET is set. We also accept `?secret=<CRON_SECRET>` for manual
-// kicks. Without CRON_SECRET set the route refuses to run.
+// Auth: header-only `Authorization: Bearer <CRON_SECRET>`, compared in
+// constant time. Vercel cron sends the header natively. Manual kicks must
+// use `curl -H "Authorization: Bearer $CRON_SECRET" ...`. The previously-
+// accepted `?secret=` query param was dropped because it leaked the
+// secret into Vercel access logs, browser history, and Referrer headers.
 export async function GET(req: NextRequest) {
   const expected = process.env.CRON_SECRET
   if (!expected) {
@@ -40,8 +43,7 @@ export async function GET(req: NextRequest) {
 
   const auth = req.headers.get('authorization') ?? ''
   const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : ''
-  const querySecret = new URL(req.url).searchParams.get('secret') ?? ''
-  if (bearer !== expected && querySecret !== expected) {
+  if (!bearer || !safeEqual(bearer, expected)) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
@@ -229,4 +231,11 @@ export async function GET(req: NextRequest) {
     user_count: users.length,
     results,
   })
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  if (bufA.length !== bufB.length) return false
+  return timingSafeEqual(bufA, bufB)
 }
