@@ -59,6 +59,13 @@ export type PersonalDetails = {
   birthday?: string | null
   google_resource_name?: string | null
 
+  // Memory policy — declares which source is authoritative for fields
+  // that can come from multiple places (Google Contacts sync vs manual
+  // edit). Read by /api/contacts/[id]/memory; written by the same.
+  memory_policy?: {
+    directory_authority?: 'google' | 'manual' | 'mixed' | null
+  } | null
+
   // ---- Schema-grounded relationship intelligence ----
   relationship_origin?: string | null
   key_milestones?: RelationshipMilestone[] | null
