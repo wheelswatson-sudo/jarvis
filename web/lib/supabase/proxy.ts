@@ -14,6 +14,9 @@ const PUBLIC_PATHS = [
   // not session cookies — the proxy redirect would otherwise turn legitimate
   // calls into a 307 → /login.
   '/api/extension',
+  // Local iMessage bridge (bin/jarvis-imessage-bridge) authenticates via
+  // x-cron-secret + body.user_id — same reason as analyze above.
+  '/api/imessage',
 ]
 const ONBOARDING_ALLOWED = ['/onboarding', '/api/onboarding', '/auth']
 

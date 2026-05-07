@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""
+jarvis-imessage-bridge — local read-only bridge for AIEA's iMessage
+relationship intelligence.
+
+Reads new rows from ~/Library/Messages/chat.db, normalizes them, and POSTs
+them to /api/imessage/sync on the AIEA server. Read-only: never writes to
+chat.db, never sends an iMessage.
+
+Architecture mirror:
+  Gmail / Calendar — server pulls from a remote Google API on a schedule.
+  iMessage         — chat.db is local-only, so this script is the "remote
+                     pull" running on the user's Mac, pushing into the same
+                     unified `messages` / `interactions` tables.
+
+State file (so reruns are incremental):
+  ~/.jarvis/state/imessage-bridge.json
+    {
+      "last_rowid": 12345,         # max chat.db ROWID we've synced
+      "last_synced_at": "...ISO..."
+    }
+
+Auth:
+  Uses CRON_SECRET shared-secret + JARVIS_USER_ID, both read from the
+  environment (or ~/.jarvis/config/.env). The /api/imessage/sync route
+  validates the secret before accepting messages for the given user.
+
+Required env:
+  AIEA_API_BASE     e.g. https://aiea.app  or  http://localhost:3000
+  CRON_SECRET       must match the server's CRON_SECRET
+  JARVIS_USER_ID    auth.users.id of the AIEA account that owns these msgs
+
+Usage:
+  jarvis-imessage-bridge                    # incremental, batch=200
+  jarvis-imessage-bridge --since 7d         # backfill last 7 days
+  jarvis-imessage-bridge --since 24h
+  jarvis-imessage-bridge --reset            # wipe state, full rescan
+  jarvis-imessage-bridge --dry-run          # print what would be sent
+  jarvis-imessage-bridge --batch 100        # tune batch size
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+HOME = Path.home()
+CHAT_DB = HOME / "Library" / "Messages" / "chat.db"
+ENV_FILE = HOME / ".jarvis" / "config" / ".env"
+STATE_DIR = HOME / ".jarvis" / "state"
+STATE_FILE = STATE_DIR / "imessage-bridge.json"
+
+# Apple stores message.date as nanoseconds since 2001-01-01 UTC. Convert by
+# adding the unix epoch offset.
+APPLE_EPOCH = 978307200  # 2001-01-01T00:00:00Z
+
+DEFAULT_BATCH = 200
+MAX_BATCH = 500
+
+
+# ---------------------------------------------------------------------------
+# .env loader (avoid pulling python-dotenv as a dep)
+# ---------------------------------------------------------------------------
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+# ---------------------------------------------------------------------------
+# state file
+# ---------------------------------------------------------------------------
+def load_state() -> dict[str, Any]:
+    if not STATE_FILE.exists():
+        return {"last_rowid": 0, "last_synced_at": None}
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"last_rowid": 0, "last_synced_at": None}
+
+
+def save_state(state: dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# chat.db reader
+# ---------------------------------------------------------------------------
+def open_chat_db() -> sqlite3.Connection:
+    if not CHAT_DB.exists():
+        sys.exit(f"chat.db not found at {CHAT_DB}")
+    try:
+        # Read-only URI — never accidentally writes.
+        conn = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True, timeout=10)
+    except sqlite3.Error as e:
+        sys.exit(
+            f"Could not open chat.db: {e}\n"
+            "Grant Terminal (or whatever shell runs this) Full Disk Access in "
+            "System Settings → Privacy & Security → Full Disk Access."
+        )
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def apple_ns_to_iso(apple_ns: int | None) -> str | None:
+    """chat.db `message.date` is ns since 2001-01-01 UTC on modern macOS,
+    seconds on older. Heuristic on magnitude."""
+    if apple_ns is None:
+        return None
+    secs = apple_ns / 1_000_000_000 if apple_ns > 10**11 else apple_ns
+    return (
+        datetime.fromtimestamp(APPLE_EPOCH + secs, tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def parse_since(s: str | None) -> int | None:
+    """Parse "24h", "7d", "30m" into a chat.db `date` cutoff (ns since 2001).
+    Returns None when s is None — caller falls back to last_rowid."""
+    if not s:
+        return None
+    s = s.strip().lower()
+    if not s:
+        return None
+    unit = s[-1]
+    try:
+        n = int(s[:-1])
+    except ValueError:
+        sys.exit(f"--since: expected '24h' / '7d' / '30m', got {s!r}")
+    if unit == "h":
+        delta = timedelta(hours=n)
+    elif unit == "d":
+        delta = timedelta(days=n)
+    elif unit == "m":
+        delta = timedelta(minutes=n)
+    else:
+        sys.exit(f"--since unit must be h/d/m, got {unit!r}")
+    cutoff_unix = (datetime.now(tz=timezone.utc) - delta).timestamp()
+    return int((cutoff_unix - APPLE_EPOCH) * 1_000_000_000)
+
+
+def fetch_messages(
+    conn: sqlite3.Connection,
+    last_rowid: int,
+    since_apple_ns: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Pull message rows newer than the watermark. Returns oldest-first so
+    the server upserts in chronological order and `last_interaction_at`
+    settles on the right value."""
+    where = ["m.text IS NOT NULL", "TRIM(m.text) <> ''"]
+    params: list[Any] = []
+    if since_apple_ns is not None:
+        where.append("m.date >= ?")
+        params.append(since_apple_ns)
+    else:
+        where.append("m.ROWID > ?")
+        params.append(last_rowid)
+
+    sql = f"""
+        SELECT m.ROWID         AS rowid,
+               m.guid          AS guid,
+               m.text          AS text,
+               m.date          AS date,
+               m.is_from_me    AS is_from_me,
+               m.is_read       AS is_read,
+               m.service       AS service,
+               h.id            AS handle,
+               c.guid          AS chat_guid,
+               c.display_name  AS chat_display_name
+          FROM message m
+          LEFT JOIN handle              h  ON m.handle_id = h.ROWID
+          LEFT JOIN chat_message_join   cmj ON cmj.message_id = m.ROWID
+          LEFT JOIN chat                c  ON c.ROWID = cmj.chat_id
+         WHERE {' AND '.join(where)}
+      ORDER BY m.ROWID ASC
+         LIMIT ?
+    """
+    params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        handle = r["handle"]
+        text = r["text"]
+        if not handle or not text:
+            # Group chats produce per-chat synthetic handles; AIEA expects a
+            # 1:1 contact identifier. Skip messages without one for now.
+            continue
+        sent_at = apple_ns_to_iso(r["date"])
+        if not sent_at:
+            continue
+        out.append(
+            {
+                "rowid": r["rowid"],
+                "guid": r["guid"],
+                "chat_guid": r["chat_guid"],
+                "handle": handle,
+                "handle_name": r["chat_display_name"] or None,
+                "direction": "outbound" if r["is_from_me"] else "inbound",
+                "text": text,
+                "sent_at": sent_at,
+                "is_read": bool(r["is_read"]),
+                "service": r["service"],
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# server push
+# ---------------------------------------------------------------------------
+def post_batch(
+    api_base: str,
+    cron_secret: str,
+    user_id: str,
+    messages: list[dict[str, Any]],
+    extract: bool,
+) -> dict[str, Any]:
+    payload = json.dumps(
+        {
+            "user_id": user_id,
+            "messages": [
+                {k: v for k, v in m.items() if k != "rowid"} for m in messages
+            ],
+            "extract": extract,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{api_base.rstrip('/')}/api/imessage/sync",
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Cron-Secret": cron_secret,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return json.loads(body)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        sys.exit(f"server returned {e.code}: {body}")
+    except urllib.error.URLError as e:
+        sys.exit(f"network error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# entry
+# ---------------------------------------------------------------------------
+def main() -> int:
+    load_dotenv(ENV_FILE)
+
+    p = argparse.ArgumentParser(description="Push local iMessages to AIEA.")
+    p.add_argument(
+        "--since",
+        help="Backfill window like '24h', '7d', '30m'. Bypasses watermark.",
+    )
+    p.add_argument(
+        "--reset",
+        action="store_true",
+        help="Reset the watermark file and rescan from scratch.",
+    )
+    p.add_argument(
+        "--batch",
+        type=int,
+        default=DEFAULT_BATCH,
+        help=f"Messages per server batch (max {MAX_BATCH}, default {DEFAULT_BATCH}).",
+    )
+    p.add_argument(
+        "--no-extract",
+        action="store_true",
+        help="Persist messages but skip the LLM extractor on the server.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read chat.db and print a summary, but do not POST.",
+    )
+    args = p.parse_args()
+
+    api_base = os.environ.get("AIEA_API_BASE")
+    cron_secret = os.environ.get("CRON_SECRET")
+    user_id = os.environ.get("JARVIS_USER_ID")
+
+    if not args.dry_run:
+        missing = [
+            n
+            for n, v in (
+                ("AIEA_API_BASE", api_base),
+                ("CRON_SECRET", cron_secret),
+                ("JARVIS_USER_ID", user_id),
+            )
+            if not v
+        ]
+        if missing:
+            sys.exit(
+                "Missing env: " + ", ".join(missing) + "\n"
+                "Set them in ~/.jarvis/config/.env or your shell environment."
+            )
+
+    batch = max(1, min(MAX_BATCH, args.batch))
+
+    if args.reset and STATE_FILE.exists():
+        STATE_FILE.unlink()
+
+    state = load_state()
+    last_rowid = int(state.get("last_rowid") or 0)
+    since_apple_ns = parse_since(args.since)
+
+    conn = open_chat_db()
+    try:
+        total_fetched = 0
+        total_imported = 0
+        total_skipped = 0
+        total_errors = 0
+        total_processed = 0
+        total_commitments = 0
+        page = 0
+        while True:
+            page += 1
+            messages = fetch_messages(conn, last_rowid, since_apple_ns, batch)
+            if not messages:
+                break
+            total_fetched += len(messages)
+            print(
+                f"[bridge] page {page}: {len(messages)} msgs "
+                f"(rowid {messages[0]['rowid']}..{messages[-1]['rowid']})",
+                file=sys.stderr,
+            )
+            if args.dry_run:
+                last_rowid = messages[-1]["rowid"]
+                for m in messages[:5]:
+                    arrow = "→" if m["direction"] == "outbound" else "←"
+                    snippet = m["text"][:80].replace("\n", " ")
+                    print(f"  {arrow} {m['handle']:<25} {snippet}")
+                if len(messages) > 5:
+                    print(f"  ... +{len(messages) - 5} more")
+                # Dry-run is a preview, not a full pull — stop after one page.
+                # Use --since to widen or narrow the preview window.
+                break
+
+            assert api_base and cron_secret and user_id  # narrow for mypy
+            res = post_batch(
+                api_base,
+                cron_secret,
+                user_id,
+                messages,
+                extract=not args.no_extract,
+            )
+            store = res.get("store") or {}
+            extract_res = res.get("extract") or {}
+            total_imported += int(store.get("imported", 0))
+            total_skipped += int(store.get("skipped", 0))
+            total_errors += int(store.get("errors", 0))
+            total_processed += int(extract_res.get("processed", 0))
+            total_commitments += int(extract_res.get("commitments_created", 0))
+            print(
+                f"[bridge]   server: imported={store.get('imported')} "
+                f"skipped={store.get('skipped')} errors={store.get('errors')} "
+                f"extracted={extract_res.get('processed', 0)} "
+                f"commitments={extract_res.get('commitments_created', 0)}",
+                file=sys.stderr,
+            )
+
+            # Advance watermark only on the rowid path. In --since mode the
+            # caller asked for a window; we don't poison the watermark with
+            # an arbitrary backfill.
+            last_rowid = messages[-1]["rowid"]
+            if since_apple_ns is None:
+                state["last_rowid"] = last_rowid
+                state["last_synced_at"] = datetime.now(tz=timezone.utc).isoformat()
+                save_state(state)
+
+            if len(messages) < batch:
+                break  # drained the queue
+            time.sleep(0.25)  # gentle on the server / extractor
+    finally:
+        conn.close()
+
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "fetched": total_fetched,
+                "imported": total_imported,
+                "skipped": total_skipped,
+                "errors": total_errors,
+                "extracted": total_processed,
+                "commitments_created": total_commitments,
+                "last_rowid": last_rowid,
+                "dry_run": args.dry_run,
+            },
+            indent=2,
+        )
+    )
+    return 0 if total_errors == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
