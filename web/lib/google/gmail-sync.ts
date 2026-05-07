@@ -1,10 +1,10 @@
-// Cron-callable Gmail sync helper.
+// Cron-callable Gmail sync helper. Single source of truth for Gmail
+// ingestion + commitment extraction.
 //
-// Mirrors the work that /api/google/gmail/sync + /api/gmail/sync do when
-// invoked from a browser session, but takes (userId, userEmail, accessToken)
-// directly so it works without a Supabase auth cookie. Used by the daily
-// cron route. The interactive routes still drive their own copy of this
-// logic — keep them working until we collapse them into this helper.
+// Takes (userId, userEmail, accessToken) directly so it works without a
+// Supabase auth cookie. Both call sites — /api/cron/daily-sync (server
+// cron) and /api/google/gmail/sync (interactive browser button) — call
+// this module's helpers in-process. No HTTP loopback.
 //
 // Two phases:
 //   1. fetchAndStoreMessages — pull recent Gmail, upsert into `messages`

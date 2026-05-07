@@ -8,7 +8,11 @@ import {
   getValidAccessTokenForUser,
   googleApiError,
 } from '../../../../../lib/google/oauth'
-import { bumpLastInteractionAt } from '../../../../../lib/google/gmail-sync'
+import {
+  bumpLastInteractionAt,
+  extractAndStoreCommitments,
+  type SyncedMessage,
+} from '../../../../../lib/google/gmail-sync'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -246,33 +250,26 @@ export async function POST(req: NextRequest) {
 
   await bumpLastInteractionAt(service, user.id, latestByContact)
 
-  // 5. Kick the commitment-extractor with the same payload (fire and
-  //    forget — the client doesn't need to wait for AI extraction to
-  //    show its inbox, and the extractor has its own dedup via the
-  //    interactions.source check).
+  // 5. Run the commitment extractor in-process. Mirrors the cron path —
+  //    no HTTP loopback, no cookie passthrough, no second copy of the
+  //    extraction loop. Failures here must not break ingestion: raw
+  //    messages are already persisted above.
   let commitments_created: number | null = null
   let commitment_errors = 0
   try {
-    const origin = new URL(req.url).origin
-    const cookieHeader = req.headers.get('cookie') ?? ''
-    const extractRes = await fetch(`${origin}/api/gmail/sync`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        cookie: cookieHeader,
-      },
-      body: JSON.stringify({ messages }),
-    })
-    if (extractRes.ok) {
-      const extractData = (await extractRes.json().catch(() => ({}))) as {
-        commitments_created?: number
-        errors?: number
-      }
-      commitments_created = extractData.commitments_created ?? 0
-      commitment_errors = extractData.errors ?? 0
-    }
+    const extract = await extractAndStoreCommitments(
+      service,
+      user.id,
+      userEmail,
+      messages as SyncedMessage[],
+    )
+    commitments_created = extract.commitments_created
+    commitment_errors = extract.errors
   } catch (err) {
-    console.warn('[gmail-sync] extractor call failed', err)
+    console.warn(
+      '[gmail-sync] extractor failed',
+      err instanceof Error ? err.message : err,
+    )
   }
 
   await touchGmailIntegration(user.id)
