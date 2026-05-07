@@ -85,7 +85,11 @@ export async function extractCommitments(
   // contact whose name was set to "Ignore previous instructions and...").
   const safeName = contact?.name ? sanitizeForPrompt(contact.name, 120) : ''
   const safeEmail = contact?.email ? sanitizeForPrompt(contact.email, 200) : ''
-  const safePhone = contact?.phone ? sanitizeForPrompt(contact.phone, 40) : ''
+  // 64 chars covers international + extension formats like
+  // "+44 20 7946 0958 extension 1234" without truncation. Stays well
+  // below name (120) / company (120) since phones don't legitimately
+  // need that much space.
+  const safePhone = contact?.phone ? sanitizeForPrompt(contact.phone, 64) : ''
   const safeCompany = contact?.company
     ? sanitizeForPrompt(contact.company, 120)
     : ''

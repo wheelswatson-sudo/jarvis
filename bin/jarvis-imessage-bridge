@@ -75,7 +75,10 @@ EXIT_OK = 0
 EXIT_SERVER_REPORTED_ERRORS = 1
 EXIT_NETWORK_TRANSIENT = 2
 EXIT_CONFIG = 3
-EXIT_ALREADY_RUNNING = 0  # not an error — the other instance is doing the work
+# 75 = EX_TEMPFAIL; cron treats non-zero as failure but this is expected.
+# Distinct value (not 0) so pipelines can distinguish "ran successfully"
+# from "bailed because another instance was running".
+EXIT_ALREADY_RUNNING = 75
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +88,16 @@ def _log(line: str) -> None:
     """Append one line to ~/.jarvis/logs/imessage-bridge.log AND echo to
     stderr so a manual run still shows progress. Cron captures stderr to
     mail/devnull depending on MAILTO; the log file is the durable record."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     msg = f"[{ts}] {line}"
     try:
+        # mkdir is inside the try too — perm-denied on ~/.jarvis would
+        # otherwise crash the bridge before it even logged a useful line.
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
         with LOG_FILE.open("a", encoding="utf-8") as fh:
             fh.write(msg + "\n")
     except OSError:
-        pass  # disk full, etc. — don't crash the bridge over a log write
+        pass  # disk full, no perms, etc. — never crash on a log write
     print(msg, file=sys.stderr)
 
 

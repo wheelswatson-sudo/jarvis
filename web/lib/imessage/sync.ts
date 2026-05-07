@@ -19,13 +19,13 @@ import {
 } from '../intelligence/extract-commitments'
 import { mergeSignalsIntoDetails } from '../intelligence/relationship-merge'
 import { bumpLastInteractionAt } from '../google/gmail-sync'
+import { makeSnippet } from '../util/snippet'
 import type { PersonalDetails } from '../types'
 
 export const IMESSAGE_CHANNEL = 'imessage' as const
 
 const MAX_BODY = 4000
 const MAX_INTERACTION_BODY = 4000
-const MAX_SNIPPET = 140
 
 // Shape of a single message pushed by the local bridge. Keep this in sync
 // with bin/jarvis-imessage-bridge.
@@ -416,13 +416,6 @@ function phoneKey(raw: string): string | null {
   const digits = (raw ?? '').replace(/[^0-9]/g, '')
   if (!digits) return null
   return digits.length >= 10 ? digits.slice(-10) : digits
-}
-
-function makeSnippet(body: string): string {
-  return body
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, MAX_SNIPPET)
 }
 
 function ownerToDb(o: ExtractedCommitment['owner']): 'me' | 'them' {

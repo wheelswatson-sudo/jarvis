@@ -23,6 +23,7 @@ import {
   type ExtractedCommitment,
 } from '../intelligence/extract-commitments'
 import { mergeSignalsIntoDetails } from '../intelligence/relationship-merge'
+import { makeSnippet } from '../util/snippet'
 import type { PersonalDetails } from '../types'
 
 const DEFAULT_FILTER_TOKENS = [
@@ -158,7 +159,7 @@ export async function fetchAndStoreGmail(
       recipient: msg.to,
       subject: msg.subject || null,
       body: msg.body,
-      snippet: makeSnippet(msg.body),
+      snippet: makeSnippet(msg.body, { stripHtml: true }),
       thread_id: msg.threadId || null,
       external_id: msg.id,
       is_read: true,
@@ -324,6 +325,9 @@ export async function extractAndStoreCommitments(
           [row.first_name, row.last_name].filter(Boolean).join(' ').trim() ||
           null,
         email: row.email,
+        // phone intentionally omitted — Gmail identifies contacts by
+        // email, not phone. The iMessage path passes phone here as a
+        // fallback identifier when email is null.
         company: row.company,
       }
 
@@ -463,14 +467,6 @@ function decodeBody(payload: gmail_v1.Schema$MessagePart | undefined): string {
 function normalizeEmail(s: string): string {
   const m = s.match(/<([^>]+)>/)
   return (m?.[1] ?? s).trim().toLowerCase()
-}
-
-function makeSnippet(body: string): string {
-  return body
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 140)
 }
 
 function ownerToDb(o: ExtractedCommitment['owner']): 'me' | 'them' {
