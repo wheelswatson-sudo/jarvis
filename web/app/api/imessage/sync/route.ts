@@ -119,6 +119,13 @@ export async function POST(req: NextRequest) {
   })
 }
 
+// RFC 4122 UUID — all five fields, hex only, hyphens in the right places.
+// Stricter than a length check so a malformed body.user_id can't sneak past
+// downstream Supabase queries as a freeform string. Lowercase canonical
+// form is what auth.users.id actually uses.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
 async function resolveUserId(
   req: NextRequest,
   body: Body,
@@ -132,9 +139,13 @@ async function resolveUserId(
       ? auth.slice('Bearer '.length)
       : ''
     if (bearer && safeEqual(bearer, cronSecret)) {
-      return typeof body.user_id === 'string' && body.user_id.length > 0
-        ? body.user_id
-        : null
+      const uid =
+        typeof body.user_id === 'string' ? body.user_id.trim() : ''
+      // Reject anything that isn't a canonical UUID so a typo or hostile
+      // payload can't address arbitrary rows. The browser-session branch
+      // below doesn't need this — Supabase already returns a real UUID.
+      if (!uid || !UUID_RE.test(uid)) return null
+      return uid
     }
   }
   // Browser session — fall through to Supabase cookie auth.
