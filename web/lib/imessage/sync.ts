@@ -302,12 +302,14 @@ export async function extractAndStoreImessageCommitments(
         signals,
         { occurredAt, channel: IMESSAGE_CHANNEL, direction },
       )
+      // last_interaction_at is intentionally NOT written here. The
+      // pre-extraction bumpLastInteractionAt() call in storeImessages
+      // already moved it forward with a "newer than current" guard. Writing
+      // it again unconditionally would let a stale --since 7d backfill
+      // regress the field to an older timestamp.
       await service
         .from('contacts')
-        .update({
-          personal_details: mergedDetails,
-          last_interaction_at: occurredAt,
-        })
+        .update({ personal_details: mergedDetails })
         .eq('id', row.id)
         .eq('user_id', userId)
       contactsById.set(row.id, { ...latestRow, personal_details: mergedDetails })

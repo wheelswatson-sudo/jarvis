@@ -392,12 +392,13 @@ export async function extractAndStoreCommitments(
         signals,
         { occurredAt, channel: 'email', direction },
       )
+      // last_interaction_at is intentionally NOT written here.
+      // fetchAndStoreGmail() already called bumpLastInteractionAt() with a
+      // "newer than current" guard. Writing it again unconditionally would
+      // let a stale resync regress the field to an older value.
       await service
         .from('contacts')
-        .update({
-          personal_details: mergedDetails,
-          last_interaction_at: occurredAt,
-        })
+        .update({ personal_details: mergedDetails })
         .eq('id', row.id)
         .eq('user_id', userId)
       contactsById.set(row.id, { ...latestRow, personal_details: mergedDetails })
