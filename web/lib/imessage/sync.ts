@@ -129,8 +129,16 @@ export async function storeImessages(
     })
 
     if (error) {
-      if (error.code === '23505') skipped++
-      else {
+      if (error.code === '23505') {
+        // Duplicate — the message already lives in the DB from a prior
+        // sync. Still safe to hand to the extractor (its own dedup will
+        // skip it via the interactions.source check).
+        skipped++
+        persisted.push({ ...msg, contact_id: contactId })
+      } else {
+        // Hard insert failure — the messages row never landed. Skipping
+        // the persisted.push prevents the extractor from creating an
+        // interaction whose source links back to a missing messages row.
         errors++
         console.warn('[imessage-sync] insert error:', error.message)
       }
@@ -140,9 +148,8 @@ export async function storeImessages(
         const prev = latestByContact.get(contactId)
         if (!prev || sentAt > prev) latestByContact.set(contactId, sentAt)
       }
+      persisted.push({ ...msg, contact_id: contactId })
     }
-
-    persisted.push({ ...msg, contact_id: contactId })
   }
 
   await bumpLastInteractionAt(service, userId, latestByContact)
