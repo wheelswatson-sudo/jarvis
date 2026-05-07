@@ -9,8 +9,8 @@ import type { Contact, PersonalDetails } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
-export function OPTIONS() {
-  return corsPreflight()
+export function OPTIONS(req: Request) {
+  return corsPreflight(req)
 }
 
 const STALE_DAYS = 30
@@ -24,10 +24,10 @@ function daysSince(iso: string | null): number | null {
 
 export async function GET(req: Request) {
   const user = await getExtensionUser(req)
-  if (!user) return corsError(401, 'Unauthorized', 'unauthorized')
+  if (!user) return corsError(req,401, 'Unauthorized', 'unauthorized')
 
   const svc = getServiceClient()
-  if (!svc) return corsError(500, 'Service client unavailable', 'no_service')
+  if (!svc) return corsError(req,500, 'Service client unavailable', 'no_service')
 
   const { data, error } = await svc
     .from('contacts')
@@ -35,7 +35,7 @@ export async function GET(req: Request) {
       'id, first_name, last_name, last_interaction_at, linkedin, personal_details, relationship_score, tier',
     )
     .eq('user_id', user.id)
-  if (error) return corsError(500, error.message, 'query_failed')
+  if (error) return corsError(req,500, error.message, 'query_failed')
 
   const rows = (data ?? []) as Pick<
     Contact,
@@ -87,5 +87,5 @@ export async function GET(req: Request) {
       source,
     }))
 
-  return corsJson({ contacts: out })
+  return corsJson(req, { contacts: out })
 }

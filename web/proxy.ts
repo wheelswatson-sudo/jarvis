@@ -9,12 +9,45 @@ const PROXY_BYPASS_PREFIXES = [
   '/api/intelligence/health',
 ]
 
+// Security headers applied to every response. Kept conservative on CSP so we
+// don't break Next's hydration scripts or Tailwind's inline styles; tightening
+// to nonce-based requires wiring through every <script>/<style>.
+const SECURITY_HEADERS: Record<string, string> = {
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    // Next.js needs unsafe-inline for hydration; unsafe-eval is required by
+    // some bundler features. Tightening these requires nonce wiring.
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    // Supabase (REST + realtime) and Sentry — both used at runtime from the
+    // browser bundle.
+    "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.sentry.io https://*.ingest.sentry.io",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; '),
+}
+
+function applySecurityHeaders(response: NextResponse): NextResponse {
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
+    if (!response.headers.has(k)) response.headers.set(k, v)
+  }
+  return response
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   if (PROXY_BYPASS_PREFIXES.some((p) => pathname.startsWith(p))) {
-    return NextResponse.next()
+    return applySecurityHeaders(NextResponse.next())
   }
-  return updateSession(request)
+  const sessionResponse = await updateSession(request)
+  return applySecurityHeaders(sessionResponse)
 }
 
 export const config = {

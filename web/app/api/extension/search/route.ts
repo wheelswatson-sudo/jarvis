@@ -9,22 +9,22 @@ import type { Contact } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
-export function OPTIONS() {
-  return corsPreflight()
+export function OPTIONS(req: Request) {
+  return corsPreflight(req)
 }
 
 export async function GET(req: Request) {
   const user = await getExtensionUser(req)
-  if (!user) return corsError(401, 'Unauthorized', 'unauthorized')
+  if (!user) return corsError(req, 401, 'Unauthorized', 'unauthorized')
 
   const { searchParams } = new URL(req.url)
   const q = searchParams.get('q')?.trim()
   if (!q || q.length < 2) {
-    return corsJson({ contacts: [] })
+    return corsJson(req, { contacts: [] })
   }
 
   const svc = getServiceClient()
-  if (!svc) return corsError(500, 'Service client unavailable', 'no_service')
+  if (!svc) return corsError(req, 500, 'Service client unavailable', 'no_service')
 
   const escaped = q.replace(/[%_]/g, (c) => `\\${c}`)
   const pattern = `%${escaped}%`
@@ -39,7 +39,7 @@ export async function GET(req: Request) {
     .order('last_name', { ascending: true })
     .order('first_name', { ascending: true })
     .limit(15)
-  if (error) return corsError(500, error.message, 'query_failed')
+  if (error) return corsError(req, 500, error.message, 'query_failed')
 
   const contacts = ((data ?? []) as Pick<
     Contact,
@@ -59,5 +59,5 @@ export async function GET(req: Request) {
     personal_details: c.personal_details ?? null,
   }))
 
-  return corsJson({ contacts })
+  return corsJson(req, { contacts })
 }

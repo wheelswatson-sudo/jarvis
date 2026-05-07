@@ -12,8 +12,8 @@ import type {
 
 export const dynamic = 'force-dynamic'
 
-export function OPTIONS() {
-  return corsPreflight()
+export function OPTIONS(req: Request) {
+  return corsPreflight(req)
 }
 
 type Source = 'linkedin' | 'facebook'
@@ -45,26 +45,26 @@ function isString(v: unknown): v is string {
 
 export async function POST(req: Request) {
   const user = await getExtensionUser(req)
-  if (!user) return corsError(401, 'Unauthorized', 'unauthorized')
+  if (!user) return corsError(req,401, 'Unauthorized', 'unauthorized')
 
   let body: Body
   try {
     body = (await req.json()) as Body
   } catch {
-    return corsError(400, 'Invalid JSON', 'bad_request')
+    return corsError(req,400, 'Invalid JSON', 'bad_request')
   }
 
   const contactId = body.contact_id
   const profile = body.profile
   if (!contactId || !profile) {
-    return corsError(400, 'contact_id and profile required', 'bad_request')
+    return corsError(req,400, 'contact_id and profile required', 'bad_request')
   }
   if (profile.source !== 'linkedin' && profile.source !== 'facebook') {
-    return corsError(400, 'Unknown source', 'bad_request')
+    return corsError(req,400, 'Unknown source', 'bad_request')
   }
 
   const svc = getServiceClient()
-  if (!svc) return corsError(500, 'Service client unavailable', 'no_service')
+  if (!svc) return corsError(req,500, 'Service client unavailable', 'no_service')
 
   const { data: contactRow, error: getErr } = await svc
     .from('contacts')
@@ -72,8 +72,8 @@ export async function POST(req: Request) {
     .eq('id', contactId)
     .eq('user_id', user.id)
     .maybeSingle()
-  if (getErr) return corsError(500, getErr.message, 'query_failed')
-  if (!contactRow) return corsError(404, 'Contact not found', 'not_found')
+  if (getErr) return corsError(req,500, getErr.message, 'query_failed')
+  if (!contactRow) return corsError(req,404, 'Contact not found', 'not_found')
   const contact = contactRow as Contact
 
   const pd: PersonalDetails = (contact.personal_details ?? {}) as PersonalDetails
@@ -132,7 +132,7 @@ export async function POST(req: Request) {
     .update(updates)
     .eq('id', contactId)
     .eq('user_id', user.id)
-  if (updErr) return corsError(500, updErr.message, 'update_failed')
+  if (updErr) return corsError(req,500, updErr.message, 'update_failed')
 
   // Log a lightweight interaction so the relationship signal updates.
   const summaryBits: string[] = [
@@ -169,5 +169,5 @@ export async function POST(req: Request) {
     void svc.from('pending_changes').insert(rows)
   }
 
-  return corsJson({ updated: true })
+  return corsJson(req, { updated: true })
 }

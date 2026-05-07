@@ -9,8 +9,8 @@ import type { Contact, PersonalDetails } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
 
-export function OPTIONS() {
-  return corsPreflight()
+export function OPTIONS(req: Request) {
+  return corsPreflight(req)
 }
 
 type MatchPayload = {
@@ -54,15 +54,15 @@ function detectSource(url: string): 'linkedin' | 'facebook' | null {
 
 export async function GET(req: Request) {
   const user = await getExtensionUser(req)
-  if (!user) return corsError(401, 'Unauthorized', 'unauthorized')
+  if (!user) return corsError(req,401, 'Unauthorized', 'unauthorized')
 
   const { searchParams } = new URL(req.url)
   const url = searchParams.get('url')?.trim()
   const name = searchParams.get('name')?.trim() ?? null
-  if (!url) return corsError(400, 'url is required', 'bad_request')
+  if (!url) return corsError(req,400, 'url is required', 'bad_request')
 
   const svc = getServiceClient()
-  if (!svc) return corsError(500, 'Service client unavailable', 'no_service')
+  if (!svc) return corsError(req,500, 'Service client unavailable', 'no_service')
 
   const source = detectSource(url)
 
@@ -73,7 +73,7 @@ export async function GET(req: Request) {
     .from('contacts')
     .select('id, first_name, last_name, company, title, linkedin, personal_details')
     .eq('user_id', user.id)
-  if (error) return corsError(500, error.message, 'query_failed')
+  if (error) return corsError(req,500, error.message, 'query_failed')
 
   type Row = Pick<
     Contact,
@@ -141,5 +141,5 @@ export async function GET(req: Request) {
       }
     : { match: null }
 
-  return corsJson(payload)
+  return corsJson(req, payload)
 }

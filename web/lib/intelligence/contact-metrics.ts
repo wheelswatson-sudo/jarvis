@@ -75,31 +75,49 @@ export async function computeContactMetricsForUser(
   }
 
   const nowIso = new Date().toISOString()
-  let updated = 0
 
-  for (const contactId of contactIds) {
+  // Build the per-contact update set in memory, then ship it to Supabase in
+  // chunks via upsert. The previous shape was UPDATE-per-contact in a loop —
+  // 5000 contacts = 5000 round-trips, taking minutes for a daily cron run.
+  // Upsert in 500-row chunks turns this into ~10 round-trips.
+  //
+  // Safety: contactIds is derived from a user-scoped contacts.select() above,
+  // so every id we write to is guaranteed to belong to userId. The upsert
+  // matches on `id` (primary key); existing rows hit the UPDATE branch and
+  // only the four listed columns are touched. An `id` we don't already own
+  // would be impossible given the source query.
+  type MetricsRow = {
+    id: string
+    sentiment_trajectory: number | null
+    reciprocity_ratio: number | null
+    metrics_computed_at: string
+  }
+  const rows: MetricsRow[] = contactIds.map((contactId) => {
     const all = byContact.get(contactId) ?? []
-    const trajectory = computeSentimentTrajectory(all)
-    const reciprocity = computeReciprocityRatio(all, reciprocityCutoff)
+    return {
+      id: contactId,
+      sentiment_trajectory: computeSentimentTrajectory(all),
+      reciprocity_ratio: computeReciprocityRatio(all, reciprocityCutoff),
+      metrics_computed_at: nowIso,
+    }
+  })
 
+  const CHUNK = 500
+  let updated = 0
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK)
     const { error } = await service
       .from('contacts')
-      .update({
-        sentiment_trajectory: trajectory,
-        reciprocity_ratio: reciprocity,
-        metrics_computed_at: nowIso,
-      })
-      .eq('id', contactId)
-      .eq('user_id', userId)
-
+      .upsert(slice, { onConflict: 'id' })
     if (error) {
-      console.warn('[contact-metrics] update failed', {
-        contact_id: contactId,
+      console.warn('[contact-metrics] batch upsert failed', {
         message: error.message,
+        chunk_start: i,
+        chunk_size: slice.length,
       })
       continue
     }
-    updated++
+    updated += slice.length
   }
 
   return {

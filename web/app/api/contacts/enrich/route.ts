@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
+import { LIMITS, rateLimitOr429 } from '../../../../lib/rate-limit'
 import {
   APOLLO_PROVIDER,
   ApolloAuthError,
@@ -29,6 +30,13 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
+
+  const limited = rateLimitOr429(
+    `contact-enrich:${user.id}`,
+    LIMITS.CONTACT_ENRICH.limit,
+    LIMITS.CONTACT_ENRICH.windowMs,
+  )
+  if (limited) return limited
 
   const body = (await req.json().catch(() => null)) as
     | { contact_ids?: unknown }

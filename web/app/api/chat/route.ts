@@ -2,6 +2,7 @@ import * as Sentry from '@sentry/nextjs'
 import { createClient } from '../../../lib/supabase/server'
 import { apiError } from '../../../lib/api-errors'
 import { trackChatQuery } from '../../../lib/events'
+import { LIMITS, rateLimitOr429 } from '../../../lib/rate-limit'
 import {
   DEFAULT_MODEL_ID,
   getModel,
@@ -329,6 +330,9 @@ export async function POST(request: Request) {
   if (!user) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
+
+  const limited = rateLimitOr429(`chat:${user.id}`, LIMITS.CHAT.limit, LIMITS.CHAT.windowMs)
+  if (limited) return limited
 
   let body: { message?: unknown; messages?: unknown }
   try {

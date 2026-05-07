@@ -14,8 +14,8 @@ import type {
 
 export const dynamic = 'force-dynamic'
 
-export function OPTIONS() {
-  return corsPreflight()
+export function OPTIONS(req: Request) {
+  return corsPreflight(req)
 }
 
 function daysSince(iso: string | null): number | null {
@@ -46,11 +46,11 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const user = await getExtensionUser(req)
-  if (!user) return corsError(401, 'Unauthorized', 'unauthorized')
+  if (!user) return corsError(req,401, 'Unauthorized', 'unauthorized')
   const { id } = await params
 
   const svc = getServiceClient()
-  if (!svc) return corsError(500, 'Service client unavailable', 'no_service')
+  if (!svc) return corsError(req,500, 'Service client unavailable', 'no_service')
 
   const { data: contactRow, error: contactErr } = await svc
     .from('contacts')
@@ -58,9 +58,9 @@ export async function GET(
     .eq('id', id)
     .eq('user_id', user.id)
     .maybeSingle()
-  if (contactErr) return corsError(500, contactErr.message, 'query_failed')
+  if (contactErr) return corsError(req,500, contactErr.message, 'query_failed')
   if (!contactRow) {
-    return corsError(404, 'Contact not found', 'contact_not_found')
+    return corsError(req,404, 'Contact not found', 'contact_not_found')
   }
   const contact = contactRow as Contact
 
@@ -85,7 +85,7 @@ export async function GET(
   const last = (ix ?? [])[0] as Interaction | undefined
   const commitments = (cm ?? []) as Commitment[]
 
-  return corsJson({
+  return corsJson(req, {
     contact: {
       id: contact.id,
       name: contactName(contact),
