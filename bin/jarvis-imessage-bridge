@@ -247,7 +247,7 @@ def post_batch(
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "X-Cron-Secret": cron_secret,
+            "Authorization": f"Bearer {cron_secret}",
         },
     )
     try:

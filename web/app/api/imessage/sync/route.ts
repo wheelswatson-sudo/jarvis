@@ -19,10 +19,13 @@ export const maxDuration = 120
 // ~/Library/Messages/chat.db, so the local bridge (bin/jarvis-imessage-bridge)
 // reads it, normalizes a batch, and POSTs it here.
 //
-// Auth — two modes, mirroring /api/intelligence/compute-metrics:
+// Auth — two modes, mirroring /api/cron/daily-sync after the security
+// hardening that dropped the ?secret= fallback:
 //   1. Browser session (Supabase cookie) — user_id derived from the session
-//   2. Local cron / bridge — `x-cron-secret: $CRON_SECRET` header + the
-//      user_id in the body. This is the path the bridge takes.
+//   2. Local cron / bridge — `Authorization: Bearer <CRON_SECRET>` header
+//      plus the user_id in the body. The bridge takes this path. Header-
+//      only on purpose: query-param secrets leak into access logs and
+//      browser history; we never accept them here.
 //
 // Body:
 //   {
@@ -120,11 +123,15 @@ async function resolveUserId(
   req: NextRequest,
   body: Body,
 ): Promise<string | null> {
-  // Cron / bridge: shared-secret header + explicit user_id.
+  // Cron / bridge path: Authorization: Bearer <CRON_SECRET> + body.user_id.
+  // Match the daily-sync hardening — header-only, no query-param fallback.
   const cronSecret = process.env.CRON_SECRET
   if (cronSecret) {
-    const header = req.headers.get('x-cron-secret')
-    if (header && safeEqual(header, cronSecret)) {
+    const auth = req.headers.get('authorization') ?? ''
+    const bearer = auth.startsWith('Bearer ')
+      ? auth.slice('Bearer '.length)
+      : ''
+    if (bearer && safeEqual(bearer, cronSecret)) {
       return typeof body.user_id === 'string' && body.user_id.length > 0
         ? body.user_id
         : null
