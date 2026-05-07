@@ -25,8 +25,10 @@ export const maxDuration = 300
 //   4. Generate today's daily briefing
 //
 // Auth: Vercel cron sends `Authorization: Bearer <CRON_SECRET>` when
-// CRON_SECRET is set. We also accept `?secret=<CRON_SECRET>` for manual
-// kicks. Without CRON_SECRET set the route refuses to run.
+// CRON_SECRET is set. The header is required — passing the secret as a
+// `?secret=` query param is rejected so the secret never lands in server
+// access logs, browser history, or referrer headers. Manual kicks must use
+// `curl -H "Authorization: Bearer $CRON_SECRET" ...`.
 export async function GET(req: NextRequest) {
   const expected = process.env.CRON_SECRET
   if (!expected) {
@@ -40,8 +42,7 @@ export async function GET(req: NextRequest) {
 
   const auth = req.headers.get('authorization') ?? ''
   const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : ''
-  const querySecret = new URL(req.url).searchParams.get('secret') ?? ''
-  if (bearer !== expected && querySecret !== expected) {
+  if (bearer !== expected) {
     return apiError(401, 'Unauthorized', undefined, 'unauthorized')
   }
 
