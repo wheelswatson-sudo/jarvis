@@ -15,8 +15,10 @@ const PUBLIC_PATHS = [
   // calls into a 307 → /login.
   '/api/extension',
   // Local iMessage bridge (bin/jarvis-imessage-bridge) authenticates via
-  // x-cron-secret + body.user_id — same reason as analyze above.
-  '/api/imessage',
+  // Authorization: Bearer + body.user_id — same reason as analyze above.
+  // Pinned to the exact path so future /api/imessage/* routes don't
+  // inherit the bypass by accident.
+  '/api/imessage/sync',
 ]
 const ONBOARDING_ALLOWED = ['/onboarding', '/api/onboarding', '/auth']
 
