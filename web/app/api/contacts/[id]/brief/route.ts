@@ -9,6 +9,7 @@ import {
   streamCompletion,
 } from '../../../../../lib/providers'
 import { contactName } from '../../../../../lib/format'
+import { LIMITS, rateLimitOr429 } from '../../../../../lib/rate-limit'
 import type {
   Commitment,
   Contact,
@@ -265,6 +266,13 @@ export async function GET(
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) return apiError(401, 'Unauthorized', undefined, 'unauthorized')
+
+  const limited = rateLimitOr429(
+    `contact-brief:${user.id}`,
+    LIMITS.CONTACT_BRIEF.limit,
+    LIMITS.CONTACT_BRIEF.windowMs,
+  )
+  if (limited) return limited
 
   const { data: contactRow } = await supabase
     .from('contacts')

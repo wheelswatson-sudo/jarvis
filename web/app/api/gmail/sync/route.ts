@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
+import { LIMITS, rateLimitOr429 } from '../../../../lib/rate-limit'
 import {
   extractCommitments,
   type ExtractedCommitment,
@@ -46,6 +47,13 @@ export async function POST(req: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return apiError(401, 'Unauthorized', undefined, 'unauthorized')
+
+  const limited = rateLimitOr429(
+    `gmail-sync:${user.id}`,
+    LIMITS.GMAIL_SYNC.limit,
+    LIMITS.GMAIL_SYNC.windowMs,
+  )
+  if (limited) return limited
 
   const userEmail = (user.email ?? '').toLowerCase()
 
