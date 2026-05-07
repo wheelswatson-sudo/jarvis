@@ -90,6 +90,11 @@ export async function POST(req: Request) {
       description,
       notes,
       owner,
+      // commitments.direction is NOT NULL with a 'me' default; without
+      // explicitly mirroring owner, every contact-owed row created here
+      // would silently land as owner='them' direction='me'. Match the
+      // pattern from gmail-sync, tasks-sync, imessage-sync, transcripts.
+      direction: owner,
       due_at: due,
       status: 'open',
     })
