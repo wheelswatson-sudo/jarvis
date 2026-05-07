@@ -140,12 +140,19 @@ export default function LandingPage() {
         Math.max(0, window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)),
       )
 
-      // Connection threshold grows with scroll — more web as you go deeper.
+      // Constellation peaks around the middle of the page and fades toward
+      // the bottom so the pricing card stays clean. Ramps up over [0, 0.5],
+      // holds, then fades over [0.6, 1.0] to a 0.3 floor.
+      const ramp = Math.min(1, sp / 0.5)
+      const fade = sp <= 0.6 ? 1 : Math.max(0.3, 1 - (sp - 0.6) * 1.75)
+      const intensity = ramp * fade
+
+      // Connection threshold — grows modestly, then fades.
       const baseDist = 110
-      const dist = baseDist + sp * 80
+      const dist = baseDist + Math.min(0.5, sp) * 60
       const dist2 = dist * dist
 
-      // Background gradient — subtle radial, brighter where scroll concentrates.
+      // Background gradient — subtle radial, dampened past mid-page.
       const grad = ctx.createRadialGradient(
         width * (0.5 + Math.sin(now / 8000) * 0.05),
         height * (0.4 + sp * 0.2),
@@ -154,8 +161,8 @@ export default function LandingPage() {
         height * 0.5,
         Math.max(width, height) * 0.85,
       )
-      grad.addColorStop(0, `rgba(79, 140, 255, ${0.06 + sp * 0.05})`)
-      grad.addColorStop(0.55, `rgba(167, 139, 250, ${0.03 + sp * 0.04})`)
+      grad.addColorStop(0, `rgba(79, 140, 255, ${0.05 + intensity * 0.05})`)
+      grad.addColorStop(0.55, `rgba(167, 139, 250, ${0.025 + intensity * 0.035})`)
       grad.addColorStop(1, 'rgba(10, 22, 40, 0)')
       ctx.clearRect(0, 0, width, height)
       ctx.fillStyle = grad
@@ -188,8 +195,8 @@ export default function LandingPage() {
           const d2 = dx * dx + dy * dy
           if (d2 > dist2) continue
           const t = 1 - d2 / dist2
-          // Strength grows with scroll progress.
-          const strength = t * (0.18 + sp * 0.45)
+          // Strength scaled by intensity so lines thin out near the bottom.
+          const strength = t * (0.12 + intensity * 0.4) * fade
           if (strength <= 0) continue
           // Mix the two accent hues based on average depth + a touch of scroll.
           const mix = (a.depth + b.depth) / 2
@@ -207,10 +214,10 @@ export default function LandingPage() {
       for (const n of nodes) {
         n.twinklePhase += 0.012 * (0.5 + n.depth)
         const tw = 0.65 + Math.sin(n.twinklePhase) * 0.25
-        const baseAlpha = (0.35 + n.depth * 0.45) * tw * (0.7 + sp * 0.4)
+        const baseAlpha = (0.35 + n.depth * 0.45) * tw * (0.55 + intensity * 0.45) * fade
         const color = n.hue === 'blue' ? '79, 140, 255' : '167, 139, 250'
-        // Halo
-        const haloR = n.r * (3 + sp * 2)
+        // Halo — fades with the rest near the bottom.
+        const haloR = n.r * (3 + Math.min(0.5, sp) * 2)
         const halo = ctx.createRadialGradient(n.x, n.y + py * n.depth, 0, n.x, n.y + py * n.depth, haloR)
         halo.addColorStop(0, `rgba(${color}, ${(baseAlpha * 0.6).toFixed(3)})`)
         halo.addColorStop(1, `rgba(${color}, 0)`)
@@ -309,6 +316,9 @@ export default function LandingPage() {
             AIEA is the intelligence layer that watches your calendar, inbox, and tasks —
             then quietly keeps the people who matter from slipping through the cracks.
           </p>
+          <p className="landing__proof">
+            Built by a founder who manages 500+ key relationships.
+          </p>
           <div className="landing__hero-cta">
             <Link href="/login" className="landing__cta">
               Get Early Access
@@ -396,7 +406,7 @@ export default function LandingPage() {
               <li>Direct line to the founders</li>
             </ul>
             <Link href="/login" className="landing__cta landing__cta--block">
-              Claim your seat
+              Get Early Access
             </Link>
             <p className="landing__price-foot">
               Founder seats are limited while we tune the model on real workflows.
@@ -497,7 +507,7 @@ const FEATURES: { title: string; body: string; icon: React.ReactNode }[] = [
   {
     title: 'Daily Briefings',
     body:
-      'A two-minute morning read: who you owe, who&rsquo;s gone cold, what to say, and the single move that matters most.',
+      'A two-minute morning read: who you owe, who’s gone cold, what to say, and the single move that matters most.',
     icon: (
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.5">
         <path d="M5 7h14M5 12h14M5 17h9" />
@@ -505,13 +515,17 @@ const FEATURES: { title: string; body: string; icon: React.ReactNode }[] = [
     ),
   },
   {
-    title: 'More Coming',
+    title: 'Network Intelligence',
     body:
-      'Voice capture, Slack signals, deal pipeline, predictive nudges. The intelligence layer keeps growing — every week.',
+      'Map who connects to who in your network. Spot warm introductions, identify influence patterns, and find the shortest path to any contact.',
     icon: (
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="8" />
-        <path d="M12 8v8M8 12h8" />
+        <circle cx="5" cy="6" r="2" />
+        <circle cx="19" cy="6" r="2" />
+        <circle cx="12" cy="13" r="2" />
+        <circle cx="6" cy="19" r="2" />
+        <circle cx="18" cy="19" r="2" />
+        <path d="M6.5 7.5L11 12M17.5 7.5L13 12M11.5 14.5L7 18M12.5 14.5L17 18" />
       </svg>
     ),
   },
@@ -526,7 +540,7 @@ const STEPS: { title: string; body: string }[] = [
   {
     title: 'AIEA Syncs',
     body:
-      'In the background, your network is mapped: relationships, commitments, half-lives, and the patterns that hint at what&rsquo;s next.',
+      'In the background, your network is mapped: relationships, commitments, half-lives, and the patterns that hint at what’s next.',
   },
   {
     title: 'Get Briefed',
@@ -713,7 +727,7 @@ const styles = `
     align-items: center;
     justify-content: center;
     text-align: center;
-    padding: 64px 24px 96px;
+    padding: 16px 24px 64px;
     position: relative;
   }
   .landing__hero-inner {
@@ -770,6 +784,12 @@ const styles = `
     font-size: clamp(15px, 1.5vw, 18px);
     line-height: 1.6;
   }
+  .landing__proof {
+    margin: 14px auto 0;
+    color: rgba(138, 149, 169, 0.7);
+    font-size: 13px;
+    letter-spacing: 0.01em;
+  }
   .landing__hero-cta {
     margin-top: 32px;
     display: flex;
@@ -811,10 +831,10 @@ const styles = `
   .landing__section {
     max-width: 1200px;
     margin: 0 auto;
-    padding: 96px 24px;
+    padding: 56px 24px;
   }
-  .landing__section--how { padding-top: 32px; }
-  .landing__section-head { max-width: 720px; margin: 0 auto 56px; text-align: center; }
+  .landing__section--how { padding-top: 24px; padding-bottom: 40px; }
+  .landing__section-head { max-width: 720px; margin: 0 auto 36px; text-align: center; }
   .landing__eyebrow {
     display: inline-block;
     padding: 4px 10px;
@@ -973,7 +993,7 @@ const styles = `
   }
 
   /* Banner CTA */
-  .landing__banner-wrap { padding: 0 24px 96px; max-width: 1200px; margin: 0 auto; }
+  .landing__banner-wrap { padding: 24px 24px 72px; max-width: 1200px; margin: 0 auto; }
   .landing__banner {
     padding: 36px;
     display: flex;
