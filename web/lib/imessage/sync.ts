@@ -366,7 +366,11 @@ async function loadContactLookup(
 // Match a chat.db handle to a contact_id. Phones from chat.db are typically
 // E.164 (`+15551234567`); contacts.phone is hand-entered and may be in any
 // format. We normalize both to the trailing 10 digits for US numbers, with a
-// fallback to the trailing 7 digits when one side is missing the area code.
+// last-7-digit fallback only when it's an unambiguous match — multiple
+// contacts sharing a 7-digit suffix (different area codes) is too risky to
+// guess, so we leave it unmatched and let the message land with contact_id
+// = null. The unified inbox still shows it; the relationship extractor
+// just skips it.
 function matchContact(
   handle: string,
   phoneToContactId: Map<string, string>,
@@ -380,12 +384,17 @@ function matchContact(
   // Exact 10-digit match preferred.
   const exact = phoneToContactId.get(key)
   if (exact) return exact
-  // Last-7 fallback handles rows where the area code is missing on one side.
+  // Last-7 fallback only on a unique hit. Two contacts with the same
+  // 7-digit tail (e.g. 555-1234 in different area codes) → return null
+  // rather than silently misattribute the conversation.
   const tail7 = key.slice(-7)
+  let onlyMatch: string | null = null
   for (const [k, id] of phoneToContactId) {
-    if (k.endsWith(tail7)) return id
+    if (!k.endsWith(tail7)) continue
+    if (onlyMatch !== null && onlyMatch !== id) return null
+    onlyMatch = id
   }
-  return null
+  return onlyMatch
 }
 
 // Reduce a phone string to a comparable key — last 10 digits for US numbers,
