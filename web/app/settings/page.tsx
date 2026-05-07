@@ -44,13 +44,19 @@ export default async function SettingsPage() {
         .from('user_api_keys')
         .select('provider, api_key, is_active, updated_at')
         .eq('user_id', user.id),
-      // One query for all four Google services. Each service writes its own
-      // user_integrations row on first successful API call.
+      // One query covering both the unified Google integration row
+      // ('google', written by oauth.ts on token persist + the Gmail sync
+      // route) AND the per-service rows ('google_contacts', 'google_calendar',
+      // 'google_tasks', 'google_gmail') that other Google routes still
+      // maintain. Gmail recently moved to writing only the unified row, so
+      // its card prefers 'google' but falls back to 'google_gmail' for
+      // backwards compat with any old row still living in the table.
       supabase
         .from('user_integrations')
         .select('provider, account_email, last_synced_at')
         .eq('user_id', user.id)
         .in('provider', [
+          'google',
           'google_contacts',
           'google_calendar',
           'google_tasks',
@@ -111,15 +117,25 @@ export default async function SettingsPage() {
   const accountEmail =
     googleRows.find((r) => r.account_email)?.account_email ?? null
 
+  // Gmail's interactive sync now writes the unified 'google' row. Prefer
+  // it; fall back to a stale 'google_gmail' row (legacy writes from before
+  // commit 2a39580) and finally to the latest gmail-source interaction
+  // timestamp so the card never goes blank on a fresh account.
+  const gmailUnified = byProvider.get('google')
+  const gmailLegacy = byProvider.get('google_gmail')
   const googleServices: GoogleService[] = [
     {
       key: 'gmail',
       label: 'Gmail',
       last_synced_at:
-        byProvider.get('google_gmail')?.last_synced_at ??
+        gmailUnified?.last_synced_at ??
+        gmailLegacy?.last_synced_at ??
         gmailRes.data?.occurred_at ??
         null,
-      account_email: byProvider.get('google_gmail')?.account_email ?? null,
+      account_email:
+        gmailUnified?.account_email ??
+        gmailLegacy?.account_email ??
+        null,
     },
     {
       key: 'calendar',
