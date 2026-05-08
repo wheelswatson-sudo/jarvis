@@ -9,6 +9,7 @@ import {
 } from './GoogleContactsCard'
 import { ApolloCard, type ApolloState } from './ApolloCard'
 import { GmailSyncCard, type GmailSyncState } from './GmailSyncCard'
+import { CalendarSyncCard, type CalendarSyncState } from './CalendarSyncCard'
 import { GoogleConnectCard, type GoogleService } from './GoogleConnectCard'
 import { APOLLO_PROVIDER } from '../../lib/apollo'
 
@@ -171,6 +172,10 @@ export default async function SettingsPage() {
     last_synced_at: gmailRes.data?.occurred_at ?? null,
   }
 
+  const calendarState: CalendarSyncState = {
+    last_synced_at: byProvider.get('google_calendar')?.last_synced_at ?? null,
+  }
+
   return (
     <div className="relative min-h-screen overflow-x-clip bg-[#07070b] text-zinc-100">
       <div className="aiea-aurora-bg" aria-hidden="true" />
@@ -221,6 +226,7 @@ export default async function SettingsPage() {
               services={googleServices}
             />
             <GmailSyncCard state={gmailState} />
+            <CalendarSyncCard state={calendarState} />
             <GoogleContactsCard state={googleContacts} />
             <ApolloCard state={apolloState} />
           </div>

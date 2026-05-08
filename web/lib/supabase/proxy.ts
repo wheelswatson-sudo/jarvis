@@ -20,7 +20,6 @@ const PUBLIC_PATHS = [
   // inherit the bypass by accident.
   '/api/imessage/sync',
 ]
-const ONBOARDING_ALLOWED = ['/onboarding', '/api/onboarding', '/auth']
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request })
@@ -71,31 +70,6 @@ export async function updateSession(request: NextRequest) {
     const url = request.nextUrl.clone()
     url.pathname = '/'
     return NextResponse.redirect(url)
-  }
-
-  if (user) {
-    const inOnboardingFlow = ONBOARDING_ALLOWED.some((p) =>
-      pathname.startsWith(p),
-    )
-    if (!inOnboardingFlow) {
-      // Fail-open: if the profiles table doesn't exist or the query errors,
-      // don't lock the user out. Only redirect when we can confirm the row
-      // exists with a null onboarded_at.
-      const { data: profile, error } = await supabase
-        .from('profiles')
-        .select('onboarded_at')
-        .eq('id', user.id)
-        .maybeSingle()
-
-      const needsOnboarding =
-        !error && (profile === null || profile.onboarded_at === null)
-
-      if (needsOnboarding) {
-        const url = request.nextUrl.clone()
-        url.pathname = '/onboarding'
-        return NextResponse.redirect(url)
-      }
-    }
   }
 
   return response

@@ -32,8 +32,6 @@ type Message = {
 const CHANNELS = [
   { key: null, label: 'All' },
   { key: 'email', label: 'Email' },
-  { key: 'imessage', label: 'iMessage' },
-  { key: 'sms', label: 'SMS' },
   { key: 'slack', label: 'Slack' },
   { key: 'telegram', label: 'Telegram' },
   { key: 'linkedin', label: 'LinkedIn' },
