@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import { buildDailyBriefing } from '../../../../lib/intelligence/daily-briefing'
 
 export const dynamic = 'force-dynamic'
@@ -29,7 +29,7 @@ export async function GET() {
     .maybeSingle()
 
   if (error) {
-    return apiError(500, error.message, { code: error.code }, 'query_failed')
+    return apiServerError('intelligence.daily-briefing.GET', error, 'query_failed')
   }
   return NextResponse.json({ briefing: data ?? null })
 }
@@ -49,10 +49,9 @@ export async function POST() {
 
   const service = getServiceClient()
   if (!service) {
-    return apiError(
-      500,
-      'Service role key not configured',
-      undefined,
+    return apiServerError(
+      'intelligence.daily-briefing.POST',
+      new Error('Service role key not configured'),
       'no_service_key',
     )
   }
@@ -82,7 +81,7 @@ export async function POST() {
         message: error.message,
         code: error.code,
       })
-      return apiError(500, error.message, { code: error.code }, 'upsert_failed')
+      return apiServerError('intelligence.daily-briefing.POST', error, 'upsert_failed')
     }
 
     return NextResponse.json({
@@ -91,8 +90,6 @@ export async function POST() {
       markdown: result.markdown,
     })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Internal error'
-    console.error('[daily-briefing] generate failed', err)
-    return apiError(500, message, undefined, 'generate_failed')
+    return apiServerError('intelligence.daily-briefing.POST', err, 'generate_failed')
   }
 }

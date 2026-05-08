@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
-import { apiError } from '../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../lib/api-errors'
 import type { PendingChange, PendingChangeStatus } from '../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -32,7 +32,7 @@ export async function GET(request: Request) {
     .order('created_at', { ascending: false })
 
   if (error) {
-    return apiError(500, error.message, undefined, 'db_error')
+    return apiServerError('approvals.GET', error, 'db_error')
   }
 
   return NextResponse.json({ changes: (data ?? []) as PendingChange[] })
@@ -126,7 +126,7 @@ export async function POST(request: Request) {
     .single()
 
   if (error) {
-    return apiError(500, error.message, undefined, 'db_error')
+    return apiServerError('approvals.POST', error, 'db_error')
   }
 
   return NextResponse.json({ change: data as PendingChange }, { status: 201 })
@@ -154,7 +154,7 @@ export async function DELETE(request: Request) {
     .eq('user_id', user.id)
 
   if (error) {
-    return apiError(500, error.message, undefined, 'db_error')
+    return apiServerError('approvals.DELETE', error, 'db_error')
   }
   return NextResponse.json({ ok: true })
 }

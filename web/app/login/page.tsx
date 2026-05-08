@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '../../lib/supabase/client'
 import { Brand } from '../../components/Brand'
 import { GOOGLE_OAUTH_SCOPES } from '../../lib/google/scopes'
@@ -10,6 +10,12 @@ type Mode = 'signin' | 'signup'
 
 export default function LoginPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  // ?reconnect=1 forces Google's consent screen — used when scopes change or
+  // the refresh token has been revoked. Default sign-in omits `prompt` so
+  // Google silently authenticates returning users (and only shows consent
+  // for first-time connects), preserving the silent-refresh flow.
+  const reconnect = searchParams.get('reconnect') === '1'
   const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -23,15 +29,16 @@ export default function LoginPage() {
     setError(null)
     setMessage(null)
     const supabase = createClient()
+    const queryParams: Record<string, string> = {
+      access_type: 'offline',
+    }
+    if (reconnect) queryParams.prompt = 'consent'
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
         scopes: GOOGLE_OAUTH_SCOPES.join(' '),
-        queryParams: {
-          access_type: 'offline',
-          prompt: 'consent',
-        },
+        queryParams,
       },
     })
     if (error) {

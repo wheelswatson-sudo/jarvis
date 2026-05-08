@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
-import { apiError } from '../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../lib/api-errors'
 import {
   trackCommitmentCreate,
   trackCommitmentComplete,
@@ -50,7 +50,7 @@ export async function GET(req: Request) {
   }
 
   const { data, error } = await q
-  if (error) return apiError(500, error.message, undefined, 'select_failed')
+  if (error) return apiServerError('commitments.GET', error, 'select_failed')
 
   return NextResponse.json({ commitments: data ?? [] })
 }

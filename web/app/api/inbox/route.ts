@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
-import { apiError } from '../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../lib/api-errors'
 
 export const dynamic = 'force-dynamic'
 
@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
 
   const { data, error, count } = await query
 
-  if (error) return apiError(500, error.message, undefined, 'query_failed')
+  if (error) return apiServerError('inbox.GET', error, 'query_failed')
 
   return NextResponse.json({ messages: data ?? [], count })
 }
@@ -74,8 +74,9 @@ export async function PATCH(req: NextRequest) {
     .from('messages')
     .update(clean)
     .in('id', ids)
+    .eq('user_id', user.id)
 
-  if (error) return apiError(500, error.message, undefined, 'update_failed')
+  if (error) return apiServerError('inbox.PATCH', error, 'update_failed')
 
   return NextResponse.json({ ok: true, updated: ids.length })
 }

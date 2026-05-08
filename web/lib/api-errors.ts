@@ -17,3 +17,18 @@ export function apiError(
   if (details !== undefined) body.details = details
   return NextResponse.json(body, { status })
 }
+
+// Generic server-error helper for 5xx paths that would otherwise leak
+// upstream Postgres / provider error messages (which can expose schema
+// names, constraint names, and internal state). Logs the full error
+// server-side, returns a generic message keyed by `code` to the client.
+export function apiServerError(
+  context: string,
+  err: unknown,
+  code = 'server_error',
+  status = 500,
+): NextResponse<ApiError> {
+  const detail = err instanceof Error ? err.message : String(err)
+  console.error(`[api] ${context}:`, detail)
+  return apiError(status, 'Internal server error', undefined, code)
+}

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
-import { apiError } from '../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../lib/api-errors'
 import { trackEvent } from '../../../lib/events'
 import { bumpLastInteractionAt } from '../../../lib/google/gmail-sync'
 import type { ActionItem, InteractionType } from '../../../lib/types'
@@ -73,7 +73,7 @@ export async function GET(req: Request) {
   if (contactId) q = q.eq('contact_id', contactId)
 
   const { data, error } = await q
-  if (error) return apiError(500, error.message, undefined, 'select_failed')
+  if (error) return apiServerError('interactions.GET', error, 'select_failed')
 
   return NextResponse.json({ interactions: data ?? [] })
 }
@@ -151,7 +151,7 @@ export async function POST(req: Request) {
     .insert(insertRow)
     .select('*')
     .single()
-  if (error) return apiError(400, error.message, undefined, 'insert_failed')
+  if (error) return apiServerError('interactions.POST', error, 'insert_failed', 400)
 
   // Auto-create commitments from action items where owner is 'me'.
   const myItems = actionItems.filter((a) => a.owner === 'me' && !a.completed)
@@ -186,6 +186,7 @@ export async function POST(req: Request) {
       .from('contacts')
       .select('next_follow_up')
       .eq('id', contactId)
+      .eq('user_id', user.id)
       .maybeSingle()
     const cur = existing?.next_follow_up
       ? new Date(existing.next_follow_up).getTime()
@@ -195,6 +196,7 @@ export async function POST(req: Request) {
         .from('contacts')
         .update({ next_follow_up: followUp })
         .eq('id', contactId)
+        .eq('user_id', user.id)
     }
   }
 

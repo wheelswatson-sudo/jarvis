@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import { SMS_GATEWAY_PROVIDER } from '../../../../lib/sms/gateway'
 
 export const dynamic = 'force-dynamic'
@@ -60,7 +60,11 @@ export async function POST(req: NextRequest) {
 
   const service = getServiceClient()
   if (!service) {
-    return apiError(500, 'Service role key not configured.', undefined, 'service_unavailable')
+    return apiServerError(
+      'integrations.sms-gateway.POST',
+      new Error('Service role key not configured.'),
+      'service_unavailable',
+    )
   }
 
   const { error: upsertError } = await service
@@ -79,8 +83,7 @@ export async function POST(req: NextRequest) {
     )
 
   if (upsertError) {
-    console.warn('[sms-gateway-config] upsert failed:', upsertError.message)
-    return apiError(500, 'Failed to save SMS gateway connection.', undefined, 'persist_failed')
+    return apiServerError('integrations.sms-gateway.POST', upsertError, 'persist_failed')
   }
   return NextResponse.json({ ok: true })
 }
@@ -100,8 +103,7 @@ export async function DELETE() {
     .eq('provider', SMS_GATEWAY_PROVIDER)
 
   if (error) {
-    console.warn('[sms-gateway-config] delete failed:', error.message)
-    return apiError(500, 'Failed to disconnect SMS gateway.', undefined, 'disconnect_failed')
+    return apiServerError('integrations.sms-gateway.DELETE', error, 'disconnect_failed')
   }
   return NextResponse.json({ ok: true })
 }

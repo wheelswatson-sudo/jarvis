@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { timingSafeEqual } from 'crypto'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import { runEngineForUser } from '../../../../lib/intelligence/experience-engine'
 import { generateInsightsForUser } from '../../../../lib/intelligence/insight-generator'
 
@@ -57,10 +57,9 @@ export async function POST(request: Request) {
   if (isCron) {
     const service = getServiceClient()
     if (!service) {
-      return apiError(
-        500,
-        'Service role key not configured',
-        undefined,
+      return apiServerError(
+        'intelligence.analyze.POST',
+        new Error('Service role key not configured'),
         'no_service_key',
       )
     }
@@ -73,7 +72,7 @@ export async function POST(request: Request) {
         .select('user_id')
         .gte('created_at', cutoff)
       if (error) {
-        return apiError(500, error.message, undefined, 'query_failed')
+        return apiServerError('intelligence.analyze.POST', error, 'query_failed')
       }
       const userIds = [
         ...new Set(
@@ -130,10 +129,9 @@ export async function POST(request: Request) {
 
   const service = getServiceClient()
   if (!service) {
-    return apiError(
-      500,
-      'Service role key not configured',
-      undefined,
+    return apiServerError(
+      'intelligence.analyze.POST',
+      new Error('Service role key not configured'),
       'no_service_key',
     )
   }

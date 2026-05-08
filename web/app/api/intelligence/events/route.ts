@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import type { EventType } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -69,7 +69,7 @@ export async function POST(request: Request) {
       .eq('user_id', user.id)
       .maybeSingle()
     if (ownerErr) {
-      return apiError(500, ownerErr.message, undefined, 'contact_lookup_failed')
+      return apiServerError('intelligence.events.POST', ownerErr, 'contact_lookup_failed')
     }
     if (!owned) {
       return apiError(403, 'Contact does not belong to user', undefined, 'forbidden_contact')
@@ -95,7 +95,7 @@ export async function POST(request: Request) {
   })
 
   if (error) {
-    return apiError(500, error.message, undefined, 'insert_failed')
+    return apiServerError('intelligence.events.POST', error, 'insert_failed')
   }
 
   return NextResponse.json({ ok: true })
