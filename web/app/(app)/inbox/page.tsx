@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useTransition } from 'react'
+import Link from 'next/link'
 import { useToast } from '../../../components/Toast'
 
 type ContactSlim = {
@@ -254,8 +255,12 @@ export default function InboxPage() {
         </div>
       </div>
 
-      {/* Message list */}
-      <div className="flex w-full max-w-md shrink-0 flex-col overflow-hidden border-r border-white/[0.05]">
+      {/* Message list — hidden on mobile when a message is selected */}
+      <div
+        className={`w-full flex-col overflow-hidden border-r border-white/[0.05] md:max-w-md md:shrink-0 ${
+          selected ? 'hidden md:flex' : 'flex'
+        }`}
+      >
         {!loading && messages.length > 0 && (
           <div className="border-b border-white/[0.04] p-2">
             <input
@@ -287,8 +292,14 @@ export default function InboxPage() {
             </div>
             <p className="text-sm text-zinc-300">No messages yet</p>
             <p className="mt-1 text-xs text-zinc-500">
-              Sync your Gmail from Settings to populate your inbox.
+              Connect Gmail or the SMS Gateway to populate your inbox.
             </p>
+            <Link
+              href="/settings"
+              className="mt-4 inline-flex items-center gap-1.5 rounded-lg aiea-cta px-3.5 py-1.5 text-xs font-medium text-white"
+            >
+              Connect a channel →
+            </Link>
           </div>
         )}
 
@@ -386,8 +397,12 @@ export default function InboxPage() {
         </div>
       </div>
 
-      {/* Detail */}
-      <div className="hidden flex-1 overflow-y-auto md:block">
+      {/* Detail — full-width on mobile when a message is selected */}
+      <div
+        className={`flex-1 overflow-y-auto ${
+          selectedMsg ? 'block' : 'hidden md:block'
+        }`}
+      >
         {!selectedMsg && (
           <div className="flex h-full items-center justify-center px-6">
             <div className="text-center">
@@ -401,6 +416,13 @@ export default function InboxPage() {
 
         {selectedMsg && (
           <div className="p-6 sm:p-8 animate-fade-in">
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className="mb-4 inline-flex items-center gap-1 text-xs text-zinc-400 transition-colors hover:text-zinc-100 md:hidden"
+            >
+              <span aria-hidden="true">←</span> Back to inbox
+            </button>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">

@@ -188,10 +188,10 @@ export default async function ContactDetailPage({
       <PageViewTracker eventType="contact_viewed" contactId={contact.id} />
 
       <Link
-        href="/"
+        href="/contacts"
         className="inline-flex items-center gap-1 text-xs text-zinc-500 transition-colors hover:text-zinc-200"
       >
-        <span aria-hidden="true">←</span> Back to dashboard
+        <span aria-hidden="true">←</span> Back to contacts
       </Link>
 
       {/* Hero */}
@@ -277,8 +277,34 @@ export default async function ContactDetailPage({
             Contact info
           </h2>
           <dl className="space-y-3 text-sm">
-            <Field label="Email" value={contact.email} mono />
-            <Field label="Phone" value={formatPhone(contact.phone)} mono />
+            <Field
+              label="Email"
+              value={
+                contact.email ? (
+                  <a
+                    href={`mailto:${contact.email}`}
+                    className="text-violet-300 transition-colors hover:text-violet-200 hover:underline"
+                  >
+                    {contact.email}
+                  </a>
+                ) : null
+              }
+              mono
+            />
+            <Field
+              label="Phone"
+              value={
+                contact.phone ? (
+                  <a
+                    href={`tel:${contact.phone.replace(/[^\d+]/g, '')}`}
+                    className="text-violet-300 transition-colors hover:text-violet-200 hover:underline"
+                  >
+                    {formatPhone(contact.phone)}
+                  </a>
+                ) : null
+              }
+              mono
+            />
             <Field label="Company" value={contact.company} />
             <Field label="Title" value={contact.title} />
             <Field

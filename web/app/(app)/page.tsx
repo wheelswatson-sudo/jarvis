@@ -383,14 +383,22 @@ export default async function DashboardPage() {
           <EmptyState
             icon={<NetworkIcon />}
             title="No contacts yet"
-            body="The sync scripts populate this. Connect Google in Settings, or import a CSV to get started."
+            body="Import a CSV to seed your network, or connect Google in Settings to sync automatically."
             action={
-              <Link
-                href="/settings"
-                className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-4 py-2 text-sm font-medium text-white"
-              >
-                Open settings →
-              </Link>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Link
+                  href="/contacts/import"
+                  className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-4 py-2 text-sm font-medium text-white"
+                >
+                  Import your first contacts →
+                </Link>
+                <Link
+                  href="/settings"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-white/20 hover:text-white"
+                >
+                  Open settings
+                </Link>
+              </div>
             }
           />
         ) : (

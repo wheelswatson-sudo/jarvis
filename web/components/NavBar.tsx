@@ -8,12 +8,20 @@ import { Brand } from './Brand'
 
 const NAV = [
   { href: '/', label: 'Dashboard' },
+  { href: '/contacts', label: 'Contacts' },
   { href: '/inbox', label: 'Inbox' },
   { href: '/briefing', label: 'Briefing' },
   { href: '/commitments', label: 'Commitments' },
   { href: '/approvals', label: 'Approvals' },
   { href: '/settings', label: 'Settings' },
 ]
+
+// Match either an exact path or a path-segment prefix (so `/inbox`
+// highlights for `/inbox/123` but not for `/inbox-archive`).
+function isActive(pathname: string, href: string): boolean {
+  if (href === '/') return pathname === '/'
+  return pathname === href || pathname.startsWith(href + '/')
+}
 
 export function NavBar({ email }: { email: string | null }) {
   const pathname = usePathname()
@@ -42,10 +50,7 @@ export function NavBar({ email }: { email: string | null }) {
           </Link>
           <nav className="hidden items-center gap-1 sm:flex" aria-label="Primary">
             {NAV.map((item) => {
-              const active =
-                item.href === '/'
-                  ? pathname === '/'
-                  : pathname.startsWith(item.href)
+              const active = isActive(pathname, item.href)
               return (
                 <Link
                   key={item.href}
@@ -112,10 +117,7 @@ export function NavBar({ email }: { email: string | null }) {
         >
           <ul className="space-y-1">
             {NAV.map((item) => {
-              const active =
-                item.href === '/'
-                  ? pathname === '/'
-                  : pathname.startsWith(item.href)
+              const active = isActive(pathname, item.href)
               return (
                 <li key={item.href}>
                   <Link

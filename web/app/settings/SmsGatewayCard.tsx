@@ -26,6 +26,9 @@ function formatTimestamp(iso: string | null): string {
 }
 
 const DEFAULT_GATEWAY_URL = 'https://api.sms-gate.app/3rdparty/v1'
+const PLAY_STORE_URL =
+  'https://play.google.com/store/apps/details?id=app.sms_gate'
+const SMS_GATEWAY_DOCS = 'https://docs.sms-gate.app/'
 
 export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
   const router = useRouter()
@@ -36,7 +39,9 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
   const [apiKey, setApiKey] = useState('')
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [showWebhook, setShowWebhook] = useState(false)
+  const [webhookCopied, setWebhookCopied] = useState(false)
+
+  const fullWebhookUrl = `${webhook_url}?user_id=${user_id}`
 
   function save() {
     if (!apiKey.trim() || !gatewayUrl.trim()) return
@@ -136,6 +141,48 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
     })
   }
 
+  function testConnection() {
+    setStatus(null)
+    setError(null)
+    startTransition(async () => {
+      try {
+        setStatus('Testing connection…')
+        const res = await fetch('/api/integrations/sms-gateway/test', {
+          method: 'POST',
+        })
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean
+          sample_count?: number
+          error?: string
+        }
+        if (!res.ok || !data.ok) {
+          setError(data.error ?? `Connection failed (HTTP ${res.status}).`)
+          setStatus(null)
+          return
+        }
+        setStatus(
+          `Gateway reachable. ${data.sample_count ?? 0} message${
+            data.sample_count === 1 ? '' : 's'
+          } available.`,
+        )
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Connection test failed.')
+        setStatus(null)
+      }
+    })
+  }
+
+  async function copyWebhook() {
+    try {
+      await navigator.clipboard.writeText(fullWebhookUrl)
+      setWebhookCopied(true)
+      setTimeout(() => setWebhookCopied(false), 2000)
+    } catch {
+      // Older browsers / locked-down WebViews — surface as inline error.
+      setError('Could not copy. Long-press the URL to copy manually.')
+    }
+  }
+
   return (
     <div className="rounded-2xl aiea-glass p-5">
       <div className="flex items-start justify-between gap-4">
@@ -154,17 +201,8 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
             )}
           </div>
           <p className="mt-1 text-xs text-zinc-500">
-            Sync texts from your Android phone via the{' '}
-            <a
-              href="https://docs.sms-gate.app/"
-              target="_blank"
-              rel="noreferrer"
-              className="text-violet-400 hover:underline"
-            >
-              SMS Gateway for Android
-            </a>{' '}
-            app. Inbound and outbound SMS land in the unified messages
-            table, matched to existing contacts by phone number.
+            Sync texts from your Android phone so SMS lands in your unified
+            inbox alongside email, matched to contacts by phone number.
           </p>
           {state.connected && (
             <dl className="mt-3 space-y-1 text-xs text-zinc-400">
@@ -201,7 +239,17 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               disabled={isPending}
               className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
             >
-              {isPending ? 'Syncing…' : 'Sync now'}
+              {isPending ? 'Working…' : 'Sync now'}
+            </button>
+          )}
+          {state.connected && !editing && (
+            <button
+              type="button"
+              onClick={testConnection}
+              disabled={isPending}
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-emerald-500 hover:text-emerald-300 disabled:opacity-50 transition-colors"
+            >
+              Test connection
             </button>
           )}
           {!editing && (
@@ -234,6 +282,68 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
           )}
         </div>
       </div>
+
+      {!state.connected && !editing && (
+        <ol className="mt-4 space-y-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-xs text-zinc-400">
+          <li className="flex gap-3">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-violet-500/20 text-[10px] font-semibold text-violet-200 ring-1 ring-inset ring-violet-500/30">
+              1
+            </span>
+            <div className="min-w-0">
+              <div className="font-medium text-zinc-200">
+                Install the SMS Gateway app on your Android phone
+              </div>
+              <div className="mt-0.5">
+                <a
+                  href={PLAY_STORE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-violet-300 hover:text-violet-200 hover:underline"
+                >
+                  Open in Play Store ↗
+                </a>
+              </div>
+            </div>
+          </li>
+          <li className="flex gap-3">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-violet-500/20 text-[10px] font-semibold text-violet-200 ring-1 ring-inset ring-violet-500/30">
+              2
+            </span>
+            <div className="min-w-0">
+              <div className="font-medium text-zinc-200">
+                Enable Cloud mode and copy the generated credentials
+              </div>
+              <div className="mt-0.5">
+                In the app: <span className="text-zinc-300">Settings → Cloud server</span>{' '}
+                → toggle on. The app shows a username (default{' '}
+                <code className="rounded bg-white/[0.04] px-1 text-zinc-300">sms</code>) and password.
+              </div>
+            </div>
+          </li>
+          <li className="flex gap-3">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-violet-500/20 text-[10px] font-semibold text-violet-200 ring-1 ring-inset ring-violet-500/30">
+              3
+            </span>
+            <div className="min-w-0">
+              <div className="font-medium text-zinc-200">
+                Click Connect below and paste the credentials
+              </div>
+              <div className="mt-0.5">
+                Then test the connection and configure the webhook for
+                real-time push.{' '}
+                <a
+                  href={SMS_GATEWAY_DOCS}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-violet-300 hover:text-violet-200 hover:underline"
+                >
+                  Full docs ↗
+                </a>
+              </div>
+            </div>
+          </li>
+        </ol>
+      )}
 
       {editing && (
         <div className="mt-4 space-y-3">
@@ -313,51 +423,52 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
         </div>
       )}
 
-      <div className="mt-4 rounded-lg border border-zinc-800 bg-zinc-950/50 p-3">
-        <button
-          type="button"
-          onClick={() => setShowWebhook((s) => !s)}
-          className="flex w-full items-center justify-between text-left text-xs text-zinc-400 hover:text-zinc-200"
-        >
-          <span className="font-medium">
-            {showWebhook ? 'Hide' : 'Show'} webhook setup (real-time push)
-          </span>
-          <span aria-hidden>{showWebhook ? '▾' : '▸'}</span>
-        </button>
-        {showWebhook && (
-          <div className="mt-3 space-y-2 text-[11px] text-zinc-500">
-            <p>
-              In the SMS Gateway app, add a webhook with these settings so new
-              messages stream into AIEA in real time:
-            </p>
-            <dl className="space-y-1">
-              <div className="flex flex-col gap-1">
-                <dt className="text-zinc-500">URL</dt>
-                <dd className="font-mono text-zinc-300 break-all">
-                  {webhook_url}?user_id={user_id}
-                </dd>
-              </div>
-              <div className="flex flex-col gap-1">
-                <dt className="text-zinc-500">Header</dt>
-                <dd className="font-mono text-zinc-300">
-                  Authorization: Bearer &lt;SMS_GATEWAY_WEBHOOK_SECRET&gt;
-                </dd>
-              </div>
-              <div className="flex flex-col gap-1">
-                <dt className="text-zinc-500">Events</dt>
-                <dd className="font-mono text-zinc-300">
-                  sms:received, sms:sent, sms:delivered
-                </dd>
-              </div>
-            </dl>
-            <p className="pt-1 text-zinc-500">
-              The shared secret must match the{' '}
-              <code className="text-zinc-300">SMS_GATEWAY_WEBHOOK_SECRET</code>{' '}
-              env var on the server. Without it, every webhook request is
-              rejected with 401.
-            </p>
-          </div>
-        )}
+      <div className="mt-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+          Webhook (real-time push)
+        </div>
+        <p className="mt-1 text-[11px] text-zinc-500">
+          Paste this URL into the SMS Gateway app under{' '}
+          <span className="text-zinc-300">Webhooks → Add webhook</span> so new
+          messages stream in immediately.
+        </p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <code className="min-w-0 flex-1 break-all rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-[11px] text-zinc-300">
+            {fullWebhookUrl}
+          </code>
+          <button
+            type="button"
+            onClick={copyWebhook}
+            className="shrink-0 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 hover:border-indigo-500 hover:text-indigo-300 transition-colors"
+          >
+            {webhookCopied ? 'Copied ✓' : 'Copy'}
+          </button>
+        </div>
+        <details className="mt-3 text-[11px] text-zinc-500">
+          <summary className="cursor-pointer text-zinc-400 hover:text-zinc-200">
+            Webhook header & events
+          </summary>
+          <dl className="mt-2 space-y-1.5">
+            <div className="flex flex-col gap-1">
+              <dt className="text-zinc-500">Header</dt>
+              <dd className="font-mono text-zinc-300">
+                Authorization: Bearer &lt;SMS_GATEWAY_WEBHOOK_SECRET&gt;
+              </dd>
+            </div>
+            <div className="flex flex-col gap-1">
+              <dt className="text-zinc-500">Events</dt>
+              <dd className="font-mono text-zinc-300">
+                sms:received, sms:sent, sms:delivered
+              </dd>
+            </div>
+          </dl>
+          <p className="pt-2 text-zinc-500">
+            The shared secret must match the{' '}
+            <code className="text-zinc-300">SMS_GATEWAY_WEBHOOK_SECRET</code>{' '}
+            env var on the server. Without it, every webhook request is
+            rejected with 401.
+          </p>
+        </details>
       </div>
 
       {status && <p className="mt-3 text-xs text-emerald-400">{status}</p>}

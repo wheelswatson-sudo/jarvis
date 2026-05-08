@@ -266,17 +266,11 @@ export default async function SettingsPage() {
           existingKeys={keys}
         />
 
-        <section className="mt-12">
-          <div className="mb-5">
-            <h2 className="text-lg font-medium tracking-tight text-zinc-100">
-              Integrations
-            </h2>
-            <p className="mt-1 max-w-xl text-sm text-zinc-400">
-              Connect external accounts to pull data into your relationship
-              graph.
-            </p>
-          </div>
-          <div className="space-y-3">
+        <section className="mt-12 space-y-10">
+          <IntegrationGroup
+            title="Google Services"
+            description="Connect a Google account once, then enable the data sources you want to pull from — Gmail, Calendar, and Contacts feed into your relationship graph."
+          >
             <GoogleConnectCard
               account_email={accountEmail}
               services={googleServices}
@@ -284,15 +278,47 @@ export default async function SettingsPage() {
             <GmailSyncCard state={gmailState} />
             <CalendarSyncCard state={calendarState} />
             <GoogleContactsCard state={googleContacts} />
+          </IntegrationGroup>
+
+          <IntegrationGroup
+            title="Messaging"
+            description="Bring SMS into the unified inbox alongside email. Texts get matched to existing contacts by phone number."
+          >
             <SmsGatewayCard
               state={smsState}
               webhook_url={smsWebhookUrl}
               user_id={user.id}
             />
+          </IntegrationGroup>
+
+          <IntegrationGroup
+            title="Enrichment"
+            description="Auto-fill company, title, and seniority for new contacts using third-party data providers."
+          >
             <ApolloCard state={apolloState} />
-          </div>
+          </IntegrationGroup>
         </section>
       </div>
+    </div>
+  )
+}
+
+function IntegrationGroup({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children: React.ReactNode
+}) {
+  return (
+    <div>
+      <div className="mb-4">
+        <h2 className="text-base font-medium text-zinc-100">{title}</h2>
+        <p className="mt-1 text-sm text-zinc-500">{description}</p>
+      </div>
+      <div className="space-y-3">{children}</div>
     </div>
   )
 }
