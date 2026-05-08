@@ -11,7 +11,9 @@ import { ApolloCard, type ApolloState } from './ApolloCard'
 import { GmailSyncCard, type GmailSyncState } from './GmailSyncCard'
 import { CalendarSyncCard, type CalendarSyncState } from './CalendarSyncCard'
 import { GoogleConnectCard, type GoogleService } from './GoogleConnectCard'
+import { SmsGatewayCard, type SmsGatewayState } from './SmsGatewayCard'
 import { APOLLO_PROVIDER } from '../../lib/apollo'
+import { SMS_GATEWAY_PROVIDER } from '../../lib/sms/gateway'
 
 export const dynamic = 'force-dynamic'
 
@@ -34,8 +36,15 @@ export default async function SettingsPage() {
   } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [profileRes, keysRes, googleIntegrationsRes, apolloRes, gmailRes] =
-    await Promise.all([
+  const [
+    profileRes,
+    keysRes,
+    googleIntegrationsRes,
+    apolloRes,
+    gmailRes,
+    smsRes,
+    smsLastMessageRes,
+  ] = await Promise.all([
       supabase
         .from('profiles')
         .select('preferred_model')
@@ -75,6 +84,20 @@ export default async function SettingsPage() {
         .eq('user_id', user.id)
         .like('source', 'gmail:%')
         .order('occurred_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from('user_integrations')
+        .select('access_token, last_synced_at, metadata')
+        .eq('user_id', user.id)
+        .eq('provider', SMS_GATEWAY_PROVIDER)
+        .maybeSingle(),
+      supabase
+        .from('messages')
+        .select('sent_at')
+        .eq('user_id', user.id)
+        .eq('channel', 'sms')
+        .order('sent_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
     ])
@@ -176,6 +199,37 @@ export default async function SettingsPage() {
     last_synced_at: byProvider.get('google_calendar')?.last_synced_at ?? null,
   }
 
+  const smsRow = smsRes.data as
+    | {
+        access_token: string | null
+        last_synced_at: string | null
+        metadata: { gateway_url?: unknown; username?: unknown } | null
+      }
+    | null
+  const smsApiKey =
+    typeof smsRow?.access_token === 'string' ? smsRow.access_token : null
+  const smsMeta = (smsRow?.metadata ?? {}) as {
+    gateway_url?: unknown
+    username?: unknown
+  }
+  const smsState: SmsGatewayState = {
+    connected: !!smsApiKey,
+    gateway_url:
+      typeof smsMeta.gateway_url === 'string' ? smsMeta.gateway_url : null,
+    username: typeof smsMeta.username === 'string' ? smsMeta.username : null,
+    masked_key: smsApiKey ? maskKey(smsApiKey) : null,
+    last_synced_at: smsRow?.last_synced_at ?? null,
+    last_message_at: smsLastMessageRes.data?.sent_at ?? null,
+  }
+
+  // The webhook URL the user pastes into the SMS gateway app. Resolved on
+  // the server so each Vercel preview/prod deployment shows the right host.
+  const baseUrl =
+    process.env.NEXT_PUBLIC_APP_URL ??
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null) ??
+    'http://localhost:3000'
+  const smsWebhookUrl = `${baseUrl.replace(/\/$/, '')}/api/sms/webhook`
+
   return (
     <div className="relative min-h-screen overflow-x-clip bg-[#07070b] text-zinc-100">
       <div className="aiea-aurora-bg" aria-hidden="true" />
@@ -228,6 +282,11 @@ export default async function SettingsPage() {
             <GmailSyncCard state={gmailState} />
             <CalendarSyncCard state={calendarState} />
             <GoogleContactsCard state={googleContacts} />
+            <SmsGatewayCard
+              state={smsState}
+              webhook_url={smsWebhookUrl}
+              user_id={user.id}
+            />
             <ApolloCard state={apolloState} />
           </div>
         </section>
