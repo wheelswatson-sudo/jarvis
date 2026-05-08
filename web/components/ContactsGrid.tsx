@@ -7,10 +7,20 @@ import { HalfLifeGauge, SentimentSlope } from './Gauge'
 import { CadenceBadge } from './CadenceBadge'
 import { Tooltip, HelpDot } from './Tooltip'
 import { useToast } from './Toast'
-import { contactName, tierColor, tierLabel } from '../lib/format'
+import {
+  contactName,
+  pipelineStageColor,
+  tierColor,
+  tierLabel,
+} from '../lib/format'
 import { getCadenceInfo } from '../lib/contacts/cadence'
 import { TIER_GLOSSARY, HALF_LIFE_HELP } from '../lib/glossary'
-import type { Contact } from '../lib/types'
+import {
+  PIPELINE_STAGES,
+  PIPELINE_STAGE_LABELS,
+  type Contact,
+  type PipelineStage,
+} from '../lib/types'
 
 type SortMode = 'default' | 'overdue'
 
@@ -69,7 +79,33 @@ export function ContactsGrid({
   const [isPending, startTransition] = useTransition()
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('default')
+  const [stageFilter, setStageFilter] = useState<PipelineStage | null>(null)
   const [displayCount, setDisplayCount] = useState(pageSize)
+
+  // Per-stage counts power both the filter pills and the "no contacts in this
+  // status" empty state. Recomputed only when contacts change so toggling
+  // the filter doesn't reshuffle counts.
+  const stageCounts = useMemo(() => {
+    const counts: Record<PipelineStage, number> = {
+      lead: 0,
+      warm: 0,
+      active: 0,
+      committed: 0,
+      closed: 0,
+      dormant: 0,
+    }
+    for (const c of contacts) {
+      if (c.pipeline_stage && c.pipeline_stage in counts) {
+        counts[c.pipeline_stage]++
+      }
+    }
+    return counts
+  }, [contacts])
+
+  const hasAnyStaged = useMemo(
+    () => contacts.some((c) => c.pipeline_stage != null),
+    [contacts],
+  )
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -86,6 +122,10 @@ export function ContactsGrid({
           return haystack.includes(q)
         })
       : contacts
+
+    if (stageFilter) {
+      list = list.filter((c) => c.pipeline_stage === stageFilter)
+    }
 
     if (sortMode === 'overdue') {
       const now = Date.now()
@@ -114,7 +154,7 @@ export function ContactsGrid({
     }
 
     return list
-  }, [contacts, query, sortMode])
+  }, [contacts, query, sortMode, stageFilter])
 
   // Count contacts the cadence engine couldn't evaluate (no tier set).
   // Surfaced in the empty-state copy so the user knows we silently dropped
@@ -309,6 +349,47 @@ export function ContactsGrid({
         </div>
       </div>
 
+      {hasAnyStaged && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+            Status
+          </span>
+          <button
+            type="button"
+            onClick={() => setStageFilter(null)}
+            aria-pressed={stageFilter === null}
+            className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-all ${
+              stageFilter === null
+                ? 'bg-white/[0.08] text-zinc-100 ring-1 ring-inset ring-white/15'
+                : 'text-zinc-500 hover:text-zinc-200'
+            }`}
+          >
+            Any
+          </button>
+          {PIPELINE_STAGES.map((s) => {
+            const count = stageCounts[s]
+            if (count === 0) return null
+            const active = stageFilter === s
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStageFilter(active ? null : s)}
+                aria-pressed={active}
+                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-all ${
+                  active
+                    ? pipelineStageColor(s)
+                    : 'bg-white/[0.03] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200 ring-1 ring-inset ring-white/[0.06]'
+                }`}
+              >
+                <span>{PIPELINE_STAGE_LABELS[s]}</span>
+                <span className="tabular-nums opacity-70">{count}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       {!apolloConnected && selectMode && (
         <p className="text-xs text-amber-300">
           Apollo isn&apos;t connected.{' '}
@@ -346,16 +427,25 @@ export function ContactsGrid({
                     </div>
                   </div>
                 </div>
-                <Tooltip
-                  content={tierTooltipContent(c.tier)}
-                  side="left"
-                >
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${tierColor(c.tier)}`}
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <Tooltip
+                    content={tierTooltipContent(c.tier)}
+                    side="left"
                   >
-                    {tierLabel(c.tier)}
-                  </span>
-                </Tooltip>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${tierColor(c.tier)}`}
+                    >
+                      {tierLabel(c.tier)}
+                    </span>
+                  </Tooltip>
+                  {c.pipeline_stage && (
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${pipelineStageColor(c.pipeline_stage)}`}
+                    >
+                      {PIPELINE_STAGE_LABELS[c.pipeline_stage]}
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="relative mt-4">
                 <div className="mb-1.5 flex items-center justify-between text-[11px] uppercase tracking-wider text-zinc-500">
@@ -488,6 +578,26 @@ export function ContactsGrid({
                 >
                   Clear search
                 </button>
+              </p>
+            </>
+          ) : stageFilter ? (
+            <>
+              <p className="text-sm font-medium text-zinc-200">
+                No contacts tagged{' '}
+                <span className="text-zinc-100">
+                  {PIPELINE_STAGE_LABELS[stageFilter]}
+                </span>
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Open a contact and set their status, or{' '}
+                <button
+                  type="button"
+                  onClick={() => setStageFilter(null)}
+                  className="text-violet-300 underline-offset-2 hover:underline"
+                >
+                  show all
+                </button>
+                .
               </p>
             </>
           ) : (

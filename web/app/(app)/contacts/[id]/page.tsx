@@ -369,9 +369,9 @@ export default async function ContactDetailPage({
 
       <section>
         <SectionHeader
-          eyebrow="Pipeline"
-          title="Stage"
-          subtitle="Where this relationship sits in your funnel."
+          eyebrow="Status"
+          title="Pipeline status"
+          subtitle="Tag this contact's current status. Use it to filter the contacts list."
         />
         <Card>
           <PipelineSelector contact={contact} />

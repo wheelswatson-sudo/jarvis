@@ -89,14 +89,14 @@ export function PipelineSelector({ contact }: { contact: Contact }) {
           htmlFor={`pipeline-notes-${contact.id}`}
           className="mb-1 block text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500"
         >
-          Pipeline notes
+          Status notes
         </label>
         <textarea
           id={`pipeline-notes-${contact.id}`}
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
           onBlur={commitNotes}
-          placeholder="Where they sit in the pipeline, blockers, next move…"
+          placeholder="Context for this status — blockers, next move, anything you want surfaced…"
           rows={2}
           maxLength={2000}
           className="w-full resize-none rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none transition-colors focus:border-violet-500/50"
