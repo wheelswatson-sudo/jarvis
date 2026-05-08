@@ -34,6 +34,8 @@ type Message = {
 const CHANNELS = [
   { key: null, label: 'All' },
   { key: 'email', label: 'Email' },
+  { key: 'sms', label: 'SMS' },
+  { key: 'imessage', label: 'iMessage' },
   { key: 'slack', label: 'Slack' },
   { key: 'telegram', label: 'Telegram' },
   { key: 'linkedin', label: 'LinkedIn' },
@@ -483,7 +485,7 @@ export default function InboxPage() {
             </div>
 
             <div className="mt-6 border-t border-white/[0.05] pt-6">
-              <div className="prose prose-invert prose-sm max-w-none whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">
+              <div className="max-w-none whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">
                 {selectedMsg.snippet}
               </div>
             </div>

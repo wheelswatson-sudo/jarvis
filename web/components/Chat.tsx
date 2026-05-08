@@ -84,9 +84,9 @@ export function Chat() {
   }
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end">
+    <div className="fixed bottom-4 right-4 left-4 z-50 flex flex-col items-end sm:left-auto">
       {open && (
-        <div className="mb-3 flex h-[28rem] w-[22rem] flex-col overflow-hidden rounded-2xl aiea-glass-strong shadow-2xl shadow-violet-500/10 animate-fade-up">
+        <div className="mb-3 flex h-[min(28rem,calc(100vh-7rem))] w-full flex-col overflow-hidden rounded-2xl aiea-glass-strong shadow-2xl shadow-violet-500/10 animate-fade-up sm:w-[22rem]">
           <div className="flex items-center justify-between border-b border-white/[0.06] bg-gradient-to-r from-indigo-500/[0.08] via-violet-500/[0.06] to-fuchsia-500/[0.08] px-4 py-3">
             <div className="flex items-center gap-2">
               <span

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useEffect, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import type { ActionItem, InteractionType } from '../lib/types'
 
@@ -17,6 +17,23 @@ export function QuickAddInteraction({
   const [open, setOpen] = useState(false)
   const [pending, start] = useTransition()
   const [err, setErr] = useState<string | null>(null)
+
+  // Esc-to-close + body scroll lock while modal is open. Without these the
+  // user is trapped scrolling the page underneath and has to find the Cancel
+  // button to dismiss.
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [open])
 
   const [type, setType] = useState<InteractionType>('meeting')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 16))
@@ -99,17 +116,36 @@ export function QuickAddInteraction({
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center bg-[#07070b]/80 px-4 py-12 backdrop-blur-md animate-fade-in">
+    <div
+      className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-[#07070b]/80 px-4 py-12 backdrop-blur-md animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Log interaction with ${contactName}`}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) setOpen(false)
+      }}
+    >
       <form
         onSubmit={submit}
-        className="w-full max-w-lg space-y-4 rounded-2xl aiea-glass-strong p-6 shadow-2xl shadow-violet-500/10 animate-fade-up"
+        className="relative w-full max-w-lg space-y-4 rounded-2xl aiea-glass-strong p-6 shadow-2xl shadow-violet-500/10 animate-fade-up"
       >
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M6 6l12 12" />
+            <path d="M6 18L18 6" />
+          </svg>
+        </button>
         <div>
           <h3 className="text-base font-medium text-zinc-100">
             Log interaction with {contactName}
           </h3>
           <p className="mt-1 text-xs text-zinc-500">
-            Action items prefixed with “they:” go to them, otherwise to you.
+            Action items prefixed with &ldquo;they:&rdquo; go to them, otherwise to you.
           </p>
         </div>
 
@@ -171,7 +207,7 @@ export function QuickAddInteraction({
           <span className="mb-1 block text-xs uppercase tracking-wide text-zinc-500">
             Action items{' '}
             <span className="text-zinc-600">
-              (one per line — prefix “they:” for theirs)
+              (one per line — prefix &ldquo;they:&rdquo; for theirs)
             </span>
           </span>
           <textarea

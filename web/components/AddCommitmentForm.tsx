@@ -48,6 +48,10 @@ export function AddCommitmentForm({
         due_at: dueAt ? new Date(dueAt).toISOString() : null,
         contact_id: contactId || null,
         owner,
+        // commitments.direction is NOT NULL with a 'me' default. Mirror it
+        // with owner so "they owe me X" rows aren't silently filed under
+        // direction='me'. Same pattern as POST /api/commitments.
+        direction: owner,
         status: 'open',
       })
       if (error) {
