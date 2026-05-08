@@ -138,7 +138,7 @@ export default async function DashboardPage() {
   const maxLtv = topByLtv[0]?.ltv_estimate ?? 1
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-10">
       {/* Hero */}
       <div className="animate-fade-up">
         <PageHeader
@@ -251,7 +251,18 @@ export default async function DashboardPage() {
         />
         <Card>
           {topByLtv.length === 0 ? (
-            <p className="text-sm text-zinc-500">No LTV estimates yet.</p>
+            <div className="py-8 text-center">
+              <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-500/15 via-violet-500/15 to-fuchsia-500/15 ring-1 ring-inset ring-white/10 text-violet-200">
+                <SparklesIcon />
+              </div>
+              <p className="text-sm font-medium text-zinc-200">
+                No LTV estimates yet
+              </p>
+              <p className="mx-auto mt-1 max-w-sm text-xs text-zinc-500">
+                LTV scores appear once contacts have enough interaction
+                history. Log a few meetings to start the model.
+              </p>
+            </div>
           ) : (
             <ul className="space-y-4 aiea-stagger">
               {topByLtv.map((c, idx) => {
@@ -270,11 +281,11 @@ export default async function DashboardPage() {
                           <span className="w-5 shrink-0 font-mono text-[11px] tabular-nums text-zinc-600">
                             {(idx + 1).toString().padStart(2, '0')}
                           </span>
-                          <span className="truncate font-medium text-zinc-100 group-hover:text-white">
+                          <span className="truncate font-medium text-zinc-100 transition-colors group-hover:text-white">
                             {contactName(c)}
                           </span>
                         </span>
-                        <span className="shrink-0 tabular-nums text-zinc-400 group-hover:text-zinc-200">
+                        <span className="shrink-0 tabular-nums text-zinc-400 transition-colors group-hover:text-zinc-200">
                           {formatCurrency(c.ltv_estimate)}
                         </span>
                       </div>

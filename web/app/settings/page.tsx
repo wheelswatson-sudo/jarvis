@@ -267,9 +267,11 @@ export default async function SettingsPage() {
         />
 
         <section className="mt-12">
-          <div className="mb-4">
-            <h2 className="text-base font-medium text-zinc-100">Integrations</h2>
-            <p className="mt-1 text-sm text-zinc-500">
+          <div className="mb-5">
+            <h2 className="text-lg font-medium tracking-tight text-zinc-100">
+              Integrations
+            </h2>
+            <p className="mt-1 max-w-xl text-sm text-zinc-400">
               Connect external accounts to pull data into your relationship
               graph.
             </p>

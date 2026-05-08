@@ -54,43 +54,45 @@ export function GoogleConnectCard({ account_email, services }: Props) {
   const anyConnected = services.some((s) => s.last_synced_at)
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+    <div className="rounded-2xl aiea-glass p-5 transition-colors hover:border-white/[0.10]">
       <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
             <GoogleGlyph />
             <span className="text-sm font-medium text-zinc-100">Google Workspace</span>
             <span
-              className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${
+              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
                 anyConnected
-                  ? 'border-emerald-700/60 bg-emerald-900/30 text-emerald-300'
-                  : 'border-zinc-700 bg-zinc-800/50 text-zinc-400'
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                  : 'border-white/[0.08] bg-white/[0.02] text-zinc-500'
               }`}
             >
               {anyConnected ? 'Connected' : 'Not connected'}
             </span>
           </div>
-          <p className="mt-1 text-xs text-zinc-500">
+          <p className="mt-2 text-xs leading-relaxed text-zinc-500">
             One consent screen grants Gmail, Calendar, Tasks, and Contacts
             access. Sign in with Google (or click Reconnect after a token
             expires) and every service below picks up automatically.
           </p>
           {account_email && (
-            <p className="mt-2 text-xs text-zinc-400">
+            <p className="mt-3 text-xs text-zinc-400">
               <span className="text-zinc-500">Account: </span>
-              <span className="text-zinc-300">{account_email}</span>
+              <span className="text-zinc-200">{account_email}</span>
             </p>
           )}
-          <ul className="mt-3 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+          <ul className="mt-4 grid grid-cols-1 gap-1.5 text-xs sm:grid-cols-2">
             {services.map((s) => (
               <li
                 key={s.key}
-                className="flex items-center justify-between gap-3 rounded border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5"
+                className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.05] bg-white/[0.02] px-3 py-1.5"
               >
                 <span className="text-zinc-300">{s.label}</span>
                 <span
                   className={
-                    s.last_synced_at ? 'text-emerald-400' : 'text-zinc-500'
+                    s.last_synced_at
+                      ? 'text-emerald-300 tabular-nums'
+                      : 'text-zinc-500 tabular-nums'
                   }
                 >
                   {formatTimestamp(s.last_synced_at)}
@@ -104,7 +106,7 @@ export function GoogleConnectCard({ account_email, services }: Props) {
             type="button"
             onClick={reconnect}
             disabled={busy}
-            className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+            className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy
               ? 'Redirecting…'
@@ -114,7 +116,7 @@ export function GoogleConnectCard({ account_email, services }: Props) {
           </button>
         </div>
       </div>
-      {error && <p className="mt-3 text-xs text-rose-400">{error}</p>}
+      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

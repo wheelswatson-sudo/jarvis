@@ -77,46 +77,46 @@ export function ApolloCard({ state }: Props) {
   }
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+    <div className="rounded-2xl aiea-glass p-5 transition-colors hover:border-white/[0.10]">
       <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
             <ApolloGlyph />
             <span className="text-sm font-medium text-zinc-100">Apollo.io</span>
             {state.connected ? (
-              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-300">
                 Connected
               </span>
             ) : (
-              <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+              <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
                 Not connected
               </span>
             )}
           </div>
-          <p className="mt-1 text-xs text-zinc-500">
+          <p className="mt-2 text-xs leading-relaxed text-zinc-500">
             Enrich contacts with Apollo&apos;s People database — title, company,
             LinkedIn, phone, employment history. Get your API key from{' '}
             <a
               href="https://app.apollo.io/#/settings/integrations/api"
               target="_blank"
               rel="noreferrer"
-              className="text-violet-400 hover:underline"
+              className="text-violet-300 underline-offset-2 transition-colors hover:text-violet-200 hover:underline"
             >
               app.apollo.io → Settings → Integrations → API
             </a>
             .
           </p>
           {state.connected && (
-            <dl className="mt-3 space-y-1 text-xs text-zinc-400">
+            <dl className="mt-4 space-y-1.5 text-xs">
               {state.masked_key && (
-                <div className="flex gap-2">
+                <div className="flex gap-3">
                   <dt className="w-24 shrink-0 text-zinc-500">API key</dt>
                   <dd className="font-mono text-zinc-300">{state.masked_key}</dd>
                 </div>
               )}
-              <div className="flex gap-2">
+              <div className="flex gap-3">
                 <dt className="w-24 shrink-0 text-zinc-500">Last enrich</dt>
-                <dd className="text-zinc-300">
+                <dd className="text-zinc-200 tabular-nums">
                   {formatTimestamp(state.last_synced_at)}
                 </dd>
               </div>
@@ -133,7 +133,7 @@ export function ApolloCard({ state }: Props) {
                 setError(null)
               }}
               disabled={isPending}
-              className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+              className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
               {state.connected ? 'Replace key' : 'Add API key'}
             </button>
@@ -143,7 +143,7 @@ export function ApolloCard({ state }: Props) {
               type="button"
               onClick={disconnect}
               disabled={isPending}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-400 hover:border-rose-500 hover:text-rose-300 disabled:opacity-50 transition-colors"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-rose-500/50 hover:text-rose-300 disabled:opacity-50"
             >
               Disconnect
             </button>
@@ -166,13 +166,13 @@ export function ApolloCard({ state }: Props) {
                 setValue('')
               }
             }}
-            className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+            className="flex-1 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
           />
           <button
             type="button"
             onClick={save}
             disabled={isPending || !value.trim()}
-            className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+            className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
           >
             Save
           </button>
@@ -183,15 +183,15 @@ export function ApolloCard({ state }: Props) {
               setValue('')
             }}
             disabled={isPending}
-            className="rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50 transition-colors"
+            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-white/[0.18] hover:text-zinc-200 disabled:opacity-50"
           >
             Cancel
           </button>
         </div>
       )}
 
-      {status && <p className="mt-3 text-xs text-emerald-400">{status}</p>}
-      {error && <p className="mt-3 text-xs text-rose-400">{error}</p>}
+      {status && <p className="mt-3 text-xs text-emerald-300">{status}</p>}
+      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

@@ -113,16 +113,16 @@ function truncate(s: string, n: number): string {
 }
 
 const TONE_BORDER: Record<Alert['tone'], string> = {
-  red: 'border-red-500/40 hover:border-red-400',
-  fuchsia: 'border-fuchsia-500/40 hover:border-fuchsia-400',
-  amber: 'border-amber-500/40 hover:border-amber-400',
-  violet: 'border-violet-500/40 hover:border-violet-400',
+  red: 'border-rose-500/30 hover:border-rose-400/60',
+  fuchsia: 'border-fuchsia-500/30 hover:border-fuchsia-400/60',
+  amber: 'border-amber-500/30 hover:border-amber-400/60',
+  violet: 'border-violet-500/30 hover:border-violet-400/60',
 }
 const TONE_DOT: Record<Alert['tone'], string> = {
-  red: 'bg-red-500',
-  fuchsia: 'bg-fuchsia-500',
-  amber: 'bg-amber-500',
-  violet: 'bg-violet-500',
+  red: 'bg-rose-400 shadow-rose-500/50',
+  fuchsia: 'bg-fuchsia-400 shadow-fuchsia-500/50',
+  amber: 'bg-amber-400 shadow-amber-500/50',
+  violet: 'bg-violet-400 shadow-violet-500/50',
 }
 
 export function RelationshipAlerts({
@@ -137,20 +137,20 @@ export function RelationshipAlerts({
   const alerts = buildAlerts(contacts, commitments, interactions)
   if (alerts.length === 0) {
     return (
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5 text-sm text-zinc-500">
+      <div className="rounded-2xl aiea-glass p-5 text-sm text-zinc-500">
         Nothing decaying. Network is in steady state.
       </div>
     )
   }
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 aiea-stagger">
       {alerts.map((a) => {
         const inner = (
           <div
-            className={`flex items-start gap-3 rounded-lg border bg-zinc-900 p-3 transition ${TONE_BORDER[a.tone]}`}
+            className={`flex items-start gap-3 rounded-xl border bg-white/[0.02] p-3 transition-colors ${TONE_BORDER[a.tone]}`}
           >
             <span
-              className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${TONE_DOT[a.tone]}`}
+              className={`mt-1.5 h-2 w-2 shrink-0 rounded-full shadow-[0_0_8px_currentColor] ${TONE_DOT[a.tone]}`}
             />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-zinc-100">

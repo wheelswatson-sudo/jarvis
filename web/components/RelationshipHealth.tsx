@@ -77,9 +77,9 @@ export function RelationshipHealthBar({
         <span className={`font-medium ${TONE_TEXT[tone]}`}>{label}</span>
         <span className="tabular-nums text-zinc-400">{pct}%</span>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.05]">
         <div
-          className={`h-full ${TONE_FILL[tone]}`}
+          className={`h-full rounded-full shadow-[0_0_8px_rgba(139,92,246,0.4)] transition-[width] duration-700 ${TONE_FILL[tone]}`}
           style={{ width: `${pct}%` }}
         />
       </div>

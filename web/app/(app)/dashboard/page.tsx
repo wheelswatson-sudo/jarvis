@@ -128,203 +128,201 @@ export default async function DashboardPage() {
     }))
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-6xl space-y-10 px-4 py-8 sm:px-6">
-        <header>
-          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400" />
-            Dashboard
-          </div>
-          <h1 className="mt-3 bg-gradient-to-r from-indigo-200 via-violet-200 to-fuchsia-200 bg-clip-text text-3xl font-semibold tracking-tight text-transparent">
-            Relationship intelligence
-          </h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            {contacts.length} contacts · {active} active · {cooling} cooling ·{' '}
-            {dormant} dormant
-          </p>
-        </header>
-
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Metric label="Active (30d)" value={active.toString()} />
-          <Metric label="Cooling" value={cooling.toString()} accent />
-          <Metric
-            label="Open commitments"
-            value={openCommitments.length.toString()}
-            hint={`${overdueCommitments.length} overdue`}
-          />
-          <Metric
-            label="Compliance (30d)"
-            value={
-              compliance == null
-                ? '—'
-                : `${Math.round(compliance * 100)}%`
-            }
-            hint={`${completed30.length}/${due30.length} on time`}
-          />
+    <div className="space-y-10 animate-fade-up">
+      <header>
+        <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
+          <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400" />
+          Dashboard
         </div>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
+          Relationship intelligence
+        </h1>
+        <p className="mt-2 max-w-2xl text-sm text-zinc-400 sm:text-base">
+          {contacts.length} contacts · {active} active · {cooling} cooling ·{' '}
+          {dormant} dormant
+        </p>
+      </header>
 
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 aiea-stagger">
+        <Metric label="Active (30d)" value={active.toString()} />
+        <Metric label="Cooling" value={cooling.toString()} accent />
+        <Metric
+          label="Open commitments"
+          value={openCommitments.length.toString()}
+          hint={`${overdueCommitments.length} overdue`}
+        />
+        <Metric
+          label="Compliance (30d)"
+          value={
+            compliance == null
+              ? '—'
+              : `${Math.round(compliance * 100)}%`
+          }
+          hint={`${completed30.length}/${due30.length} on time`}
+        />
+      </div>
+
+      <section>
+        <SectionHeader
+          title="Quick actions"
+          subtitle="Capture a meeting, log an interaction, scan a transcript."
+        />
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            href="/commitments"
+            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3.5 py-2 text-sm font-medium text-zinc-300 transition-colors hover:border-violet-400/40 hover:text-white"
+          >
+            View all commitments →
+          </Link>
+          <Link
+            href="/contacts/import"
+            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3.5 py-2 text-sm font-medium text-zinc-300 transition-colors hover:border-violet-400/40 hover:text-white"
+          >
+            Import contacts →
+          </Link>
+        </div>
+        <div className="mt-3">
+          <TranscriptImporter />
+        </div>
+      </section>
+
+      <section>
+        <SectionHeader
+          title="Today's meetings"
+          subtitle="Upcoming in the next 24 hours, with relationship context."
+        />
+        <UpcomingMeetingsCards
+          meetings={meetings.meetings}
+          calendarConnected={meetings.calendarConnected}
+        />
+      </section>
+
+      <section>
+        <SectionHeader
+          title="Needs your attention"
+          subtitle="Decay alerts, overdue items, and follow-ups due now."
+        />
+        <RelationshipAlerts
+          contacts={contacts}
+          commitments={commitments}
+          interactions={allRecent}
+        />
+      </section>
+
+      <IntelligencePanel />
+
+      <div className="grid gap-4 lg:grid-cols-2">
         <section>
           <SectionHeader
-            title="Quick actions"
-            subtitle="Capture a meeting, log an interaction, scan a transcript."
+            title="Top relationships needing attention"
+            subtitle={`Tier 1 & 2 contacts with declining health (${needsAttention.length}).`}
           />
-          <div className="flex flex-wrap items-center gap-3">
-            <Link
-              href="/commitments"
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-sm text-zinc-200 hover:border-violet-500 hover:text-white"
-            >
-              View all commitments →
-            </Link>
-            <Link
-              href="/contacts/import"
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-sm text-zinc-200 hover:border-violet-500 hover:text-white"
-            >
-              Import contacts →
-            </Link>
-          </div>
-          <div className="mt-3">
-            <TranscriptImporter />
-          </div>
-        </section>
-
-        <section>
-          <SectionHeader
-            title="Today's meetings"
-            subtitle="Upcoming in the next 24 hours, with relationship context."
-          />
-          <UpcomingMeetingsCards
-            meetings={meetings.meetings}
-            calendarConnected={meetings.calendarConnected}
-          />
-        </section>
-
-        <section>
-          <SectionHeader
-            title="Needs your attention"
-            subtitle="Decay alerts, overdue items, and follow-ups due now."
-          />
-          <RelationshipAlerts
-            contacts={contacts}
-            commitments={commitments}
-            interactions={allRecent}
-          />
-        </section>
-
-        <IntelligencePanel />
-
-        <div className="grid gap-6 lg:grid-cols-2">
-          <section>
-            <SectionHeader
-              title="Top relationships needing attention"
-              subtitle={`Tier 1 & 2 contacts with declining health (${needsAttention.length}).`}
-            />
-            <DarkCard>
-              {needsAttention.length === 0 ? (
-                <p className="text-sm text-zinc-500">
-                  All inner-circle relationships are healthy.
-                </p>
-              ) : (
-                <ul className="divide-y divide-zinc-800">
-                  {needsAttention.map((row) => {
-                    const days =
-                      row.contact.last_interaction_at != null
-                        ? Math.floor(
-                            (now -
-                              new Date(
-                                row.contact.last_interaction_at,
-                              ).getTime()) /
-                              day,
-                          )
-                        : null
-                    return (
-                      <li key={row.contact.id} className="py-3">
-                        <Link
-                          href={`/contacts/${row.contact.id}`}
-                          className="group flex items-baseline justify-between gap-3"
-                        >
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-zinc-100 group-hover:text-violet-300">
-                              {contactName(row.contact)}
-                            </div>
-                            <div className="text-xs text-zinc-500">
-                              T{row.contact.tier} ·{' '}
-                              {days != null ? `${days}d ago` : 'never'} ·{' '}
-                              {row.label}
-                            </div>
-                          </div>
-                          <span className="tabular-nums text-xs text-zinc-400">
-                            {Math.round(row.score * 100)}%
-                          </span>
-                        </Link>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </DarkCard>
-          </section>
-
-          <section>
-            <SectionHeader
-              title="Interaction frequency"
-              subtitle="Last 4 weeks."
-            />
-            <DarkCard>
-              <div className="flex h-32 items-end justify-between gap-2">
-                {weeks
-                  .slice()
-                  .sort((a, b) => a.weekIdx - b.weekIdx)
-                  .map((w) => {
-                    const h = Math.max(2, Math.round((w.count / maxWeek) * 100))
-                    const label =
-                      w.weekIdx === 3
-                        ? 'this wk'
-                        : w.weekIdx === 2
-                          ? '−1 wk'
-                          : w.weekIdx === 1
-                            ? '−2 wk'
-                            : '−3 wk'
-                    return (
-                      <div
-                        key={w.weekIdx}
-                        className="flex flex-1 flex-col items-center gap-2"
+          <DashCard>
+            {needsAttention.length === 0 ? (
+              <p className="text-sm text-zinc-500">
+                All inner-circle relationships are healthy.
+              </p>
+            ) : (
+              <ul className="divide-y divide-white/[0.05]">
+                {needsAttention.map((row) => {
+                  const days =
+                    row.contact.last_interaction_at != null
+                      ? Math.floor(
+                          (now -
+                            new Date(
+                              row.contact.last_interaction_at,
+                            ).getTime()) /
+                            day,
+                        )
+                      : null
+                  return (
+                    <li key={row.contact.id}>
+                      <Link
+                        href={`/contacts/${row.contact.id}`}
+                        className="group -mx-2 flex items-baseline justify-between gap-3 rounded-lg px-2 py-3 transition-colors hover:bg-white/[0.025]"
                       >
-                        <div className="flex h-full w-full items-end">
-                          <div
-                            className="w-full rounded-t bg-gradient-to-t from-indigo-500 via-violet-500 to-fuchsia-500"
-                            style={{ height: `${h}%` }}
-                          />
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-zinc-100 transition-colors group-hover:text-white">
+                            {contactName(row.contact)}
+                          </div>
+                          <div className="mt-0.5 text-xs text-zinc-500">
+                            T{row.contact.tier} ·{' '}
+                            {days != null ? `${days}d ago` : 'never'} ·{' '}
+                            {row.label}
+                          </div>
                         </div>
-                        <div className="text-[10px] text-zinc-500">
-                          {label}
-                        </div>
-                        <div className="text-xs tabular-nums text-zinc-300">
-                          {w.count}
-                        </div>
-                      </div>
-                    )
-                  })}
-              </div>
-            </DarkCard>
-          </section>
-        </div>
-
-        <section>
-          <SectionHeader
-            title="Commitments needing action"
-            subtitle="Within 3 days of due, or overdue. Sorted by urgency."
-          />
-          <EscalatedCommitments commitments={enrichedCommitments} />
+                        <span className="tabular-nums text-xs font-medium text-zinc-400 transition-colors group-hover:text-zinc-200">
+                          {Math.round(row.score * 100)}%
+                        </span>
+                      </Link>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </DashCard>
         </section>
 
         <section>
           <SectionHeader
-            title="Open commitments"
-            subtitle={`${enrichedCommitments.length} open across your network.`}
+            title="Interaction frequency"
+            subtitle="Last 4 weeks."
           />
-          <CommitmentTracker commitments={enrichedCommitments} />
+          <DashCard>
+            <div className="flex h-32 items-end justify-between gap-2">
+              {weeks
+                .slice()
+                .sort((a, b) => a.weekIdx - b.weekIdx)
+                .map((w) => {
+                  const h = Math.max(2, Math.round((w.count / maxWeek) * 100))
+                  const label =
+                    w.weekIdx === 3
+                      ? 'this wk'
+                      : w.weekIdx === 2
+                        ? '−1 wk'
+                        : w.weekIdx === 1
+                          ? '−2 wk'
+                          : '−3 wk'
+                  return (
+                    <div
+                      key={w.weekIdx}
+                      className="flex flex-1 flex-col items-center gap-2"
+                    >
+                      <div className="flex h-full w-full items-end">
+                        <div
+                          className="w-full rounded-t-md bg-gradient-to-t from-indigo-500 via-violet-500 to-fuchsia-500 shadow-[0_0_12px_rgba(139,92,246,0.35)] transition-[height] duration-700"
+                          style={{ height: `${h}%` }}
+                        />
+                      </div>
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+                        {label}
+                      </div>
+                      <div className="text-xs font-medium tabular-nums text-zinc-200">
+                        {w.count}
+                      </div>
+                    </div>
+                  )
+                })}
+            </div>
+          </DashCard>
         </section>
       </div>
+
+      <section>
+        <SectionHeader
+          title="Commitments needing action"
+          subtitle="Within 3 days of due, or overdue. Sorted by urgency."
+        />
+        <EscalatedCommitments commitments={enrichedCommitments} />
+      </section>
+
+      <section>
+        <SectionHeader
+          title="Open commitments"
+          subtitle={`${enrichedCommitments.length} open across your network.`}
+        />
+        <CommitmentTracker commitments={enrichedCommitments} />
+      </section>
     </div>
   )
 }
@@ -337,16 +335,18 @@ function SectionHeader({
   subtitle?: string
 }) {
   return (
-    <div className="mb-3">
-      <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-300">
+    <div className="mb-5">
+      <h2 className="text-lg font-medium tracking-tight text-zinc-100 sm:text-xl">
         {title}
       </h2>
-      {subtitle && <p className="mt-1 text-xs text-zinc-500">{subtitle}</p>}
+      {subtitle && (
+        <p className="mt-1 max-w-xl text-sm text-zinc-400">{subtitle}</p>
+      )}
     </div>
   )
 }
 
-function DarkCard({
+function DashCard({
   children,
   className = '',
 }: {
@@ -354,9 +354,7 @@ function DarkCard({
   className?: string
 }) {
   return (
-    <div
-      className={`rounded-xl border border-zinc-800 bg-zinc-900 p-5 ${className}`}
-    >
+    <div className={`rounded-2xl aiea-glass p-5 ${className}`}>
       {children}
     </div>
   )
@@ -375,15 +373,27 @@ function Metric({
 }) {
   return (
     <div
-      className={`rounded-xl border bg-zinc-900 p-4 ${accent ? 'border-amber-500/40' : 'border-zinc-800'}`}
+      className={`group relative overflow-hidden rounded-2xl aiea-glass aiea-lift p-5 ${
+        accent ? 'ring-1 ring-inset ring-amber-500/30' : ''
+      }`}
     >
-      <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+      <div
+        aria-hidden="true"
+        className={`pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full opacity-[0.08] blur-2xl transition-opacity duration-300 group-hover:opacity-[0.18] ${
+          accent
+            ? 'bg-gradient-to-br from-amber-500 to-rose-500'
+            : 'bg-gradient-to-br from-violet-500 to-fuchsia-500'
+        }`}
+      />
+      <div className="relative text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
         {label}
       </div>
-      <div className="mt-1.5 text-2xl font-medium tabular-nums text-zinc-100">
+      <div className="relative mt-3 text-3xl font-semibold tracking-tight tabular-nums text-zinc-50">
         {value}
       </div>
-      {hint && <div className="mt-1 text-xs text-zinc-500">{hint}</div>}
+      {hint && (
+        <div className="relative mt-1.5 text-[11px] text-zinc-500">{hint}</div>
+      )}
     </div>
   )
 }

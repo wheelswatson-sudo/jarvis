@@ -84,7 +84,7 @@ export function SettingsClient({
         subtitle="Used by every AIEA chat unless you override it later."
       >
         <div className="rounded-2xl aiea-glass p-5">
-          <label className="block text-xs uppercase tracking-wide text-zinc-500">
+          <label className="block text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
             Model
           </label>
           <div className="relative mt-2">
@@ -92,7 +92,7 @@ export function SettingsClient({
               value={model}
               onChange={(e) => handleModelChange(e.target.value)}
               disabled={isPending}
-              className="w-full appearance-none rounded-lg border border-zinc-800 bg-zinc-950 px-4 py-2.5 pr-10 text-sm text-zinc-100 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-50"
+              className="w-full appearance-none rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 pr-10 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50 disabled:opacity-50"
             >
               {allModels.map((m) => (
                 <option key={m.id} value={m.id} className="bg-zinc-900">
@@ -114,7 +114,7 @@ export function SettingsClient({
           {modelStatus && (
             <p
               className={`mt-3 text-xs ${
-                modelStatus.startsWith('Error') ? 'text-rose-400' : 'text-emerald-400'
+                modelStatus.startsWith('Error') ? 'text-rose-300' : 'text-emerald-300'
               }`}
             >
               {modelStatus}
@@ -159,9 +159,9 @@ function Section({
 }) {
   return (
     <section>
-      <div className="mb-4">
-        <h2 className="text-base font-medium text-zinc-100">{title}</h2>
-        <p className="mt-1 text-sm text-zinc-500">{subtitle}</p>
+      <div className="mb-5">
+        <h2 className="text-lg font-medium tracking-tight text-zinc-100">{title}</h2>
+        <p className="mt-1 max-w-xl text-sm text-zinc-400">{subtitle}</p>
       </div>
       {children}
     </section>
@@ -194,7 +194,7 @@ function ProviderKeyRow({
   }
 
   return (
-    <div className="rounded-2xl aiea-glass p-5">
+    <div className="rounded-2xl aiea-glass p-5 transition-colors hover:border-white/[0.10]">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -202,17 +202,17 @@ function ProviderKeyRow({
               {provider.label}
             </span>
             {existing ? (
-              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-300">
                 Connected
               </span>
             ) : (
-              <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+              <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
                 Not set
               </span>
             )}
           </div>
           {existing && !editing && (
-            <p className="mt-1 font-mono text-xs text-zinc-500">
+            <p className="mt-1.5 font-mono text-xs text-zinc-500">
               {existing.masked}
             </p>
           )}
@@ -223,7 +223,7 @@ function ProviderKeyRow({
               type="button"
               onClick={() => setEditing(true)}
               disabled={disabled}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-indigo-500 hover:text-indigo-300 disabled:opacity-50 transition-colors"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-400/40 hover:text-white disabled:opacity-50"
             >
               {existing ? 'Replace' : 'Add key'}
             </button>
@@ -233,7 +233,7 @@ function ProviderKeyRow({
               type="button"
               onClick={onDelete}
               disabled={disabled}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-400 hover:border-rose-500 hover:text-rose-300 disabled:opacity-50 transition-colors"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-rose-500/50 hover:text-rose-300 disabled:opacity-50"
             >
               Remove
             </button>
@@ -255,13 +255,13 @@ function ProviderKeyRow({
                 setValue('')
               }
             }}
-            className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+            className="flex-1 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
           />
           <button
             type="button"
             onClick={submit}
             disabled={disabled || !value.trim()}
-            className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+            className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
           >
             Save
           </button>
@@ -272,7 +272,7 @@ function ProviderKeyRow({
               setValue('')
             }}
             disabled={disabled}
-            className="rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50 transition-colors"
+            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-white/[0.18] hover:text-zinc-200 disabled:opacity-50"
           >
             Cancel
           </button>
@@ -281,7 +281,7 @@ function ProviderKeyRow({
       {status && (
         <p
           className={`mt-3 text-xs ${
-            status.startsWith('Error') ? 'text-rose-400' : 'text-emerald-400'
+            status.startsWith('Error') ? 'text-rose-300' : 'text-emerald-300'
           }`}
         >
           {status}

@@ -80,26 +80,26 @@ export function GmailSyncCard({ state }: Props) {
   }
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+    <div className="rounded-2xl aiea-glass p-5 transition-colors hover:border-white/[0.10]">
       <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
             <GmailGlyph />
             <span className="text-sm font-medium text-zinc-100">Gmail sync</span>
-            <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+            <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
               Manual
             </span>
           </div>
-          <p className="mt-1 text-xs text-zinc-500">
+          <p className="mt-2 text-xs leading-relaxed text-zinc-500">
             Pulls the last 90 days of emails into the unified inbox
             (filtering noreply/marketing senders) and extracts commitments +
             sentiment per thread. Authentication is automatic — your Google
             connection refreshes silently.
           </p>
-          <dl className="mt-3 space-y-1 text-xs text-zinc-400">
-            <div className="flex gap-2">
+          <dl className="mt-4 space-y-1.5 text-xs">
+            <div className="flex gap-3">
               <dt className="w-24 shrink-0 text-zinc-500">Last sync</dt>
-              <dd className="text-zinc-300">{formatTimestamp(lastSyncedAt)}</dd>
+              <dd className="text-zinc-200 tabular-nums">{formatTimestamp(lastSyncedAt)}</dd>
             </div>
           </dl>
         </div>
@@ -108,15 +108,15 @@ export function GmailSyncCard({ state }: Props) {
             type="button"
             onClick={syncNow}
             disabled={isPending}
-            className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+            className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isPending ? 'Syncing…' : 'Sync now'}
           </button>
         </div>
       </div>
 
-      {status && <p className="mt-3 text-xs text-emerald-400">{status}</p>}
-      {error && <p className="mt-3 text-xs text-rose-400">{error}</p>}
+      {status && <p className="mt-3 text-xs text-emerald-300">{status}</p>}
+      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

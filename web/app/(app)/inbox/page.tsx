@@ -163,7 +163,7 @@ export default function InboxPage() {
   const unreadCount = messages.filter((m) => !m.is_read).length
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] overflow-hidden rounded-2xl aiea-glass animate-fade-up">
+    <div className="flex h-[calc(100vh-9rem)] overflow-hidden rounded-2xl aiea-glass animate-fade-up">
       {/* Sidebar */}
       <div className="hidden w-52 shrink-0 flex-col border-r border-white/[0.05] bg-white/[0.01] p-3 sm:flex">
         <div className="mb-3 px-2 text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">

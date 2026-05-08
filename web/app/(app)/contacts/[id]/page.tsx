@@ -370,7 +370,7 @@ export default async function ContactDetailPage({
               {upcomingMeetings.map((m) => (
                 <li
                   key={m.id}
-                  className="flex items-center justify-between gap-3 py-3 text-sm first:pt-0 last:pb-0"
+                  className="-mx-2 flex items-center justify-between gap-3 rounded-lg px-2 py-3 text-sm transition-colors first:pt-0 last:pb-0 hover:bg-white/[0.02]"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-medium text-zinc-100">
@@ -386,7 +386,7 @@ export default async function ContactDetailPage({
                       href={m.conference_url}
                       target="_blank"
                       rel="noreferrer"
-                      className="shrink-0 rounded-md border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-xs font-medium text-violet-200 transition-colors hover:border-violet-400/60 hover:bg-violet-500/20"
+                      className="shrink-0 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-xs font-medium text-violet-200 transition-colors hover:border-violet-400/60 hover:bg-violet-500/20 hover:text-violet-100"
                     >
                       Join →
                     </a>
@@ -466,7 +466,10 @@ export default async function ContactDetailPage({
                   CHANNEL_TONE[m.channel] ??
                   'bg-white/[0.04] text-zinc-300 ring-white/10'
                 return (
-                  <li key={m.id} className="py-3 text-sm first:pt-0 last:pb-0">
+                  <li
+                    key={m.id}
+                    className="-mx-2 rounded-lg px-2 py-3 text-sm transition-colors first:pt-0 last:pb-0 hover:bg-white/[0.02]"
+                  >
                     <div className="flex items-baseline justify-between gap-3 text-xs">
                       <span
                         className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ring-1 ring-inset ${channelCls}`}
@@ -474,17 +477,17 @@ export default async function ContactDetailPage({
                         {m.channel}
                         {m.direction ? ` · ${m.direction}` : ''}
                       </span>
-                      <span className="text-zinc-500">
+                      <span className="text-zinc-500 tabular-nums">
                         {formatRelative(m.sent_at)}
                       </span>
                     </div>
                     {m.subject && (
-                      <div className="mt-1 truncate font-medium text-zinc-100">
+                      <div className="mt-1.5 truncate font-medium text-zinc-100">
                         {m.subject}
                       </div>
                     )}
                     {m.snippet && (
-                      <p className="mt-0.5 line-clamp-2 text-xs text-zinc-400">
+                      <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-zinc-400">
                         {m.snippet}
                       </p>
                     )}

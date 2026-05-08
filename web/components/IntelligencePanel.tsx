@@ -181,7 +181,7 @@ function InsightCard({
 
   return (
     <li
-      className={`group relative overflow-hidden rounded-xl border border-white/5 bg-gradient-to-br from-zinc-900/80 to-zinc-900/40 p-4 transition-all duration-200 ${
+      className={`group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 transition-all duration-200 hover:border-white/[0.12] hover:bg-white/[0.035] ${
         leaving
           ? 'translate-x-2 scale-95 opacity-0'
           : 'translate-x-0 scale-100 opacity-100'
@@ -213,7 +213,7 @@ function InsightCard({
               <Link
                 href={target.href}
                 onClick={onAct}
-                className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-violet-500/20 transition-opacity hover:opacity-95"
+                className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-3 py-1.5 text-xs font-medium text-white"
               >
                 {target.label}
                 <span aria-hidden="true">→</span>
@@ -223,7 +223,7 @@ function InsightCard({
                 type="button"
                 onClick={onAct}
                 disabled={busy}
-                className="rounded-md bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-violet-500/20 transition-opacity hover:opacity-95 disabled:opacity-40"
+                className="rounded-lg aiea-cta px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Got it
               </button>
@@ -232,7 +232,7 @@ function InsightCard({
               type="button"
               onClick={onDismiss}
               disabled={busy}
-              className="rounded-md border border-white/10 bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-white/20 hover:text-zinc-200 disabled:opacity-40"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-white/[0.18] hover:text-zinc-200 disabled:opacity-40"
             >
               Dismiss
             </button>
@@ -253,12 +253,12 @@ function ConfidencePip({ value }: { value: number }) {
   const pct = Math.round(value * 100)
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-500"
+      className="inline-flex shrink-0 items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-500 tabular-nums"
       title={`Confidence ${pct}%`}
     >
-      <span className="relative inline-block h-1.5 w-10 overflow-hidden rounded-full bg-zinc-800">
+      <span className="relative inline-block h-1.5 w-10 overflow-hidden rounded-full bg-white/[0.05]">
         <span
-          className="absolute inset-y-0 left-0 bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400"
+          className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 transition-[width] duration-500"
           style={{ width: `${pct}%` }}
         />
       </span>
@@ -273,14 +273,14 @@ function SkeletonRows() {
       {[0, 1, 2].map((i) => (
         <li
           key={i}
-          className="rounded-xl border border-white/5 bg-zinc-900/40 p-4"
+          className="rounded-xl border border-white/[0.05] bg-white/[0.015] p-4"
         >
           <div className="flex items-start gap-3">
-            <div className="h-9 w-9 shrink-0 animate-pulse rounded-lg bg-zinc-800" />
+            <div className="h-9 w-9 shrink-0 rounded-lg aiea-shimmer" />
             <div className="flex-1 space-y-2">
-              <div className="h-3 w-2/3 animate-pulse rounded bg-zinc-800" />
-              <div className="h-3 w-full animate-pulse rounded bg-zinc-800" />
-              <div className="h-3 w-1/2 animate-pulse rounded bg-zinc-800" />
+              <div className="h-3 w-2/3 rounded aiea-shimmer" />
+              <div className="h-3 w-full rounded aiea-shimmer" />
+              <div className="h-3 w-1/2 rounded aiea-shimmer" />
             </div>
           </div>
         </li>
@@ -291,14 +291,14 @@ function SkeletonRows() {
 
 function LearningState({ eventsCount }: { eventsCount: number }) {
   return (
-    <div className="rounded-xl border border-white/5 bg-zinc-900/40 p-6 text-center">
-      <div className="mx-auto grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-indigo-500/20 via-violet-500/20 to-fuchsia-500/20 ring-1 ring-inset ring-white/10">
+    <div className="rounded-xl border border-white/[0.05] bg-white/[0.015] p-8 text-center">
+      <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500/15 via-violet-500/15 to-fuchsia-500/15 ring-1 ring-inset ring-white/10 text-violet-200 animate-float">
         <PulseGlyph />
       </div>
-      <h3 className="mt-3 text-sm font-medium text-zinc-200">
+      <h3 className="mt-4 text-sm font-medium text-zinc-100">
         The system is learning…
       </h3>
-      <p className="mt-1 text-sm text-zinc-500">
+      <p className="mx-auto mt-1 max-w-md text-sm text-zinc-500">
         {eventsCount} signal{eventsCount === 1 ? '' : 's'} captured so far. Use
         the app for a few days and patterns will start surfacing here.
       </p>
@@ -308,21 +308,21 @@ function LearningState({ eventsCount }: { eventsCount: number }) {
 
 function EmptyState({ onAnalyze }: { onAnalyze: () => void }) {
   return (
-    <div className="rounded-xl border border-white/5 bg-zinc-900/40 p-6 text-center">
-      <div className="mx-auto grid h-10 w-10 place-items-center rounded-full bg-gradient-to-br from-indigo-500/20 via-violet-500/20 to-fuchsia-500/20 ring-1 ring-inset ring-white/10">
+    <div className="rounded-xl border border-white/[0.05] bg-white/[0.015] p-8 text-center">
+      <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500/15 via-violet-500/15 to-fuchsia-500/15 ring-1 ring-inset ring-white/10 text-violet-200">
         <SparkGlyph />
       </div>
-      <h3 className="mt-3 text-sm font-medium text-zinc-200">
+      <h3 className="mt-4 text-sm font-medium text-zinc-100">
         No active insights right now
       </h3>
-      <p className="mt-1 text-sm text-zinc-500">
+      <p className="mx-auto mt-1 max-w-md text-sm text-zinc-500">
         That&apos;s normal — your network is in a steady state. Run analysis to
         scan for new patterns.
       </p>
       <button
         type="button"
         onClick={onAnalyze}
-        className="mt-4 rounded-md bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-4 py-1.5 text-xs font-medium text-white shadow-lg shadow-violet-500/20 transition-opacity hover:opacity-95"
+        className="mt-5 rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white"
       >
         Run analysis now
       </button>
@@ -332,7 +332,7 @@ function EmptyState({ onAnalyze }: { onAnalyze: () => void }) {
 
 function ErrorState({ message }: { message: string }) {
   return (
-    <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
+    <div className="rounded-xl border border-rose-500/30 bg-rose-500/[0.08] p-4 text-sm text-rose-200">
       Couldn&apos;t load insights — {message}.
     </div>
   )

@@ -79,95 +79,93 @@ export default function StatusPage() {
 
   return (
     <div className="space-y-8 animate-fade-up">
-      <div className="mx-auto max-w-4xl space-y-8">
-        <header>
-          <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
-            <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 animate-pulse" />
-            System status
-          </div>
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
-            Status
-          </h1>
-          <p className="mt-2 text-sm text-zinc-400">
-            Real-time health of every component the product depends on. Refreshes
-            every 30 seconds.
-          </p>
-        </header>
+      <header>
+        <div className="inline-flex items-center gap-2 rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-3 py-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-200">
+          <span className="h-1.5 w-1.5 rounded-full bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 animate-pulse" />
+          System status
+        </div>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
+          Status
+        </h1>
+        <p className="mt-2 max-w-2xl text-sm text-zinc-400 sm:text-base">
+          Real-time health of every component the product depends on. Refreshes
+          every 30 seconds.
+        </p>
+      </header>
 
-        <OverallBanner data={data} loading={loading} error={error} />
+      <OverallBanner data={data} loading={loading} error={error} />
 
-        <section>
-          <div className="mb-3 flex items-baseline justify-between">
-            <h2 className="text-sm font-medium text-zinc-300">Components</h2>
-            <span className="text-xs text-zinc-500">
-              {lastFetched
-                ? `Checked ${formatTime(lastFetched)}`
-                : loading
-                  ? 'Checking…'
-                  : '—'}
+      <section>
+        <div className="mb-3 flex items-baseline justify-between">
+          <h2 className="text-sm font-medium text-zinc-200">Components</h2>
+          <span className="text-xs text-zinc-500 tabular-nums">
+            {lastFetched
+              ? `Checked ${formatTime(lastFetched)}`
+              : loading
+                ? 'Checking…'
+                : '—'}
+          </span>
+        </div>
+        <div className="overflow-hidden rounded-2xl aiea-glass">
+          {loading && !data ? (
+            <SkeletonRows />
+          ) : data ? (
+            <ul className="divide-y divide-white/[0.05]">
+              {data.components.map((c) => (
+                <ComponentRow key={c.name} component={c} />
+              ))}
+            </ul>
+          ) : (
+            <div className="p-6 text-sm text-zinc-500">
+              Unable to load component data.
+            </div>
+          )}
+        </div>
+      </section>
+
+      <IntelligenceStatusPanel intel={intel} />
+
+      <section className="rounded-2xl aiea-glass p-5">
+        <h2 className="text-sm font-medium text-zinc-200">Recent incidents</h2>
+        <p className="mt-2 text-sm text-zinc-400">
+          {SENTRY_URL ? (
+            <>
+              Errors and exceptions are tracked in Sentry.{' '}
+              <a
+                href={SENTRY_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-violet-300 underline-offset-2 transition-colors hover:text-violet-200 hover:underline"
+              >
+                Open Sentry dashboard
+              </a>
+              .
+            </>
+          ) : (
+            'Sentry is not configured. Set NEXT_PUBLIC_SENTRY_DASHBOARD_URL to link incidents here.'
+          )}
+        </p>
+      </section>
+
+      {data && (
+        <footer className="flex items-center justify-between text-xs text-zinc-600">
+          <span>
+            Build{' '}
+            <span className="font-mono text-zinc-400">
+              {data.commit ? data.commit.slice(0, 7) : 'local'}
             </span>
-          </div>
-          <div className="overflow-hidden rounded-xl border border-white/5 bg-zinc-900/40">
-            {loading && !data ? (
-              <SkeletonRows />
-            ) : data ? (
-              <ul className="divide-y divide-white/5">
-                {data.components.map((c) => (
-                  <ComponentRow key={c.name} component={c} />
-                ))}
-              </ul>
-            ) : (
-              <div className="p-6 text-sm text-zinc-500">
-                Unable to load component data.
-              </div>
-            )}
-          </div>
-        </section>
-
-        <IntelligenceStatusPanel intel={intel} />
-
-        <section className="rounded-xl border border-white/5 bg-zinc-900/40 p-5">
-          <h2 className="text-sm font-medium text-zinc-300">Recent incidents</h2>
-          <p className="mt-2 text-sm text-zinc-500">
-            {SENTRY_URL ? (
-              <>
-                Errors and exceptions are tracked in Sentry.{' '}
-                <a
-                  href={SENTRY_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-violet-300 underline-offset-2 hover:underline"
-                >
-                  Open Sentry dashboard
-                </a>
-                .
-              </>
-            ) : (
-              'Sentry is not configured. Set NEXT_PUBLIC_SENTRY_DASHBOARD_URL to link incidents here.'
-            )}
-          </p>
-        </section>
-
-        {data && (
-          <footer className="flex items-center justify-between text-xs text-zinc-600">
-            <span>
-              Build{' '}
-              <span className="font-mono text-zinc-400">
-                {data.commit ? data.commit.slice(0, 7) : 'local'}
-              </span>
-              {data.env ? ` · ${data.env}` : ''}
-            </span>
-            <a
-              href="/api/health"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-mono hover:text-zinc-400"
-            >
-              /api/health →
-            </a>
-          </footer>
-        )}
-      </div>
+            {data.env ? ` · ${data.env}` : ''}
+          </span>
+          <a
+            href="/api/health"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-mono transition-colors hover:text-zinc-400"
+          >
+            /api/health →
+          </a>
+        </footer>
+      )}
     </div>
   )
 }
@@ -232,34 +230,34 @@ function Banner({
 }) {
   const styles: Record<BannerTone, { ring: string; bg: string; dot: string; text: string }> = {
     operational: {
-      ring: 'ring-emerald-500/30',
-      bg: 'bg-emerald-500/5',
+      ring: 'ring-emerald-500/25',
+      bg: 'bg-emerald-500/[0.06]',
       dot: 'bg-emerald-400',
       text: 'text-emerald-300',
     },
     degraded: {
-      ring: 'ring-amber-500/30',
-      bg: 'bg-amber-500/5',
+      ring: 'ring-amber-500/25',
+      bg: 'bg-amber-500/[0.06]',
       dot: 'bg-amber-400',
       text: 'text-amber-300',
     },
     down: {
-      ring: 'ring-rose-500/30',
-      bg: 'bg-rose-500/5',
+      ring: 'ring-rose-500/25',
+      bg: 'bg-rose-500/[0.06]',
       dot: 'bg-rose-400',
       text: 'text-rose-300',
     },
     loading: {
-      ring: 'ring-zinc-700',
-      bg: 'bg-zinc-900/50',
+      ring: 'ring-white/[0.08]',
+      bg: 'aiea-glass',
       dot: 'bg-zinc-500',
-      text: 'text-zinc-400',
+      text: 'text-zinc-300',
     },
   }
   const s = styles[tone]
   return (
     <div
-      className={`flex items-start gap-4 rounded-xl ${s.bg} p-5 ring-1 ${s.ring}`}
+      className={`flex items-start gap-4 rounded-2xl ${s.bg} p-5 ring-1 ring-inset ${s.ring}`}
     >
       <span className="relative mt-1.5 flex h-2.5 w-2.5">
         {tone !== 'loading' && (
@@ -282,10 +280,10 @@ function Banner({
 function ComponentRow({ component }: { component: HealthComponent }) {
   const dot =
     component.status === 'operational'
-      ? 'bg-emerald-400'
+      ? 'bg-emerald-400 shadow-emerald-500/40'
       : component.status === 'degraded'
-        ? 'bg-amber-400'
-        : 'bg-rose-400'
+        ? 'bg-amber-400 shadow-amber-500/40'
+        : 'bg-rose-400 shadow-rose-500/40'
   const label =
     component.status === 'operational'
       ? 'Operational'
@@ -300,11 +298,13 @@ function ComponentRow({ component }: { component: HealthComponent }) {
         : 'text-rose-300'
 
   return (
-    <li className="flex items-center justify-between gap-4 px-5 py-4">
+    <li className="flex items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-white/[0.02]">
       <div className="min-w-0">
         <div className="flex items-center gap-2.5">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />
-          <span className="truncate text-sm font-medium text-zinc-200">
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full shadow-[0_0_8px_currentColor] ${dot}`}
+          />
+          <span className="truncate text-sm font-medium text-zinc-100">
             {component.name}
           </span>
         </div>
@@ -326,11 +326,11 @@ function ComponentRow({ component }: { component: HealthComponent }) {
 
 function SkeletonRows() {
   return (
-    <ul className="divide-y divide-white/5">
+    <ul className="divide-y divide-white/[0.05]">
       {[0, 1, 2, 3].map((i) => (
         <li key={i} className="flex items-center justify-between px-5 py-4">
-          <div className="h-3 w-40 animate-pulse rounded bg-zinc-800" />
-          <div className="h-3 w-16 animate-pulse rounded bg-zinc-800" />
+          <div className="h-3 w-40 rounded aiea-shimmer" />
+          <div className="h-3 w-16 rounded aiea-shimmer" />
         </li>
       ))}
     </ul>
@@ -353,8 +353,8 @@ function formatTime(d: Date): string {
 function IntelligenceStatusPanel({ intel }: { intel: IntelligenceHealth | null }) {
   if (!intel) {
     return (
-      <section className="rounded-xl border border-white/5 bg-zinc-900/40 p-5">
-        <h2 className="text-sm font-medium text-zinc-300">Intelligence</h2>
+      <section className="rounded-2xl aiea-glass p-5">
+        <h2 className="text-sm font-medium text-zinc-200">Intelligence</h2>
         <p className="mt-2 text-sm text-zinc-500">Loading…</p>
       </section>
     )
@@ -374,10 +374,10 @@ function IntelligenceStatusPanel({ intel }: { intel: IntelligenceHealth | null }
   const lastAnalysisAt = intel.last_analysis?.at ?? null
 
   return (
-    <section className="rounded-xl border border-white/5 bg-zinc-900/40 p-5">
+    <section className="rounded-2xl aiea-glass p-5">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-sm font-medium text-zinc-300">Intelligence</h2>
-        <span className="text-xs text-zinc-500">
+        <h2 className="text-sm font-medium text-zinc-200">Intelligence</h2>
+        <span className="text-xs text-zinc-500 tabular-nums">
           {lastAnalysisAt ? `Last run ${formatRelativeShort(lastAnalysisAt)}` : 'Never analyzed'}
         </span>
       </div>
@@ -411,7 +411,7 @@ function IntelligenceStatusPanel({ intel }: { intel: IntelligenceHealth | null }
           {Object.entries(intel.capsules.by_type).map(([type, count]) => (
             <span
               key={type}
-              className="rounded-full border border-violet-500/20 bg-violet-500/5 px-2.5 py-0.5 text-xs text-violet-200"
+              className="rounded-full border border-violet-500/25 bg-violet-500/[0.08] px-2.5 py-0.5 text-xs text-violet-200"
             >
               {prettyPattern(type)} · {count}
             </span>
@@ -420,17 +420,17 @@ function IntelligenceStatusPanel({ intel }: { intel: IntelligenceHealth | null }
       )}
 
       <div className="mt-5">
-        <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-500">
+        <h3 className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
           Recent activity
         </h3>
         {intel.recent_log.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500">No analysis events yet.</p>
         ) : (
-          <ul className="mt-2 divide-y divide-white/5 overflow-hidden rounded-lg border border-white/5">
+          <ul className="mt-3 divide-y divide-white/[0.05] overflow-hidden rounded-xl border border-white/[0.05] bg-white/[0.015]">
             {intel.recent_log.slice(0, 8).map((l, i) => (
               <li
                 key={`${l.created_at}-${i}`}
-                className="flex items-center justify-between gap-3 bg-zinc-950/30 px-3 py-2 text-xs"
+                className="flex items-center justify-between gap-3 px-3 py-2 text-xs"
               >
                 <span className={`shrink-0 font-mono ${logTone(l.event_type)}`}>
                   {l.event_type}
@@ -438,7 +438,7 @@ function IntelligenceStatusPanel({ intel }: { intel: IntelligenceHealth | null }
                 <span className="min-w-0 flex-1 truncate text-zinc-400">
                   {summarizeLog(l.event_type, l.details)}
                 </span>
-                <span className="shrink-0 font-mono text-zinc-500">
+                <span className="shrink-0 font-mono text-zinc-500 tabular-nums">
                   {formatRelativeShort(l.created_at)}
                 </span>
               </li>
@@ -462,13 +462,13 @@ function Stat({
   valueClassName?: string
 }) {
   return (
-    <div className="rounded-lg border border-white/5 bg-zinc-950/40 p-3">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+    <div className="rounded-xl border border-white/[0.05] bg-white/[0.02] p-3">
+      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
         {label}
       </div>
       <div
-        className={`mt-1 text-2xl font-medium tabular-nums ${
-          valueClassName ?? 'text-zinc-100'
+        className={`mt-1.5 text-2xl font-semibold tracking-tight tabular-nums ${
+          valueClassName ?? 'text-zinc-50'
         }`}
       >
         {value}
