@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createClient } from '../../lib/supabase/client'
 import { Brand } from '../../components/Brand'
@@ -145,7 +146,7 @@ export default function LoginPage() {
                 className="w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
               />
             </label>
-            <label className="mb-5 block">
+            <label className="mb-2 block">
               <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
                 Password
               </span>
@@ -161,6 +162,16 @@ export default function LoginPage() {
                 className="w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
               />
             </label>
+            {mode === 'signin' && (
+              <div className="mb-5 flex justify-end">
+                <Link
+                  href="/forgot-password"
+                  className="text-[11px] text-zinc-500 underline-offset-4 hover:text-zinc-300 hover:underline"
+                >
+                  Forgot password?
+                </Link>
+              </div>
+            )}
             {error && (
               <p className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/[0.08] px-3 py-2 text-sm text-rose-300">
                 {error}
