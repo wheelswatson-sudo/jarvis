@@ -46,14 +46,13 @@ export async function GET() {
         details: error.details,
         hint: error.hint,
       })
-      return apiError(500, error.message, { code: error.code }, 'query_failed')
+      return apiError(500, 'Failed to load insights', undefined, 'query_failed')
     }
 
     return NextResponse.json({ insights: (data ?? []) as IntelligenceInsight[] })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Internal error'
     console.error('[insights] GET unhandled', err)
-    return apiError(500, message, undefined, 'unhandled')
+    return apiError(500, 'Internal error', undefined, 'unhandled')
   }
 }
 
@@ -122,7 +121,7 @@ export async function POST(request: Request) {
         details: error.details,
         hint: error.hint,
       })
-      return apiError(500, error.message, { code: error.code }, 'update_failed')
+      return apiError(500, 'Failed to update insight', undefined, 'update_failed')
     }
     if (!data) {
       return apiError(404, 'Insight not found or already resolved', undefined, 'not_found')
@@ -142,8 +141,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true, status: newStatus })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Internal error'
     console.error('[insights] POST unhandled', err)
-    return apiError(500, message, undefined, 'unhandled')
+    return apiError(500, 'Internal error', undefined, 'unhandled')
   }
 }

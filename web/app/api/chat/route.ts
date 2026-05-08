@@ -78,6 +78,7 @@ function daysBetween(iso: string | null, now: number): number | null {
 
 async function loadContext(
   supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
   userEmail: string,
   userMetaName: string | null,
 ): Promise<RelationshipContext> {
@@ -88,16 +89,19 @@ async function loadContext(
     supabase
       .from('contacts')
       .select('*')
+      .eq('user_id', userId)
       .order('tier', { ascending: true, nullsFirst: false })
       .order('last_interaction_at', { ascending: false, nullsFirst: false })
       .limit(120),
     supabase
       .from('commitments')
       .select('id, contact_id, due_at, status, description')
+      .eq('user_id', userId)
       .eq('status', 'open'),
     supabase
       .from('interactions')
       .select('id, contact_id, channel, direction, summary, occurred_at')
+      .eq('user_id', userId)
       .gte('occurred_at', sevenDaysAgo)
       .order('occurred_at', { ascending: false })
       .limit(60),
@@ -368,7 +372,7 @@ export async function POST(request: Request) {
         ? meta.name
         : null
 
-  const context = await loadContext(supabase, user.email ?? '', userMetaName)
+  const context = await loadContext(supabase, user.id, user.email ?? '', userMetaName)
   const systemPrompt = buildSystemPrompt(context)
 
   // Fire-and-forget: log the chat query for the intelligence engine.

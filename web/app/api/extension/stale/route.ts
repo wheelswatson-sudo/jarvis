@@ -35,7 +35,10 @@ export async function GET(req: Request) {
       'id, first_name, last_name, last_interaction_at, linkedin, personal_details, relationship_score, tier',
     )
     .eq('user_id', user.id)
-  if (error) return corsError(req,500, error.message, 'query_failed')
+  if (error) {
+    console.error('[extension/stale] query failed', error)
+    return corsError(req, 500, 'Query failed', 'query_failed')
+  }
 
   const rows = (data ?? []) as Pick<
     Contact,

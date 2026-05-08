@@ -166,9 +166,10 @@ export async function POST(req: Request) {
     .select('id')
 
   if (error) {
+    console.error('[contacts/import] insert failed', error)
     return apiError(
-      400,
-      error.message,
+      500,
+      'Failed to import contacts',
       { inserted: 0, skipped: skipped.length, errors: skipped },
       'insert_failed',
     )

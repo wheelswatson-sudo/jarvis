@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, dbError } from '../../../../lib/api-errors'
 import { trackContactUpdate } from '../../../../lib/events'
 import type { PendingChange } from '../../../../lib/types'
 
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     .eq('status', 'pending')
 
   if (fetchErr) {
-    return apiError(500, fetchErr.message, undefined, 'db_error')
+    return dbError('api/approvals/resolve fetch', fetchErr)
   }
   const pending = (changes ?? []) as PendingChange[]
   if (pending.length === 0) {
@@ -91,7 +91,7 @@ export async function POST(request: Request) {
         .eq('id', contactId)
         .eq('user_id', user.id)
       if (upErr) {
-        return apiError(500, upErr.message, undefined, 'db_error')
+        return dbError('api/approvals/resolve apply', upErr)
       }
       applied += list.length
       void trackContactUpdate(user.id, contactId, {
@@ -112,7 +112,7 @@ export async function POST(request: Request) {
     .eq('user_id', user.id)
 
   if (resolveErr) {
-    return apiError(500, resolveErr.message, undefined, 'db_error')
+    return dbError('api/approvals/resolve mark', resolveErr)
   }
 
   return NextResponse.json({ resolved: pending.length, applied })

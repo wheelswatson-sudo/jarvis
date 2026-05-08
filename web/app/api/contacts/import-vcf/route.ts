@@ -46,7 +46,8 @@ export async function POST(req: NextRequest) {
     .eq('user_id', user.id)
 
   if (existingError) {
-    return apiError(500, existingError.message, undefined, 'contacts_lookup_failed')
+    console.error('[contacts/import-vcf] existing lookup failed', existingError)
+    return apiError(500, 'Failed to load existing contacts', undefined, 'contacts_lookup_failed')
   }
 
   type ExistingRow = {
@@ -122,7 +123,13 @@ export async function POST(req: NextRequest) {
       .insert(chunk)
       .select('id')
     if (insertError) {
-      return apiError(500, insertError.message, { inserted, updated: 0, skipped, at_chunk: i }, 'insert_failed')
+      console.error('[contacts/import-vcf] insert chunk failed', insertError)
+      return apiError(
+        500,
+        'Failed to import contacts',
+        { inserted, updated: 0, skipped, at_chunk: i },
+        'insert_failed',
+      )
     }
     inserted += insertData?.length ?? 0
   }

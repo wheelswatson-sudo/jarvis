@@ -54,7 +54,8 @@ export async function POST(req: NextRequest) {
     )
 
   if (upsertError) {
-    return apiError(500, upsertError.message, undefined, 'persist_failed')
+    console.error('[integrations/apollo] upsert failed', upsertError)
+    return apiError(500, 'Failed to save Apollo credential', undefined, 'persist_failed')
   }
 
   return NextResponse.json({ ok: true })
@@ -79,7 +80,8 @@ export async function DELETE() {
     .eq('provider', APOLLO_PROVIDER)
 
   if (error) {
-    return apiError(500, error.message, undefined, 'disconnect_failed')
+    console.error('[integrations/apollo] disconnect failed', error)
+    return apiError(500, 'Failed to disconnect Apollo', undefined, 'disconnect_failed')
   }
 
   return NextResponse.json({ ok: true })

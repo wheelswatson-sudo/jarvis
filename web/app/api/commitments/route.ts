@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
-import { apiError } from '../../../lib/api-errors'
+import { apiError, dbError } from '../../../lib/api-errors'
 import {
   trackCommitmentCreate,
   trackCommitmentComplete,
@@ -50,7 +50,7 @@ export async function GET(req: Request) {
   }
 
   const { data, error } = await q
-  if (error) return apiError(500, error.message, undefined, 'select_failed')
+  if (error) return dbError('api/commitments GET', error, 500, 'select_failed')
 
   return NextResponse.json({ commitments: data ?? [] })
 }
@@ -100,7 +100,7 @@ export async function POST(req: Request) {
     })
     .select('*')
     .single()
-  if (error) return apiError(400, error.message, undefined, 'insert_failed')
+  if (error) return dbError('api/commitments POST', error, 500, 'insert_failed')
 
   void trackCommitmentCreate(user.id, contactId, {
     description,
@@ -158,7 +158,7 @@ export async function PATCH(req: Request) {
     .eq('user_id', user.id)
     .select('*')
     .single()
-  if (error) return apiError(400, error.message, undefined, 'update_failed')
+  if (error) return dbError('api/commitments PATCH', error, 500, 'update_failed')
 
   if (updates.status === 'done') {
     void trackCommitmentComplete(user.id, data.contact_id, {

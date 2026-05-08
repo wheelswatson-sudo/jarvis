@@ -29,7 +29,8 @@ export async function GET() {
     .maybeSingle()
 
   if (error) {
-    return apiError(500, error.message, { code: error.code }, 'query_failed')
+    console.error('[daily-briefing] GET query failed', error)
+    return apiError(500, 'Failed to load briefing', undefined, 'query_failed')
   }
   return NextResponse.json({ briefing: data ?? null })
 }
@@ -82,7 +83,7 @@ export async function POST() {
         message: error.message,
         code: error.code,
       })
-      return apiError(500, error.message, { code: error.code }, 'upsert_failed')
+      return apiError(500, 'Failed to save briefing', undefined, 'upsert_failed')
     }
 
     return NextResponse.json({
@@ -91,8 +92,7 @@ export async function POST() {
       markdown: result.markdown,
     })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Internal error'
     console.error('[daily-briefing] generate failed', err)
-    return apiError(500, message, undefined, 'generate_failed')
+    return apiError(500, 'Failed to generate briefing', undefined, 'generate_failed')
   }
 }

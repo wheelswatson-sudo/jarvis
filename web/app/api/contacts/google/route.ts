@@ -96,9 +96,10 @@ export async function POST() {
     .eq('user_id', user.id)
 
   if (existingError) {
+    console.error('[contacts/google] existing lookup failed', existingError)
     return apiError(
       500,
-      existingError.message,
+      'Failed to load existing contacts',
       undefined,
       'contacts_lookup_failed',
     )
@@ -164,9 +165,10 @@ export async function POST() {
       .insert(toInsert)
       .select('id')
     if (insertError) {
+      console.error('[contacts/google] insert failed', insertError)
       return apiError(
         500,
-        insertError.message,
+        'Failed to import contacts',
         { inserted: 0, updated: 0, skipped },
         'insert_failed',
       )

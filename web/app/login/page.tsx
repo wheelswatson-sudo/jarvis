@@ -23,6 +23,10 @@ export default function LoginPage() {
     setError(null)
     setMessage(null)
     const supabase = createClient()
+    // Only force `prompt=consent` on first connect — returning users skip
+    // the consent screen. Explicit re-consent lives on Settings → Reconnect
+    // Google. `access_type=offline` alone still asks Google for a refresh
+    // token; Google reuses the previously-granted scopes silently.
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
@@ -30,7 +34,6 @@ export default function LoginPage() {
         scopes: GOOGLE_OAUTH_SCOPES.join(' '),
         queryParams: {
           access_type: 'offline',
-          prompt: 'consent',
         },
       },
     })

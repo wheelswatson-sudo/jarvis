@@ -58,7 +58,10 @@ export async function GET(
     .eq('id', id)
     .eq('user_id', user.id)
     .maybeSingle()
-  if (contactErr) return corsError(req,500, contactErr.message, 'query_failed')
+  if (contactErr) {
+    console.error('[extension/context] contact query failed', contactErr)
+    return corsError(req, 500, 'Query failed', 'query_failed')
+  }
   if (!contactRow) {
     return corsError(req,404, 'Contact not found', 'contact_not_found')
   }

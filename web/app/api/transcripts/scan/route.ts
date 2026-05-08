@@ -271,8 +271,21 @@ export async function POST(req: Request) {
     )
   }
 
-  const overrideContactId =
-    typeof b.contact_id === 'string' ? b.contact_id : match.id
+  let overrideContactId: string = match.id
+  if (typeof b.contact_id === 'string' && b.contact_id !== match.id) {
+    // Caller asked us to attach the transcript to a specific contact —
+    // verify it belongs to this user before writing dependent rows.
+    const { data: ownedContact } = await supabase
+      .from('contacts')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('id', b.contact_id)
+      .maybeSingle()
+    if (!ownedContact) {
+      return apiError(404, 'Contact not found', undefined, 'contact_not_found')
+    }
+    overrideContactId = b.contact_id
+  }
 
   const occurredAt = parsed.date ?? new Date().toISOString()
   const type: InteractionType = 'meeting'
@@ -300,7 +313,10 @@ export async function POST(req: Request) {
     .select('*')
     .single()
 
-  if (error) return apiError(400, error.message, undefined, 'insert_failed')
+  if (error) {
+    console.error('[api/transcripts/scan] interactions insert failed', error)
+    return apiError(500, 'Failed to save transcript', undefined, 'insert_failed')
+  }
 
   // Auto-create commitments for action items where owner is 'me'.
   const myItems = parsed.action_items.filter(

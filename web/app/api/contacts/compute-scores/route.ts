@@ -80,10 +80,12 @@ export async function POST() {
   ])
 
   if (contactsRes.error) {
-    return apiError(500, contactsRes.error.message, undefined, 'query_failed')
+    console.error('[compute-scores] contacts query failed', contactsRes.error)
+    return apiError(500, 'Failed to load contacts', undefined, 'query_failed')
   }
   if (interactionsRes.error) {
-    return apiError(500, interactionsRes.error.message, undefined, 'query_failed')
+    console.error('[compute-scores] interactions query failed', interactionsRes.error)
+    return apiError(500, 'Failed to load interactions', undefined, 'query_failed')
   }
 
   const contacts = (contactsRes.data ?? []) as ContactRow[]

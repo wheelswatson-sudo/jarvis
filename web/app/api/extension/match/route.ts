@@ -73,7 +73,10 @@ export async function GET(req: Request) {
     .from('contacts')
     .select('id, first_name, last_name, company, title, linkedin, personal_details')
     .eq('user_id', user.id)
-  if (error) return corsError(req,500, error.message, 'query_failed')
+  if (error) {
+    console.error('[extension/match] query failed', error)
+    return corsError(req, 500, 'Query failed', 'query_failed')
+  }
 
   type Row = Pick<
     Contact,

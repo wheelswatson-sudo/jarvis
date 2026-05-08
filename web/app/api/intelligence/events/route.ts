@@ -69,7 +69,8 @@ export async function POST(request: Request) {
       .eq('user_id', user.id)
       .maybeSingle()
     if (ownerErr) {
-      return apiError(500, ownerErr.message, undefined, 'contact_lookup_failed')
+      console.error('[intelligence/events] contact lookup failed', ownerErr)
+      return apiError(500, 'Contact lookup failed', undefined, 'contact_lookup_failed')
     }
     if (!owned) {
       return apiError(403, 'Contact does not belong to user', undefined, 'forbidden_contact')
@@ -95,7 +96,8 @@ export async function POST(request: Request) {
   })
 
   if (error) {
-    return apiError(500, error.message, undefined, 'insert_failed')
+    console.error('[intelligence/events] insert failed', error)
+    return apiError(500, 'Failed to record event', undefined, 'insert_failed')
   }
 
   return NextResponse.json({ ok: true })

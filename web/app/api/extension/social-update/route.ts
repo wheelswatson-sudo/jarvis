@@ -72,7 +72,10 @@ export async function POST(req: Request) {
     .eq('id', contactId)
     .eq('user_id', user.id)
     .maybeSingle()
-  if (getErr) return corsError(req,500, getErr.message, 'query_failed')
+  if (getErr) {
+    console.error('[extension/social-update] contact query failed', getErr)
+    return corsError(req, 500, 'Query failed', 'query_failed')
+  }
   if (!contactRow) return corsError(req,404, 'Contact not found', 'not_found')
   const contact = contactRow as Contact
 
@@ -132,7 +135,10 @@ export async function POST(req: Request) {
     .update(updates)
     .eq('id', contactId)
     .eq('user_id', user.id)
-  if (updErr) return corsError(req,500, updErr.message, 'update_failed')
+  if (updErr) {
+    console.error('[extension/social-update] update failed', updErr)
+    return corsError(req, 500, 'Update failed', 'update_failed')
+  }
 
   // Log a lightweight interaction so the relationship signal updates.
   const summaryBits: string[] = [

@@ -84,9 +84,10 @@ export async function POST(req: NextRequest) {
     .eq('provider', APOLLO_PROVIDER)
     .maybeSingle()
   if (integrationError) {
+    console.error('[contacts/enrich] integration lookup failed', integrationError)
     return apiError(
       500,
-      integrationError.message,
+      'Failed to load integration credentials',
       undefined,
       'integration_lookup_failed',
     )
@@ -107,9 +108,10 @@ export async function POST(req: NextRequest) {
     .eq('user_id', user.id)
     .in('id', contactIds)
   if (contactsError) {
+    console.error('[contacts/enrich] contacts query failed', contactsError)
     return apiError(
       500,
-      contactsError.message,
+      'Failed to load contacts',
       undefined,
       'contacts_lookup_failed',
     )
@@ -202,10 +204,11 @@ export async function POST(req: NextRequest) {
       .eq('id', id)
       .eq('user_id', user.id)
     if (updateError) {
+      console.error('[contacts/enrich] update failed', { id, updateError })
       results.push({
         contact_id: id,
         status: 'error',
-        error: updateError.message,
+        error: 'update_failed',
       })
       continue
     }

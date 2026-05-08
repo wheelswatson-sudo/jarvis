@@ -39,7 +39,10 @@ export async function GET(req: Request) {
     .order('last_name', { ascending: true })
     .order('first_name', { ascending: true })
     .limit(15)
-  if (error) return corsError(req, 500, error.message, 'query_failed')
+  if (error) {
+    console.error('[extension/search] query failed', error)
+    return corsError(req, 500, 'Query failed', 'query_failed')
+  }
 
   const contacts = ((data ?? []) as Pick<
     Contact,

@@ -73,7 +73,8 @@ export async function POST(request: Request) {
         .select('user_id')
         .gte('created_at', cutoff)
       if (error) {
-        return apiError(500, error.message, undefined, 'query_failed')
+        console.error('[analyze] events query failed', error)
+        return apiError(500, 'Failed to enumerate users', undefined, 'query_failed')
       }
       const userIds = [
         ...new Set(
@@ -138,13 +139,17 @@ export async function POST(request: Request) {
     )
   }
 
-  const engineRun = await runEngineForUser(service, user.id)
-  const generatorRun = await generateInsightsForUser(service, user.id)
-
-  return NextResponse.json({
-    ok: true,
-    mode: 'user',
-    engineRun,
-    generatorRun,
-  })
+  try {
+    const engineRun = await runEngineForUser(service, user.id)
+    const generatorRun = await generateInsightsForUser(service, user.id)
+    return NextResponse.json({
+      ok: true,
+      mode: 'user',
+      engineRun,
+      generatorRun,
+    })
+  } catch (err) {
+    console.error('[analyze] user-path engine failed', err)
+    return apiError(500, 'Intelligence engine failed', undefined, 'engine_failed')
+  }
 }

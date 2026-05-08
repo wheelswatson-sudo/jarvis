@@ -29,6 +29,7 @@ export async function GET(req: NextRequest) {
       sent_at, contact_id,
       contacts:contact_id (id, first_name, last_name, email, phone, company)
     `)
+    .eq('user_id', user.id)
     .eq('is_archived', false)
     .order('sent_at', { ascending: false })
     .range(offset, offset + limit - 1)
@@ -40,7 +41,10 @@ export async function GET(req: NextRequest) {
 
   const { data, error, count } = await query
 
-  if (error) return apiError(500, error.message, undefined, 'query_failed')
+  if (error) {
+    console.error('[api/inbox] GET query failed', error)
+    return apiError(500, 'Failed to load inbox', undefined, 'query_failed')
+  }
 
   return NextResponse.json({ messages: data ?? [], count })
 }
@@ -73,9 +77,13 @@ export async function PATCH(req: NextRequest) {
   const { error } = await supabase
     .from('messages')
     .update(clean)
+    .eq('user_id', user.id)
     .in('id', ids)
 
-  if (error) return apiError(500, error.message, undefined, 'update_failed')
+  if (error) {
+    console.error('[api/inbox] PATCH update failed', error)
+    return apiError(500, 'Failed to update messages', undefined, 'update_failed')
+  }
 
   return NextResponse.json({ ok: true, updated: ids.length })
 }

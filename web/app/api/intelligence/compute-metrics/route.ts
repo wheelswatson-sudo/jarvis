@@ -66,7 +66,8 @@ export async function POST(request: Request) {
         .select('user_id')
         .gte('created_at', cutoff)
       if (error) {
-        return apiError(500, error.message, undefined, 'query_failed')
+        console.error('[compute-metrics] events query failed', error)
+        return apiError(500, 'Failed to enumerate users', undefined, 'query_failed')
       }
       const userIds = [
         ...new Set(
