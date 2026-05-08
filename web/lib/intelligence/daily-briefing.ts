@@ -165,7 +165,9 @@ export async function buildDailyBriefing(
   }
 
   // Ranked action list — flatten and sort by urgency, then by category
-  // priority (high-leverage categories first).
+  // priority (high-leverage categories first), then keep one item per
+  // contact so a single noisy contact doesn't crowd out the rest of the
+  // network. Higher-priority category wins (categoryRank ascending).
   const categoryRank: Record<BriefingItem['category'], number> = {
     meeting: 0,
     overdue: 1,
@@ -180,7 +182,7 @@ export async function buildDailyBriefing(
     medium: 1,
     low: 2,
   }
-  const ranked_actions = [
+  const sortedAll = [
     ...sections.todays_meetings,
     ...sections.overdue_commitments,
     ...sections.cooling_relationships,
@@ -193,6 +195,15 @@ export async function buildDailyBriefing(
     if (u !== 0) return u
     return categoryRank[a.category] - categoryRank[b.category]
   })
+  const seenContacts = new Set<string>()
+  const ranked_actions: BriefingItem[] = []
+  for (const item of sortedAll) {
+    if (item.contact_id) {
+      if (seenContacts.has(item.contact_id)) continue
+      seenContacts.add(item.contact_id)
+    }
+    ranked_actions.push(item)
+  }
 
   const payload: BriefingPayload = {
     briefing_date: briefingDate,

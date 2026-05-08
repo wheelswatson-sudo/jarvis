@@ -82,13 +82,18 @@ function daysUntil(iso: string | null | undefined): number | null {
 //    60+  T1 silent past TIER1_SILENT_DAYS
 //    50-  commitment due within COMMITMENT_DUE_SOON_DAYS
 //    40+  T2 silent past TIER2_SILENT_DAYS
+//
+// Each contact appears at most once in the final list — we collect all
+// candidates, then keep the highest-urgency one per contact. That keeps the
+// list surfacing distinct relationships (a chatty contact with three commits
+// and a stale half-life shouldn't crowd out a different cooling contact).
 function buildActionList(
   contacts: Contact[],
   commitments: CommitmentForList[],
 ): ActionItem[] {
   const byId = new Map(contacts.map((c) => [c.id, c]))
-  const seenContact = new Set<string>()
-  const items: ActionItem[] = []
+  type Candidate = ActionItem & { contactId: string }
+  const candidates: Candidate[] = []
 
   for (const com of commitments) {
     if (com.status !== 'open' || !com.due_at || !com.contact_id) continue
@@ -99,7 +104,8 @@ function buildActionList(
     const name = contactName(contact)
     if (dUntil < 0) {
       const overdue = -dUntil
-      items.push({
+      candidates.push({
+        contactId: contact.id,
         key: `com-${com.id}`,
         href: `/contacts/${contact.id}`,
         primary: `Overdue: ${com.description}`,
@@ -110,7 +116,8 @@ function buildActionList(
     } else if (dUntil <= COMMITMENT_DUE_SOON_DAYS) {
       const when =
         dUntil === 0 ? 'today' : dUntil === 1 ? 'tomorrow' : `in ${dUntil}d`
-      items.push({
+      candidates.push({
+        contactId: contact.id,
         key: `com-${com.id}`,
         href: `/contacts/${contact.id}`,
         primary: `Due ${when}: ${com.description}`,
@@ -128,9 +135,9 @@ function buildActionList(
 
     if (typeof c.half_life_days === 'number' && c.half_life_days > 0) {
       const past = dSince - c.half_life_days
-      if (past >= 0 && !seenContact.has(c.id)) {
-        seenContact.add(c.id)
-        items.push({
+      if (past >= 0) {
+        candidates.push({
+          contactId: c.id,
           key: `decay-${c.id}`,
           href: `/contacts/${c.id}`,
           primary: `${name}'s half-life expired ${past}d ago`,
@@ -138,11 +145,9 @@ function buildActionList(
           urgency: 80 + past,
           tone: 'amber',
         })
-        continue
-      }
-      if (past < 0 && -past <= HALFLIFE_WARN_DAYS && !seenContact.has(c.id)) {
-        seenContact.add(c.id)
-        items.push({
+      } else if (-past <= HALFLIFE_WARN_DAYS) {
+        candidates.push({
+          contactId: c.id,
           key: `decay-${c.id}`,
           href: `/contacts/${c.id}`,
           primary: `${name}'s half-life expires in ${-past}d`,
@@ -150,13 +155,12 @@ function buildActionList(
           urgency: 70 - -past,
           tone: 'amber',
         })
-        continue
       }
     }
 
-    if (c.tier === 1 && dSince >= TIER1_SILENT_DAYS && !seenContact.has(c.id)) {
-      seenContact.add(c.id)
-      items.push({
+    if (c.tier === 1 && dSince >= TIER1_SILENT_DAYS) {
+      candidates.push({
+        contactId: c.id,
         key: `silent-${c.id}`,
         href: `/contacts/${c.id}`,
         primary: `Follow up with ${name}`,
@@ -164,13 +168,9 @@ function buildActionList(
         urgency: 60 + (dSince - TIER1_SILENT_DAYS),
         tone: 'indigo',
       })
-    } else if (
-      c.tier === 2 &&
-      dSince >= TIER2_SILENT_DAYS &&
-      !seenContact.has(c.id)
-    ) {
-      seenContact.add(c.id)
-      items.push({
+    } else if (c.tier === 2 && dSince >= TIER2_SILENT_DAYS) {
+      candidates.push({
+        contactId: c.id,
         key: `silent-${c.id}`,
         href: `/contacts/${c.id}`,
         primary: `Follow up with ${name}`,
@@ -181,8 +181,24 @@ function buildActionList(
     }
   }
 
-  items.sort((a, b) => b.urgency - a.urgency)
-  return items.slice(0, ACTION_LIMIT)
+  candidates.sort((a, b) => b.urgency - a.urgency)
+
+  const seen = new Set<string>()
+  const items: ActionItem[] = []
+  for (const cand of candidates) {
+    if (seen.has(cand.contactId)) continue
+    seen.add(cand.contactId)
+    items.push({
+      key: cand.key,
+      href: cand.href,
+      primary: cand.primary,
+      secondary: cand.secondary,
+      urgency: cand.urgency,
+      tone: cand.tone,
+    })
+    if (items.length >= ACTION_LIMIT) break
+  }
+  return items
 }
 
 type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>
