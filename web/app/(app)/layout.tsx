@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation'
 import { createClient } from '../../lib/supabase/server'
 import { NavBar } from '../../components/NavBar'
 import { Chat } from '../../components/Chat'
+import { AutoSyncOnLogin } from '../../components/AutoSyncOnLogin'
 
 export default async function AppLayout({
   children,
@@ -31,6 +32,7 @@ export default async function AppLayout({
           {children}
         </main>
         <Chat />
+        <AutoSyncOnLogin />
       </div>
     </div>
   )
