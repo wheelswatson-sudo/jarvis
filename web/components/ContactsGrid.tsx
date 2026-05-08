@@ -69,6 +69,7 @@ export function ContactsGrid({
   const [isPending, startTransition] = useTransition()
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('default')
+  const [displayCount, setDisplayCount] = useState(pageSize)
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -127,9 +128,10 @@ export function ContactsGrid({
   )
 
   const visible = useMemo(
-    () => filtered.slice(0, pageSize),
-    [filtered, pageSize],
+    () => filtered.slice(0, displayCount),
+    [filtered, displayCount],
   )
+  const hasMore = filtered.length > visible.length
 
   function toggleSelectMode() {
     setSelectMode((s) => {
@@ -420,6 +422,23 @@ export function ContactsGrid({
           )
         })}
       </div>
+
+      {hasMore && (
+        <div className="flex justify-center pt-2">
+          <button
+            type="button"
+            onClick={() =>
+              setDisplayCount((n) => Math.min(n + pageSize, filtered.length))
+            }
+            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-xs font-medium text-zinc-300 transition-colors hover:border-white/[0.18] hover:text-white"
+          >
+            Show {Math.min(pageSize, filtered.length - visible.length)} more
+            <span className="ml-1.5 text-zinc-500">
+              ({filtered.length - visible.length} hidden)
+            </span>
+          </button>
+        </div>
+      )}
 
       {visible.length === 0 && (
         <div className="rounded-2xl aiea-glass p-10 text-center">

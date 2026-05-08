@@ -109,6 +109,10 @@ export default function InboxPage() {
 
   useEffect(() => {
     setLoading(true)
+    // Drop the previous selection — its message likely isn't in the new
+    // channel's slice, and on a narrow viewport keeping `selected` set would
+    // leave the list hidden while the detail panel renders empty.
+    setSelected(null)
     const params = new URLSearchParams()
     if (channel) params.set('channel', channel)
     params.set('limit', '100')
