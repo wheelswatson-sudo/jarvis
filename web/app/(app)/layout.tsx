@@ -3,6 +3,7 @@ import { createClient } from '../../lib/supabase/server'
 import { NavBar } from '../../components/NavBar'
 import { Chat } from '../../components/Chat'
 import { AutoSyncOnLogin } from '../../components/AutoSyncOnLogin'
+import { AnalyticsTracker } from '../../components/AnalyticsTracker'
 
 export default async function AppLayout({
   children,
@@ -33,6 +34,7 @@ export default async function AppLayout({
         </main>
         <Chat />
         <AutoSyncOnLogin />
+        <AnalyticsTracker />
       </div>
     </div>
   )

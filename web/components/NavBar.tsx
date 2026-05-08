@@ -13,6 +13,7 @@ const NAV = [
   { href: '/briefing', label: 'Briefing' },
   { href: '/commitments', label: 'Commitments' },
   { href: '/approvals', label: 'Approvals' },
+  { href: '/feedback', label: 'Feedback' },
   { href: '/settings', label: 'Settings' },
 ]
 
