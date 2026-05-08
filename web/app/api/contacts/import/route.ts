@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
+import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
 import { trackImport } from '../../../../lib/events'
+import {
+  autoEnrichInsertedContacts,
+  type AutoEnrichInput,
+} from '../../../../lib/contacts/auto-enrich'
 
 export const dynamic = 'force-dynamic'
 
@@ -163,7 +168,9 @@ export async function POST(req: Request) {
   const { data, error } = await supabase
     .from('contacts')
     .insert(rows)
-    .select('id')
+    .select(
+      'id, first_name, last_name, email, company, title, phone, tier, personal_details',
+    )
 
   if (error) {
     console.error('[contacts/import] insert failed', error)
@@ -183,9 +190,20 @@ export async function POST(req: Request) {
     })
   }
 
+  const service = getServiceClient()
+  const enrichment = service
+    ? await autoEnrichInsertedContacts(
+        service,
+        user.id,
+        (data ?? []) as AutoEnrichInput[],
+        'manual',
+      )
+    : null
+
   return NextResponse.json({
     inserted: insertedCount,
     skipped: skipped.length,
     errors: skipped,
+    enrichment,
   })
 }

@@ -2,6 +2,10 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
+import {
+  autoEnrichInsertedContacts,
+  type AutoEnrichInput,
+} from '../../../../lib/contacts/auto-enrich'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 120
@@ -115,13 +119,16 @@ export async function POST(req: NextRequest) {
   }
 
   let inserted = 0
+  const insertedRows: AutoEnrichInput[] = []
   // Batch inserts in chunks of 100
   for (let i = 0; i < toInsert.length; i += 100) {
     const chunk = toInsert.slice(i, i + 100)
     const { data: insertData, error: insertError } = await service
       .from('contacts')
       .insert(chunk)
-      .select('id')
+      .select(
+        'id, first_name, last_name, email, company, title, phone, tier, personal_details',
+      )
     if (insertError) {
       console.error('[contacts/import-vcf] insert chunk failed', insertError)
       return apiError(
@@ -132,6 +139,7 @@ export async function POST(req: NextRequest) {
       )
     }
     inserted += insertData?.length ?? 0
+    if (insertData) insertedRows.push(...(insertData as AutoEnrichInput[]))
   }
 
   let updated = 0
@@ -144,10 +152,18 @@ export async function POST(req: NextRequest) {
     if (!updateError) updated++
   }
 
+  const enrichment = await autoEnrichInsertedContacts(
+    service,
+    user.id,
+    insertedRows,
+    'vcf',
+  )
+
   return NextResponse.json({
     inserted,
     updated,
     skipped,
     total_received: contacts.length,
+    enrichment,
   })
 }
