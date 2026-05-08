@@ -10,9 +10,19 @@ import {
 import { HelpDot } from '../../../components/Tooltip'
 import { Greeting } from '../../../components/Greeting'
 import { IntelligencePanel } from '../../../components/IntelligencePanel'
-import { contactName, formatRelative } from '../../../lib/format'
+import {
+  contactName,
+  formatRelative,
+  pipelineStageDot,
+} from '../../../lib/format'
 import { NETWORK_HEALTH_HELP } from '../../../lib/glossary'
-import type { Commitment, Contact } from '../../../lib/types'
+import {
+  PIPELINE_STAGES,
+  PIPELINE_STAGE_LABELS,
+  type Commitment,
+  type Contact,
+  type PipelineStage,
+} from '../../../lib/types'
 import { APOLLO_PROVIDER } from '../../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
@@ -389,6 +399,18 @@ async function loadHomeData() {
   const actions = buildActionList(contacts, commitments)
   const firstName = user ? firstNameFromUser(user) : null
 
+  const pipelineCounts = PIPELINE_STAGES.reduce<Record<PipelineStage, number>>(
+    (acc, s) => ({ ...acc, [s]: 0 }),
+    {} as Record<PipelineStage, number>,
+  )
+  let pipelineTotal = 0
+  for (const c of contacts) {
+    if (c.pipeline_stage && c.pipeline_stage in pipelineCounts) {
+      pipelineCounts[c.pipeline_stage]++
+      pipelineTotal++
+    }
+  }
+
   return {
     firstName,
     googleConnected,
@@ -397,6 +419,7 @@ async function loadHomeData() {
     health: { total, active, atRisk, dormant },
     actions,
     activity,
+    pipeline: { counts: pipelineCounts, total: pipelineTotal },
   }
 }
 
@@ -409,6 +432,7 @@ export default async function HomePage() {
     health,
     actions,
     activity,
+    pipeline,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -487,6 +511,12 @@ export default async function HomePage() {
             tone={health.dormant > 0 ? 'rose' : 'emerald'}
             icon={<MoonIcon />}
           />
+        </div>
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && (
+        <div className="animate-fade-up">
+          <PipelineSummary counts={pipeline.counts} total={pipeline.total} />
         </div>
       )}
 
@@ -785,6 +815,66 @@ function GettingStarted({
         </p>
       </Card>
     </section>
+  )
+}
+
+function PipelineSummary({
+  counts,
+  total,
+}: {
+  counts: Record<PipelineStage, number>
+  total: number
+}) {
+  return (
+    <Link
+      href="/pipeline"
+      className="group block rounded-2xl aiea-glass aiea-lift p-5"
+    >
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+            Pipeline
+          </div>
+          <div className="mt-1 text-sm text-zinc-200">
+            {total === 0 ? (
+              <span className="text-zinc-500">
+                No staged contacts yet — open a profile to assign a stage.
+              </span>
+            ) : (
+              <span>
+                <span className="font-medium text-zinc-100">{total}</span>{' '}
+                contact{total === 1 ? '' : 's'} in your pipeline
+              </span>
+            )}
+          </div>
+        </div>
+        <span className="text-xs text-violet-300 transition-colors group-hover:text-violet-200">
+          Open board →
+        </span>
+      </div>
+      {total > 0 && (
+        <ul className="flex flex-wrap gap-2">
+          {PIPELINE_STAGES.map((s) => {
+            const count = counts[s] ?? 0
+            return (
+              <li
+                key={s}
+                className={`inline-flex items-center gap-1.5 rounded-full bg-white/[0.03] px-2.5 py-1 text-xs ring-1 ring-inset ring-white/[0.06] ${
+                  count === 0 ? 'opacity-50' : ''
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-1.5 w-1.5 rounded-full ${pipelineStageDot(s)}`}
+                />
+                <span className="tabular-nums text-zinc-100">{count}</span>
+                <span className="text-zinc-400">{PIPELINE_STAGE_LABELS[s].toLowerCase()}</span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </Link>
   )
 }
 

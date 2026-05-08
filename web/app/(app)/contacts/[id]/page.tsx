@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation'
 import { createClient } from '../../../../lib/supabase/server'
 import { PageViewTracker } from '../../../../components/PageViewTracker'
 import { PersonalDetailsEditor } from '../../../../components/PersonalDetailsEditor'
+import { PipelineSelector } from '../../../../components/PipelineSelector'
 import { QuickAddInteraction } from '../../../../components/QuickAddInteraction'
 import { InteractionTimeline } from '../../../../components/InteractionTimeline'
 import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
@@ -14,7 +15,9 @@ import {
   contactName,
   formatRelative,
   formatPhone,
+  pipelineStageColor,
 } from '../../../../lib/format'
+import { PIPELINE_STAGE_LABELS } from '../../../../lib/types'
 import type {
   Commitment,
   Contact,
@@ -209,9 +212,18 @@ export default async function ContactDetailPage({
               {initials(contact)}
             </span>
             <div className="min-w-0">
-              <h1 className="truncate text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
-                {displayName}
-              </h1>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
+                  {displayName}
+                </h1>
+                {contact.pipeline_stage && (
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${pipelineStageColor(contact.pipeline_stage)}`}
+                  >
+                    {PIPELINE_STAGE_LABELS[contact.pipeline_stage]}
+                  </span>
+                )}
+              </div>
               <p className="mt-1.5 text-sm text-zinc-400">
                 {[contact.title, contact.company].filter(Boolean).join(' · ') ||
                   'No role on file'}
@@ -354,6 +366,17 @@ export default async function ContactDetailPage({
           <MeetingPrepBrief contactId={contact.id} />
         </div>
       </div>
+
+      <section>
+        <SectionHeader
+          eyebrow="Pipeline"
+          title="Stage"
+          subtitle="Where this relationship sits in your funnel."
+        />
+        <Card>
+          <PipelineSelector contact={contact} />
+        </Card>
+      </section>
 
       <section>
         <SectionHeader

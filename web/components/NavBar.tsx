@@ -11,6 +11,7 @@ const NAV = [
   { href: '/contacts', label: 'Contacts' },
   { href: '/inbox', label: 'Inbox' },
   { href: '/briefing', label: 'Briefing' },
+  { href: '/pipeline', label: 'Pipeline' },
   { href: '/commitments', label: 'Commitments' },
   { href: '/approvals', label: 'Approvals' },
   { href: '/feedback', label: 'Feedback' },

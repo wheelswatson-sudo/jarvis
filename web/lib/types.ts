@@ -1,5 +1,31 @@
 export type Tier = 1 | 2 | 3
 
+export type PipelineStage =
+  | 'lead'
+  | 'warm'
+  | 'active'
+  | 'committed'
+  | 'closed'
+  | 'dormant'
+
+export const PIPELINE_STAGES: PipelineStage[] = [
+  'lead',
+  'warm',
+  'active',
+  'committed',
+  'closed',
+  'dormant',
+]
+
+export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
+  lead: 'Lead',
+  warm: 'Warm',
+  active: 'Active',
+  committed: 'Committed',
+  closed: 'Closed',
+  dormant: 'Dormant',
+}
+
 export const RELATIONSHIP_SCHEMA_VERSION = 1
 
 export type CommitmentRecordStatus = 'pending' | 'completed' | 'overdue'
@@ -101,6 +127,9 @@ export type Contact = {
   personal_details: PersonalDetails | null
   relationship_score: number | null
   next_follow_up: string | null
+  pipeline_stage: PipelineStage | null
+  pipeline_notes: string | null
+  pipeline_updated_at: string | null
   created_at: string
   updated_at: string
 }
