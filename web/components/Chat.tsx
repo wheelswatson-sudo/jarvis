@@ -5,6 +5,13 @@ import { useEffect, useRef, useState } from 'react'
 type Role = 'user' | 'assistant'
 type Message = { role: Role; content: string }
 
+const SUGGESTED_PROMPTS = [
+  'Who should I follow up with this week?',
+  'What commitments are overdue?',
+  'Summarize my last conversation with my top contacts',
+  'Which Tier 1 relationships are cooling?',
+] as const
+
 export function Chat() {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
@@ -16,8 +23,8 @@ export function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [messages, open])
 
-  async function send() {
-    const text = draft.trim()
+  async function send(textOverride?: string) {
+    const text = (textOverride ?? draft).trim()
     if (!text || sending) return
     const next: Message[] = [...messages, { role: 'user', content: text }]
     setMessages(next)
@@ -128,10 +135,26 @@ export function Chat() {
           </div>
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
             {messages.length === 0 && (
-              <div className="px-2 py-8 text-center">
-                <p className="text-sm text-zinc-500">
-                  Ask anything about your relationships, commitments, or queue.
+              <div className="px-1 py-2">
+                <p className="text-center text-xs text-zinc-500">
+                  Ask anything about your relationships, commitments, or
+                  queue.
                 </p>
+                <div className="mt-4 space-y-1.5">
+                  <div className="px-1 text-[10px] uppercase tracking-wider text-zinc-600">
+                    Try asking
+                  </div>
+                  {SUGGESTED_PROMPTS.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      onClick={() => send(prompt)}
+                      className="block w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-zinc-300 transition-colors hover:border-violet-500/30 hover:bg-white/[0.04] hover:text-zinc-100"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             <div className="space-y-3">
@@ -167,7 +190,7 @@ export function Chat() {
           <form
             onSubmit={(e) => {
               e.preventDefault()
-              send()
+              void send()
             }}
             className="border-t border-white/[0.06] p-3"
           >

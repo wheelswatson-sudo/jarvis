@@ -176,12 +176,17 @@ export function BriefingView({ initial }: Props) {
             <SparklesIcon />
           </div>
           <h2 className="text-base font-medium text-zinc-100">
-            No briefing yet
+            Your first briefing is one click away
           </h2>
           <p className="mx-auto mt-1 max-w-md text-sm text-zinc-500">
-            Click <span className="text-zinc-300">Generate briefing</span> to
-            assemble today&apos;s intelligence — meetings, overdue commitments,
-            and cooling relationships.
+            Click <span className="text-zinc-300">Generate briefing</span> and
+            AIEA will assemble today&apos;s intelligence — your meetings,
+            overdue commitments, and cooling relationships — in about 15
+            seconds.
+          </p>
+          <p className="mx-auto mt-3 max-w-md text-xs text-zinc-600">
+            New to AIEA? The first briefing gets richer as your calendar and
+            email sync. Give it 24-48 hours of data for the best signal.
           </p>
         </div>
       )}

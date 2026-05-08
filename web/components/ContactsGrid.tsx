@@ -5,8 +5,11 @@ import { useMemo, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { HalfLifeGauge, SentimentSlope } from './Gauge'
 import { CadenceBadge } from './CadenceBadge'
+import { Tooltip, HelpDot } from './Tooltip'
+import { useToast } from './Toast'
 import { contactName, tierColor, tierLabel } from '../lib/format'
 import { getCadenceInfo } from '../lib/contacts/cadence'
+import { TIER_GLOSSARY, HALF_LIFE_HELP } from '../lib/glossary'
 import type { Contact } from '../lib/types'
 
 type SortMode = 'default' | 'overdue'
@@ -60,11 +63,10 @@ export function ContactsGrid({
   pageSize = 30,
 }: Props) {
   const router = useRouter()
+  const toast = useToast()
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [isPending, startTransition] = useTransition()
-  const [statusMsg, setStatusMsg] = useState<string | null>(null)
-  const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>('default')
 
@@ -133,8 +135,6 @@ export function ContactsGrid({
     setSelectMode((s) => {
       const next = !s
       if (!next) setSelected(new Set())
-      setStatusMsg(null)
-      setErrorMsg(null)
       return next
     })
   }
@@ -154,14 +154,10 @@ export function ContactsGrid({
 
   function clearSelection() {
     setSelected(new Set())
-    setStatusMsg(null)
-    setErrorMsg(null)
   }
 
   function enrichSelected() {
     if (selected.size === 0) return
-    setStatusMsg(null)
-    setErrorMsg(null)
     const ids = Array.from(selected)
     startTransition(async () => {
       try {
@@ -172,21 +168,28 @@ export function ContactsGrid({
         })
         const raw: EnrichResponse = await res.json().catch(() => ({}))
         if (!res.ok) {
-          setErrorMsg(raw.error ?? `Enrichment failed (HTTP ${res.status}).`)
+          toast.error(raw.error ?? `Enrichment failed (HTTP ${res.status})`)
           return
         }
         const e = raw.enriched ?? 0
         const nf = raw.not_found ?? 0
         const sk = raw.skipped ?? 0
         const er = raw.errors ?? 0
-        setStatusMsg(
-          `Enriched ${e} of ${ids.length}: ${nf} not found, ${sk} skipped, ${er} errors.`,
-        )
+        const parts: string[] = []
+        if (nf) parts.push(`${nf} not found in Apollo`)
+        if (sk) parts.push(`${sk} skipped (already enriched)`)
+        if (er) parts.push(`${er} errored`)
+        const detail = parts.length ? ` · ${parts.join(', ')}` : ''
+        if (e > 0) {
+          toast.success(`Enriched ${e} of ${ids.length} contacts${detail}`)
+        } else {
+          toast.info(`No contacts enriched${detail || ''}`)
+        }
         setSelected(new Set())
         setSelectMode(false)
         router.refresh()
       } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : 'Enrichment failed.')
+        toast.error(err instanceof Error ? err.message : 'Enrichment failed.')
       }
     })
   }
@@ -313,8 +316,6 @@ export function ContactsGrid({
           to enable enrichment.
         </p>
       )}
-      {statusMsg && <p className="text-xs text-emerald-300">{statusMsg}</p>}
-      {errorMsg && <p className="text-xs text-rose-300">{errorMsg}</p>}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 aiea-stagger">
         {visible.map((c) => {
@@ -343,15 +344,23 @@ export function ContactsGrid({
                     </div>
                   </div>
                 </div>
-                <span
-                  className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${tierColor(c.tier)}`}
+                <Tooltip
+                  content={tierTooltipContent(c.tier)}
+                  side="left"
                 >
-                  {tierLabel(c.tier)}
-                </span>
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${tierColor(c.tier)}`}
+                  >
+                    {tierLabel(c.tier)}
+                  </span>
+                </Tooltip>
               </div>
               <div className="relative mt-4">
                 <div className="mb-1.5 flex items-center justify-between text-[11px] uppercase tracking-wider text-zinc-500">
-                  <span>Half-life</span>
+                  <span className="inline-flex items-center gap-1.5">
+                    Half-life
+                    <HelpDot content={HALF_LIFE_HELP} />
+                  </span>
                   <span className="tabular-nums text-zinc-400">
                     {c.half_life_days != null
                       ? `${c.half_life_days.toFixed(0)}d`
@@ -452,7 +461,14 @@ export function ContactsGrid({
                 No contacts match &ldquo;{query}&rdquo;
               </p>
               <p className="mt-1 text-xs text-zinc-500">
-                Try a different name, email, or company.
+                Try a different name, email, or company.{' '}
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  className="text-violet-300 underline-offset-2 hover:underline"
+                >
+                  Clear search
+                </button>
               </p>
             </>
           ) : (
@@ -468,6 +484,28 @@ export function ContactsGrid({
         </div>
       )}
     </div>
+  )
+}
+
+function tierTooltipContent(tier: number | null | undefined) {
+  if (tier === 1 || tier === 2 || tier === 3) {
+    const meta = TIER_GLOSSARY[`T${tier}` as 'T1' | 'T2' | 'T3']
+    return (
+      <span>
+        <span className="font-medium text-zinc-100">
+          Tier {tier} · {meta.label}
+        </span>
+        <br />
+        {meta.description}
+      </span>
+    )
+  }
+  return (
+    <span>
+      <span className="font-medium text-zinc-100">No tier</span>
+      <br />
+      Open the contact and tap T1/T2/T3 to set how closely AIEA tracks them.
+    </span>
   )
 }
 

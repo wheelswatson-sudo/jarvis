@@ -8,6 +8,7 @@ import {
   upsertApiKey,
 } from './actions'
 import type { ModelInfo, Provider } from '../../lib/providers'
+import { useToast } from '../../components/Toast'
 
 type ApiKeyRow = {
   provider: Provider
@@ -30,48 +31,49 @@ export function SettingsClient({
   existingKeys,
 }: Props) {
   const router = useRouter()
+  const toast = useToast()
   const [isPending, startTransition] = useTransition()
   const [model, setModel] = useState(preferredModel)
-  const [modelStatus, setModelStatus] = useState<string | null>(null)
-  const [keyStatus, setKeyStatus] = useState<Record<string, string | null>>({})
 
   const keysByProvider = new Map(existingKeys.map((k) => [k.provider, k]))
 
   function handleModelChange(next: string) {
+    const prev = model
     setModel(next)
-    setModelStatus(null)
     startTransition(async () => {
       const res = await updatePreferredModel(next)
       if ('error' in res) {
-        setModelStatus(`Error: ${res.error}`)
+        setModel(prev)
+        toast.error(`Couldn't save model — ${res.error}`)
       } else {
-        setModelStatus('Saved.')
+        const label = allModels.find((m) => m.id === next)?.label ?? next
+        toast.success(`Model set to ${label}`)
         router.refresh()
       }
     })
   }
 
   function handleSaveKey(provider: Provider, value: string) {
-    setKeyStatus((s) => ({ ...s, [provider]: null }))
     startTransition(async () => {
       const res = await upsertApiKey(provider, value)
       if ('error' in res) {
-        setKeyStatus((s) => ({ ...s, [provider]: `Error: ${res.error}` }))
+        toast.error(`Couldn't save ${provider} key — ${res.error}`)
       } else {
-        setKeyStatus((s) => ({ ...s, [provider]: 'Saved.' }))
+        const label = allProviders.find((p) => p.id === provider)?.label ?? provider
+        toast.success(`${label} key saved`)
         router.refresh()
       }
     })
   }
 
   function handleDeleteKey(provider: Provider) {
-    setKeyStatus((s) => ({ ...s, [provider]: null }))
     startTransition(async () => {
       const res = await deleteApiKey(provider)
       if ('error' in res) {
-        setKeyStatus((s) => ({ ...s, [provider]: `Error: ${res.error}` }))
+        toast.error(`Couldn't remove ${provider} key — ${res.error}`)
       } else {
-        setKeyStatus((s) => ({ ...s, [provider]: 'Removed.' }))
+        const label = allProviders.find((p) => p.id === provider)?.label ?? provider
+        toast.info(`${label} key removed`)
         router.refresh()
       }
     })
@@ -111,15 +113,6 @@ export function SettingsClient({
             </span>{' '}
             using your API key for that provider.
           </p>
-          {modelStatus && (
-            <p
-              className={`mt-3 text-xs ${
-                modelStatus.startsWith('Error') ? 'text-rose-300' : 'text-emerald-300'
-              }`}
-            >
-              {modelStatus}
-            </p>
-          )}
         </div>
       </Section>
 
@@ -135,7 +128,6 @@ export function SettingsClient({
                 key={p.id}
                 provider={p}
                 existing={existing}
-                status={keyStatus[p.id] ?? null}
                 disabled={isPending}
                 onSave={(value) => handleSaveKey(p.id, value)}
                 onDelete={() => handleDeleteKey(p.id)}
@@ -171,14 +163,12 @@ function Section({
 function ProviderKeyRow({
   provider,
   existing,
-  status,
   disabled,
   onSave,
   onDelete,
 }: {
   provider: { id: Provider; label: string }
   existing: ApiKeyRow | undefined
-  status: string | null
   disabled: boolean
   onSave: (value: string) => void
   onDelete: () => void
@@ -277,15 +267,6 @@ function ProviderKeyRow({
             Cancel
           </button>
         </div>
-      )}
-      {status && (
-        <p
-          className={`mt-3 text-xs ${
-            status.startsWith('Error') ? 'text-rose-300' : 'text-emerald-300'
-          }`}
-        >
-          {status}
-        </p>
       )}
     </div>
   )

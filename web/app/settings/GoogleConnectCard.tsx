@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { createClient } from '../../lib/supabase/client'
 import { GOOGLE_OAUTH_SCOPES } from '../../lib/google/scopes'
+import { useToast } from '../../components/Toast'
 
 export type GoogleService = {
   key: 'gmail' | 'calendar' | 'tasks' | 'contacts'
@@ -30,12 +31,11 @@ function formatTimestamp(iso: string | null): string {
 // password and wants to add Google scopes, or to re-grant after a token
 // expires.
 export function GoogleConnectCard({ account_email, services }: Props) {
+  const toast = useToast()
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   async function reconnect() {
     setBusy(true)
-    setError(null)
     const supabase = createClient()
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -46,7 +46,7 @@ export function GoogleConnectCard({ account_email, services }: Props) {
       },
     })
     if (error) {
-      setError(error.message)
+      toast.error(`Couldn't start Google sign-in — ${error.message}`)
       setBusy(false)
     }
   }
@@ -71,9 +71,10 @@ export function GoogleConnectCard({ account_email, services }: Props) {
             </span>
           </div>
           <p className="mt-2 text-xs leading-relaxed text-zinc-500">
-            One consent screen grants Gmail, Calendar, Tasks, and Contacts
-            access. Sign in with Google (or click Reconnect after a token
-            expires) and every service below picks up automatically.
+            One consent screen grants <span className="text-zinc-300">read-only</span> access to Gmail,
+            Calendar, Tasks, and Contacts. AIEA reads message metadata to build
+            your relationship graph — mail bodies never leave Google&apos;s
+            servers. Reconnect any time a token expires.
           </p>
           {account_email && (
             <p className="mt-3 text-xs text-zinc-400">
@@ -116,7 +117,6 @@ export function GoogleConnectCard({ account_email, services }: Props) {
           </button>
         </div>
       </div>
-      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

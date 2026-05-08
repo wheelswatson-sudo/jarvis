@@ -9,12 +9,11 @@ import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
 import { CadenceBadge } from '../../../../components/CadenceBadge'
 import { Card, SectionHeader } from '../../../../components/cards'
+import { TierSelector } from '../../../../components/ContactEditor'
 import {
   contactName,
   formatRelative,
   formatPhone,
-  tierColor,
-  tierLabel,
 } from '../../../../lib/format'
 import type {
   Commitment,
@@ -210,18 +209,9 @@ export default async function ContactDetailPage({
               {initials(contact)}
             </span>
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="truncate text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
-                  {displayName}
-                </h1>
-                {contact.tier != null && (
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide ${tierColor(contact.tier)}`}
-                  >
-                    {tierLabel(contact.tier)}
-                  </span>
-                )}
-              </div>
+              <h1 className="truncate text-3xl font-semibold tracking-tight aiea-gradient-text sm:text-4xl">
+                {displayName}
+              </h1>
               <p className="mt-1.5 text-sm text-zinc-400">
                 {[contact.title, contact.company].filter(Boolean).join(' · ') ||
                   'No role on file'}
@@ -231,7 +221,8 @@ export default async function ContactDetailPage({
                   Last contact {formatRelative(lastContactAt)}
                 </p>
               )}
-              <div className="mt-3">
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <TierSelector contact={contact} />
                 <CadenceBadge
                   tier={contact.tier}
                   lastInteractionAt={lastContactAt}

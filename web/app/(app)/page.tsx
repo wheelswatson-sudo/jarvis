@@ -7,6 +7,7 @@ import {
   PageHeader,
   SectionHeader,
 } from '../../components/cards'
+import { HelpDot } from '../../components/Tooltip'
 import { IntelligencePanel } from '../../components/IntelligencePanel'
 import { ContactsGrid } from '../../components/ContactsGrid'
 import {
@@ -15,6 +16,11 @@ import {
   formatPercent,
   formatRelative,
 } from '../../lib/format'
+import {
+  LTV_HELP,
+  NETWORK_HEALTH_HELP,
+  COMMITMENT_HELP,
+} from '../../lib/glossary'
 import type { Commitment, Contact } from '../../lib/types'
 import { APOLLO_PROVIDER } from '../../lib/apollo'
 
@@ -30,7 +36,7 @@ async function loadDashboard() {
     data: { user },
   } = await supabase.auth.getUser()
 
-  const [contactsRes, commitmentsRes, apolloRes] = await Promise.all([
+  const [contactsRes, commitmentsRes, apolloRes, googleRes] = await Promise.all([
     supabase
       .from('contacts')
       .select('*')
@@ -47,6 +53,18 @@ async function loadDashboard() {
           .eq('provider', APOLLO_PROVIDER)
           .maybeSingle()
       : Promise.resolve({ data: null }),
+    user
+      ? supabase
+          .from('user_integrations')
+          .select('provider')
+          .eq('user_id', user.id)
+          .in('provider', [
+            'google_contacts',
+            'google_calendar',
+            'google_tasks',
+            'google_gmail',
+          ])
+      : Promise.resolve({ data: [] }),
   ])
 
   const apolloConnected =
@@ -108,9 +126,16 @@ async function loadDashboard() {
     .filter((c) => (c.ltv_estimate ?? 0) > 0)
     .slice(0, 8)
 
+  const googleProviders = new Set(
+    (googleRes.data ?? []).map(
+      (row: { provider: string }) => row.provider,
+    ),
+  )
+
   return {
     enriched,
     apolloConnected,
+    googleConnected: googleProviders.size > 0,
     metrics: {
       activeRelationships: enriched.length,
       networkHealth,
@@ -134,8 +159,16 @@ function greeting(): string {
 
 export default async function DashboardPage() {
   const data = await loadDashboard()
-  const { metrics, needsAttention, topByLtv, enriched, apolloConnected } = data
+  const {
+    metrics,
+    needsAttention,
+    topByLtv,
+    enriched,
+    apolloConnected,
+    googleConnected,
+  } = data
   const maxLtv = topByLtv[0]?.ltv_estimate ?? 1
+  const isFirstRun = enriched.length === 0 && !googleConnected
 
   return (
     <div className="space-y-10">
@@ -143,63 +176,81 @@ export default async function DashboardPage() {
       <div className="animate-fade-up">
         <PageHeader
           eyebrow={greeting()}
-          title="Here's what your network needs"
+          title={isFirstRun ? 'Welcome to AIEA' : "Here's what your network needs"}
           subtitle={
             metrics.activeRelationships > 0
               ? `Tracking ${metrics.activeRelationships} relationships. ${metrics.openCount} open commitment${metrics.openCount === 1 ? '' : 's'}${metrics.overdueCount ? ` — ${metrics.overdueCount} overdue.` : '.'}`
-              : 'AIEA is ready when you are. Connect Google in Settings to seed your network.'
+              : isFirstRun
+                ? "Three steps and you're set up. AIEA needs a few signals before it can start surfacing what your network needs."
+                : 'No contacts yet. Import a CSV or connect Google to seed your network.'
           }
           action={
-            <Link
-              href="/contacts/import"
-              className="inline-flex items-center gap-1.5 rounded-xl aiea-cta px-4 py-2 text-sm font-medium text-white"
-            >
-              <span aria-hidden="true">＋</span> Import contacts
-            </Link>
+            !isFirstRun && (
+              <Link
+                href="/contacts/import"
+                className="inline-flex items-center gap-1.5 rounded-xl aiea-cta px-4 py-2 text-sm font-medium text-white"
+              >
+                <span aria-hidden="true">＋</span> Import contacts
+              </Link>
+            )
           }
         />
       </div>
+
+      {isFirstRun && (
+        <GettingStarted
+          googleConnected={googleConnected}
+          apolloConnected={apolloConnected}
+          hasContacts={enriched.length > 0}
+        />
+      )}
 
       {/* Metrics row */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 aiea-stagger">
-        <MetricCard
-          label="Active relationships"
-          value={metrics.activeRelationships.toString()}
-          tone="indigo"
-          icon={<NetworkIcon />}
-        />
-        <MetricCard
-          label="Network health"
-          value={formatPercent(metrics.networkHealth)}
-          hint="how warm your network is"
-          tone="violet"
-          icon={<PulseIcon />}
-        />
-        <MetricCard
-          label="Commitments due"
-          value={metrics.openCount.toString()}
-          hint={
-            metrics.overdueCount > 0
-              ? `${metrics.overdueCount} overdue`
-              : 'on track'
-          }
-          tone={metrics.overdueCount > 0 ? 'rose' : 'emerald'}
-          icon={<CheckIcon />}
-        />
-        <MetricCard
-          label="Predicted network LTV"
-          value={formatCurrency(metrics.totalLtv)}
-          tone="fuchsia"
-          icon={<SparklesIcon />}
-        />
-      </div>
+      {!isFirstRun && (
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4 aiea-stagger">
+          <MetricCard
+            label="Active relationships"
+            value={metrics.activeRelationships.toString()}
+            tone="indigo"
+            icon={<NetworkIcon />}
+          />
+          <MetricCard
+            label="Network health"
+            value={formatPercent(metrics.networkHealth)}
+            hint={NETWORK_HEALTH_HELP}
+            tone="violet"
+            icon={<PulseIcon />}
+          />
+          <MetricCard
+            label="Commitments due"
+            value={metrics.openCount.toString()}
+            hint={
+              metrics.overdueCount > 0
+                ? `${metrics.overdueCount} overdue · ${COMMITMENT_HELP}`
+                : COMMITMENT_HELP
+            }
+            tone={metrics.overdueCount > 0 ? 'rose' : 'emerald'}
+            icon={<CheckIcon />}
+          />
+          <MetricCard
+            label="Predicted network LTV"
+            value={formatCurrency(metrics.totalLtv)}
+            hint={LTV_HELP}
+            tone="fuchsia"
+            icon={<SparklesIcon />}
+          />
+        </div>
+      )}
 
       {/* Intelligence — self-improving insights */}
-      <div className="animate-fade-up">
-        <IntelligencePanel />
-      </div>
+      {!isFirstRun && (
+        <div className="animate-fade-up">
+          <IntelligencePanel />
+        </div>
+      )}
 
       {/* Needs attention */}
+      {!isFirstRun && (
       <section className="animate-fade-up">
         <SectionHeader
           eyebrow="Triage"
@@ -231,7 +282,7 @@ export default async function DashboardPage() {
           <AttentionList
             tone="indigo"
             title="Reactivation opportunities"
-            empty="No T1 contacts gone cold."
+            empty="No Tier 1 contacts have gone cold."
             items={needsAttention.reactivation.slice(0, 5).map((c) => ({
               key: c.id,
               href: `/contacts/${c.id}`,
@@ -241,12 +292,19 @@ export default async function DashboardPage() {
           />
         </div>
       </section>
+      )}
 
       {/* LTV ranking */}
+      {!isFirstRun && (
       <section className="animate-fade-up">
         <SectionHeader
           eyebrow="Compounding"
-          title="Relationship LTV ranking"
+          title={
+            <span className="inline-flex items-center gap-2">
+              Relationship LTV ranking
+              <HelpDot content={LTV_HELP} />
+            </span>
+          }
           subtitle="Top contacts by predicted lifetime value."
         />
         <Card>
@@ -303,8 +361,10 @@ export default async function DashboardPage() {
           )}
         </Card>
       </section>
+      )}
 
       {/* Contact grid */}
+      {!isFirstRun && (
       <section className="animate-fade-up">
         <SectionHeader
           eyebrow="People"
@@ -340,7 +400,121 @@ export default async function DashboardPage() {
           />
         )}
       </section>
+      )}
     </div>
+  )
+}
+
+function GettingStarted({
+  googleConnected,
+  apolloConnected,
+  hasContacts,
+}: {
+  googleConnected: boolean
+  apolloConnected: boolean
+  hasContacts: boolean
+}) {
+  const steps: Array<{
+    n: number
+    title: string
+    body: string
+    href: string
+    cta: string
+    done: boolean
+    highlight: boolean
+  }> = [
+    {
+      n: 1,
+      title: 'Connect Google',
+      body:
+        'AIEA reads your Calendar, Gmail, and Contacts to build your relationship graph. One consent screen — nothing leaves your account.',
+      href: '/settings',
+      cta: googleConnected ? 'Manage' : 'Connect Google',
+      done: googleConnected,
+      highlight: !googleConnected,
+    },
+    {
+      n: 2,
+      title: 'Import contacts',
+      body:
+        "Upload a CSV or let Google sync pull them in. AIEA needs people before it can tell you who needs attention.",
+      href: '/contacts/import',
+      cta: hasContacts ? 'Manage' : 'Import contacts',
+      done: hasContacts,
+      highlight: googleConnected && !hasContacts,
+    },
+    {
+      n: 3,
+      title: 'Enable enrichment (optional)',
+      body:
+        'Add an Apollo.io API key to auto-fill titles, companies, and LinkedIn for any contact.',
+      href: '/settings',
+      cta: apolloConnected ? 'Manage' : 'Add API key',
+      done: apolloConnected,
+      highlight: false,
+    },
+  ]
+  return (
+    <section className="animate-fade-up">
+      <Card className="space-y-4">
+        <div className="flex items-baseline justify-between gap-3">
+          <h2 className="text-base font-medium text-zinc-100">Get started</h2>
+          <span className="text-[10px] uppercase tracking-[0.16em] text-zinc-500">
+            {steps.filter((s) => s.done).length} of {steps.length} done
+          </span>
+        </div>
+        <ol className="space-y-3">
+          {steps.map((s) => (
+            <li
+              key={s.n}
+              className={`flex items-start gap-4 rounded-xl border px-4 py-4 transition-colors ${
+                s.done
+                  ? 'border-emerald-500/20 bg-emerald-500/[0.04]'
+                  : s.highlight
+                    ? 'border-violet-500/40 bg-violet-500/[0.06]'
+                    : 'border-white/[0.06] bg-white/[0.02]'
+              }`}
+            >
+              <span
+                className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold ring-1 ring-inset ${
+                  s.done
+                    ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
+                    : s.highlight
+                      ? 'bg-gradient-to-br from-indigo-500 to-fuchsia-500 text-white ring-violet-400/40 shadow-lg shadow-violet-500/30'
+                      : 'bg-white/[0.04] text-zinc-300 ring-white/10'
+                }`}
+              >
+                {s.done ? '✓' : s.n}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-zinc-100">
+                  {s.title}
+                </div>
+                <p className="mt-0.5 text-xs leading-relaxed text-zinc-400">
+                  {s.body}
+                </p>
+              </div>
+              <Link
+                href={s.href}
+                className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  s.done
+                    ? 'border border-white/[0.08] bg-white/[0.02] text-zinc-300 hover:border-white/20'
+                    : s.highlight
+                      ? 'aiea-cta text-white'
+                      : 'border border-white/[0.08] bg-white/[0.02] text-zinc-300 hover:border-white/20'
+                }`}
+              >
+                {s.cta}
+              </Link>
+            </li>
+          ))}
+        </ol>
+        <p className="pt-2 text-[11px] text-zinc-500">
+          AIEA gets smarter as you use it. Within 24-48 hours of connecting,
+          you&apos;ll see your first daily briefing.
+        </p>
+      </Card>
+    </section>
   )
 }
 

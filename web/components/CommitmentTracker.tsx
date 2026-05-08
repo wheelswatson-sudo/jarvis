@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { useToast } from './Toast'
 import type { Commitment } from '../lib/types'
 
 export type EnrichedCommitment = Commitment & {
@@ -136,16 +137,53 @@ export function CommitmentTracker({
 
 function Row({ commitment }: { commitment: EnrichedCommitment }) {
   const router = useRouter()
+  const toast = useToast()
   const [pending, start] = useTransition()
   const overdue = daysOverdue(commitment)
 
-  function patch(updates: Record<string, unknown>) {
+  async function patch(updates: Record<string, unknown>): Promise<boolean> {
+    const res = await fetch('/api/commitments', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: commitment.id, ...updates }),
+    })
+    return res.ok
+  }
+
+  function markDone() {
+    const prevStatus = commitment.status
+    const prevDue = commitment.due_at
     start(async () => {
-      await fetch('/api/commitments', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: commitment.id, ...updates }),
+      const ok = await patch({ status: 'done' })
+      if (!ok) {
+        toast.error("Couldn't mark done — please try again")
+        return
+      }
+      router.refresh()
+      toast.success('Marked done', {
+        label: 'Undo',
+        onClick: () => {
+          patch({ status: prevStatus, due_at: prevDue }).then(() =>
+            router.refresh(),
+          )
+        },
       })
+    })
+  }
+
+  function snooze7d() {
+    const next = new Date()
+    next.setDate(next.getDate() + 7)
+    start(async () => {
+      const ok = await patch({
+        status: 'snoozed',
+        due_at: next.toISOString(),
+      })
+      if (!ok) {
+        toast.error("Couldn't snooze")
+        return
+      }
+      toast.info('Snoozed 7 days')
       router.refresh()
     })
   }
@@ -189,18 +227,14 @@ function Row({ commitment }: { commitment: EnrichedCommitment }) {
       <div className="flex shrink-0 gap-1 opacity-70 transition-opacity group-hover:opacity-100">
         <button
           disabled={pending}
-          onClick={() => patch({ status: 'done' })}
+          onClick={markDone}
           className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
         >
           Done
         </button>
         <button
           disabled={pending}
-          onClick={() => {
-            const next = new Date()
-            next.setDate(next.getDate() + 7)
-            patch({ status: 'snoozed', due_at: next.toISOString() })
-          }}
+          onClick={snooze7d}
           className="rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-1 text-[11px] text-zinc-300 transition-colors hover:border-white/[0.18] disabled:opacity-50"
         >
           Snooze 7d

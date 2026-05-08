@@ -70,7 +70,7 @@ export default async function ApprovalsPage() {
       <PageHeader
         eyebrow="Sync guard"
         title="Approval queue"
-        subtitle="Sync sources can't silently overwrite your edits. Review each field change and decide what gets through."
+        subtitle="When Google or Apollo wants to overwrite a field you edited, the change waits here. Approve or reject — your edits are never silently overwritten."
       />
 
       {groups.length === 0 ? (

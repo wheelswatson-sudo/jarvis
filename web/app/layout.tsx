@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import { Geist } from 'next/font/google'
 import './globals.css'
+import { ToastProvider } from '../components/Toast'
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -24,7 +25,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${geistSans.variable} h-full antialiased`}>
-      <body className="min-h-full bg-[#07070b] text-zinc-100">{children}</body>
+      <body className="min-h-full bg-[#07070b] text-zinc-100">
+        <ToastProvider>{children}</ToastProvider>
+      </body>
     </html>
   )
 }

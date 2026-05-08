@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useTransition } from 'react'
+import { useToast } from '../../../components/Toast'
 
 type ContactSlim = {
   id: string
@@ -96,12 +97,14 @@ function timeAgo(iso: string): string {
 }
 
 export default function InboxPage() {
+  const toast = useToast()
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [channel, setChannel] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [, startTransition] = useTransition()
+  const [search, setSearch] = useState('')
 
   useEffect(() => {
     setLoading(true)
@@ -148,19 +151,63 @@ export default function InboxPage() {
   }
 
   function archiveMessage(id: string) {
+    const archived = messages.find((m) => m.id === id)
     startTransition(async () => {
-      await fetch('/api/inbox', {
+      const res = await fetch('/api/inbox', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: [id], updates: { is_archived: true } }),
       })
+      if (!res.ok) {
+        toast.error("Couldn't archive — please try again")
+        return
+      }
       setMessages((prev) => prev.filter((m) => m.id !== id))
       if (selected === id) setSelected(null)
+      toast.success('Archived', {
+        label: 'Undo',
+        onClick: () => {
+          fetch('/api/inbox', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ids: [id],
+              updates: { is_archived: false },
+            }),
+          }).then(() => {
+            if (archived) {
+              setMessages((prev) =>
+                [...prev, archived].sort(
+                  (a, b) =>
+                    new Date(b.sent_at).getTime() -
+                    new Date(a.sent_at).getTime(),
+                ),
+              )
+            }
+          })
+        },
+      })
     })
   }
 
   const selectedMsg = messages.find((m) => m.id === selected)
   const unreadCount = messages.filter((m) => !m.is_read).length
+
+  const filteredMessages = (() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return messages
+    return messages.filter((m) => {
+      const haystack = [
+        senderDisplay(m),
+        m.subject ?? '',
+        m.snippet ?? '',
+        m.contacts?.company ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(q)
+    })
+  })()
 
   return (
     <div className="flex h-[calc(100vh-9rem)] overflow-hidden rounded-2xl aiea-glass animate-fade-up">
@@ -208,7 +255,19 @@ export default function InboxPage() {
       </div>
 
       {/* Message list */}
-      <div className="w-full max-w-md shrink-0 overflow-y-auto border-r border-white/[0.05]">
+      <div className="flex w-full max-w-md shrink-0 flex-col overflow-hidden border-r border-white/[0.05]">
+        {!loading && messages.length > 0 && (
+          <div className="border-b border-white/[0.04] p-2">
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search sender, subject, snippet…"
+              className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none transition-colors focus:border-violet-500/50"
+            />
+          </div>
+        )}
+        <div className="flex-1 overflow-y-auto">
         {loading && (
           <div className="flex items-center justify-center py-16">
             <div className="h-6 w-6 animate-[aiea-spin-slow_0.9s_linear_infinite] rounded-full border-2 border-violet-500/30 border-t-violet-400" />
@@ -233,7 +292,20 @@ export default function InboxPage() {
           </div>
         )}
 
-        {messages.map((msg) => {
+        {!loading && messages.length > 0 && filteredMessages.length === 0 && (
+          <div className="px-6 py-12 text-center text-xs text-zinc-500">
+            No messages match &ldquo;{search}&rdquo;.{' '}
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              className="text-violet-300 hover:underline"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
+        {filteredMessages.map((msg) => {
           const isSelected = selected === msg.id
           return (
             <button
@@ -311,6 +383,7 @@ export default function InboxPage() {
             </button>
           )
         })}
+        </div>
       </div>
 
       {/* Detail */}

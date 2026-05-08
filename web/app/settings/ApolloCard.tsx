@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
+import { useToast } from '../../components/Toast'
 
 export type ApolloState = {
   connected: boolean
@@ -22,16 +23,13 @@ function formatTimestamp(iso: string | null): string {
 
 export function ApolloCard({ state }: Props) {
   const router = useRouter()
+  const toast = useToast()
   const [isPending, startTransition] = useTransition()
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState('')
-  const [status, setStatus] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
   function save() {
     if (!value.trim()) return
-    setStatus(null)
-    setError(null)
     const apiKey = value.trim()
     startTransition(async () => {
       try {
@@ -44,34 +42,32 @@ export function ApolloCard({ state }: Props) {
           .json()
           .catch(() => ({}))
         if (!res.ok) {
-          setError(raw.error ?? `Save failed (HTTP ${res.status}).`)
+          toast.error(raw.error ?? `Save failed (HTTP ${res.status})`)
           return
         }
         setValue('')
         setEditing(false)
-        setStatus('Apollo API key saved.')
+        toast.success('Apollo connected. Enrichment is now available.')
         router.refresh()
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Save failed.')
+        toast.error(err instanceof Error ? err.message : 'Save failed.')
       }
     })
   }
 
   function disconnect() {
-    setStatus(null)
-    setError(null)
     startTransition(async () => {
       try {
         const res = await fetch('/api/integrations/apollo', { method: 'DELETE' })
         if (!res.ok) {
           const raw: { error?: string } = await res.json().catch(() => ({}))
-          setError(raw.error ?? `Disconnect failed (HTTP ${res.status}).`)
+          toast.error(raw.error ?? `Disconnect failed (HTTP ${res.status})`)
           return
         }
-        setStatus('Apollo disconnected.')
+        toast.info('Apollo disconnected')
         router.refresh()
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Disconnect failed.')
+        toast.error(err instanceof Error ? err.message : 'Disconnect failed.')
       }
     })
   }
@@ -129,8 +125,6 @@ export function ApolloCard({ state }: Props) {
               type="button"
               onClick={() => {
                 setEditing(true)
-                setStatus(null)
-                setError(null)
               }}
               disabled={isPending}
               className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -189,9 +183,6 @@ export function ApolloCard({ state }: Props) {
           </button>
         </div>
       )}
-
-      {status && <p className="mt-3 text-xs text-emerald-300">{status}</p>}
-      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

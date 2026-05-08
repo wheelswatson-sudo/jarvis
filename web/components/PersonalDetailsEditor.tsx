@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '../lib/supabase/client'
+import { useToast } from './Toast'
 import type { PersonalDetails } from '../lib/types'
 
 type Props = {
@@ -15,9 +16,9 @@ type LifeEvent = { date?: string | null; event: string }
 
 export function PersonalDetailsEditor({ contactId, initial }: Props) {
   const router = useRouter()
+  const toast = useToast()
   const [editing, setEditing] = useState(false)
   const [pending, start] = useTransition()
-  const [err, setErr] = useState<string | null>(null)
 
   const init = initial ?? {}
 
@@ -59,7 +60,6 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
     // editor-owned keys; everything else (linkedin_url, emotional_trajectory,
     // topics_of_interest, etc.) is read fresh and preserved.
     start(async () => {
-      setErr(null)
       const supabase = createClient()
       const { data: fresh, error: fetchErr } = await supabase
         .from('contacts')
@@ -68,7 +68,7 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
         .maybeSingle()
       if (fetchErr) {
         console.error('[personal-details] refetch failed', fetchErr)
-        setErr("Couldn't load latest details. Try again.")
+        toast.error("Couldn't load latest details. Try again.")
         return
       }
       const current = (fresh?.personal_details ?? {}) as PersonalDetails
@@ -91,9 +91,10 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
         .eq('id', contactId)
       if (error) {
         console.error('[personal-details] save failed', error)
-        setErr("Couldn't save. Try again or check your connection.")
+        toast.error(`Couldn't save — ${error.message}`)
         return
       }
+      toast.success('Personal details saved')
       setEditing(false)
       router.refresh()
     })
@@ -103,6 +104,10 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
 
   return (
     <div className="space-y-6 text-sm">
+      <p className="text-xs text-zinc-500">
+        Every field below is optional. Even one or two details sharpen every
+        meeting brief AIEA writes about this person.
+      </p>
       <Section label="About">
         <TagInput
           label="Interests"
@@ -156,8 +161,6 @@ export function PersonalDetailsEditor({ contactId, initial }: Props) {
           hint="e.g. prefers async, direct, formal"
         />
       </Section>
-
-      {err && <p className="text-xs text-rose-300">{err}</p>}
 
       <div className="flex gap-2 pt-2">
         <button
