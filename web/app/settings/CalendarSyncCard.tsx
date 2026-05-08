@@ -73,7 +73,7 @@ export function CalendarSyncCard({ state }: Props) {
   }
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-5">
+    <div className="rounded-2xl aiea-glass p-5">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -81,7 +81,7 @@ export function CalendarSyncCard({ state }: Props) {
             <span className="text-sm font-medium text-zinc-100">
               Calendar sync
             </span>
-            <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+            <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
               Manual
             </span>
           </div>
@@ -102,15 +102,15 @@ export function CalendarSyncCard({ state }: Props) {
             type="button"
             onClick={syncNow}
             disabled={isPending}
-            className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+            className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
           >
             {isPending ? 'Syncing…' : 'Sync now'}
           </button>
         </div>
       </div>
 
-      {status && <p className="mt-3 text-xs text-emerald-400">{status}</p>}
-      {error && <p className="mt-3 text-xs text-rose-400">{error}</p>}
+      {status && <p className="mt-3 text-xs text-emerald-300">{status}</p>}
+      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

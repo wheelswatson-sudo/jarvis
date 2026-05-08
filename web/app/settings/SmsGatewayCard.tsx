@@ -195,7 +195,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
                 Connected
               </span>
             ) : (
-              <span className="rounded-full border border-zinc-700 bg-zinc-800/50 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+              <span className="rounded-full border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
                 Not connected
               </span>
             )}
@@ -237,7 +237,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               type="button"
               onClick={syncNow}
               disabled={isPending}
-              className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+              className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
             >
               {isPending ? 'Working…' : 'Sync now'}
             </button>
@@ -247,7 +247,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               type="button"
               onClick={testConnection}
               disabled={isPending}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-emerald-500 hover:text-emerald-300 disabled:opacity-50 transition-colors"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-50"
             >
               Test connection
             </button>
@@ -263,8 +263,8 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               disabled={isPending}
               className={
                 state.connected
-                  ? 'rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-indigo-500 hover:text-indigo-300 disabled:opacity-50 transition-colors'
-                  : 'rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all'
+                  ? 'rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-violet-400/50 hover:text-violet-200 disabled:opacity-50'
+                  : 'rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50'
               }
             >
               {state.connected ? 'Reconfigure' : 'Connect'}
@@ -275,7 +275,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               type="button"
               onClick={disconnect}
               disabled={isPending}
-              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-400 hover:border-rose-500 hover:text-rose-300 disabled:opacity-50 transition-colors"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-rose-500/50 hover:text-rose-300 disabled:opacity-50"
             >
               Disconnect
             </button>
@@ -356,7 +356,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               value={gatewayUrl}
               onChange={(e) => setGatewayUrl(e.target.value)}
               placeholder={DEFAULT_GATEWAY_URL}
-              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+              className="mt-1 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
             />
             <p className="mt-1 text-[11px] text-zinc-500">
               Cloud mode default:{' '}
@@ -375,7 +375,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="sms"
-                className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+                className="mt-1 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
               />
             </div>
             <div className="flex-1">
@@ -395,7 +395,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
                   }
                 }}
                 placeholder="Generated by the gateway app"
-                className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+                className="mt-1 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
               />
             </div>
           </div>
@@ -404,7 +404,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
               type="button"
               onClick={save}
               disabled={isPending || !apiKey.trim() || !gatewayUrl.trim()}
-              className="rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-500/30 hover:from-indigo-400 hover:to-violet-400 disabled:opacity-50 transition-all"
+              className="rounded-lg aiea-cta px-4 py-2 text-xs font-medium text-white disabled:opacity-50"
             >
               {isPending ? 'Saving…' : 'Save'}
             </button>
@@ -415,7 +415,7 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
                 setApiKey('')
               }}
               disabled={isPending}
-              className="rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50 transition-colors"
+              className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-white/[0.18] hover:text-zinc-200 disabled:opacity-50"
             >
               Cancel
             </button>
@@ -433,13 +433,13 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
           messages stream in immediately.
         </p>
         <div className="mt-2 flex flex-wrap gap-2">
-          <code className="min-w-0 flex-1 break-all rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-[11px] text-zinc-300">
+          <code className="min-w-0 flex-1 break-all rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-[11px] text-zinc-300">
             {fullWebhookUrl}
           </code>
           <button
             type="button"
             onClick={copyWebhook}
-            className="shrink-0 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 hover:border-indigo-500 hover:text-indigo-300 transition-colors"
+            className="shrink-0 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-xs text-zinc-200 transition-colors hover:border-violet-400/50 hover:text-violet-200"
           >
             {webhookCopied ? 'Copied ✓' : 'Copy'}
           </button>
@@ -471,8 +471,8 @@ export function SmsGatewayCard({ state, webhook_url, user_id }: Props) {
         </details>
       </div>
 
-      {status && <p className="mt-3 text-xs text-emerald-400">{status}</p>}
-      {error && <p className="mt-3 text-xs text-rose-400">{error}</p>}
+      {status && <p className="mt-3 text-xs text-emerald-300">{status}</p>}
+      {error && <p className="mt-3 text-xs text-rose-300">{error}</p>}
     </div>
   )
 }

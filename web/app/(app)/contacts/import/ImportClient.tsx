@@ -215,7 +215,7 @@ export function ImportClient() {
   const [tab, setTab] = useState<'csv' | 'manual'>('csv')
   return (
     <div>
-      <div className="flex gap-1 rounded-xl bg-zinc-900/60 p-1 ring-1 ring-inset ring-white/5 sm:inline-flex">
+      <div className="flex gap-1 rounded-xl border border-white/[0.06] bg-white/[0.02] p-1 sm:inline-flex">
         <TabButton
           active={tab === 'csv'}
           onClick={() => setTab('csv')}
@@ -250,7 +250,7 @@ function TabButton({
       onClick={onClick}
       className={`relative w-full rounded-lg px-4 py-2 text-sm font-medium transition-all sm:w-auto ${
         active
-          ? 'bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-500/20'
+          ? 'aiea-cta text-white'
           : 'text-zinc-400 hover:text-zinc-200'
       }`}
     >
@@ -261,9 +261,7 @@ function TabButton({
 
 function Panel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-white/5 bg-zinc-900/50 p-6 backdrop-blur-sm shadow-xl shadow-black/30 sm:p-8">
-      {children}
-    </div>
+    <div className="rounded-2xl aiea-glass p-6 sm:p-8">{children}</div>
   )
 }
 
@@ -404,7 +402,7 @@ function CsvImport() {
           className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-14 text-center transition-colors ${
             dragging
               ? 'border-violet-400 bg-violet-500/5'
-              : 'border-white/10 bg-zinc-950/40 hover:border-violet-400/50 hover:bg-violet-500/5'
+              : 'border-white/10 bg-white/[0.02] hover:border-violet-400/50 hover:bg-violet-500/5'
           }`}
         >
           <input
@@ -498,7 +496,7 @@ function CsvImport() {
                       next[i] = e.target.value as Field
                       setMapping(next)
                     }}
-                    className="shrink-0 rounded-md border border-white/10 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400"
+                    className="shrink-0 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-1.5 text-xs text-zinc-100 outline-none transition-colors focus:border-violet-500/50"
                   >
                     {FIELD_ORDER.map((f) => (
                       <option key={f} value={f}>
@@ -565,7 +563,7 @@ function CsvImport() {
               type="button"
               onClick={submit}
               disabled={submitting || validCount === 0}
-              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-5 py-2 text-sm font-medium text-white shadow-lg shadow-violet-500/30 transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-lg aiea-cta px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               {submitting
                 ? 'Importing…'
@@ -664,7 +662,7 @@ function ResultPanel({
         <button
           type="button"
           onClick={onReset}
-          className="inline-flex items-center rounded-lg border border-white/10 bg-zinc-900 px-4 py-2 text-sm text-zinc-200 hover:border-violet-400/50 hover:text-white"
+          className="inline-flex items-center rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm text-zinc-200 transition-colors hover:border-violet-400/50 hover:text-white"
         >
           Import another file
         </button>
@@ -800,7 +798,7 @@ function ManualAdd() {
             value={form.notes}
             onChange={(e) => setForm({ ...form, notes: e.target.value })}
             rows={3}
-            className="mt-1.5 w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400"
+            className="mt-1.5 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none transition-colors focus:border-violet-500/50"
             placeholder="How you met, what they care about, anything you want to remember…"
           />
         </div>
@@ -820,7 +818,7 @@ function ManualAdd() {
           <button
             type="submit"
             disabled={!canSubmit || submitting}
-            className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 px-5 py-2 text-sm font-medium text-white shadow-lg shadow-violet-500/30 transition-opacity hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-2 rounded-lg aiea-cta px-5 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
             {submitting ? 'Saving…' : 'Save contact'}
           </button>
@@ -853,7 +851,7 @@ function Input({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         autoFocus={autoFocus}
-        className="mt-1.5 w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400"
+        className="mt-1.5 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none transition-colors focus:border-violet-500/50"
       />
     </label>
   )

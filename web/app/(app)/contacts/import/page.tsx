@@ -12,10 +12,10 @@ export default function ContactImportPage() {
   return (
     <div className="space-y-8 animate-fade-up">
       <Link
-        href="/"
+        href="/contacts"
         className="inline-flex items-center gap-1 text-xs text-zinc-500 transition-colors hover:text-zinc-200"
       >
-        <span aria-hidden="true">←</span> Back to dashboard
+        <span aria-hidden="true">←</span> Back to contacts
       </Link>
 
       <PageHeader
