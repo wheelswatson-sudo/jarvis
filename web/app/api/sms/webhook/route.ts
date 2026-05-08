@@ -5,7 +5,7 @@ import {
   SMS_GATEWAY_PROVIDER,
   eventToDirection,
   pickBody,
-  pickCounterpartyPhone,
+  listCounterpartyPhones,
   type SmsGatewayWebhookEnvelope,
 } from '../../../../lib/sms/gateway'
 import { storeSmsMessages, type IncomingSms } from '../../../../lib/sms/ingest'
@@ -60,16 +60,23 @@ export async function POST(req: NextRequest) {
     .eq('provider', SMS_GATEWAY_PROVIDER)
     .maybeSingle()
   if (integrationErr) {
-    return apiError(500, integrationErr.message, undefined, 'lookup_failed')
+    console.warn('[sms-webhook] integration lookup failed:', integrationErr.message)
+    return apiError(500, 'Integration lookup failed.', undefined, 'lookup_failed')
   }
   if (!integration) {
     return apiError(404, 'No SMS gateway connected for this user.', undefined, 'not_connected')
   }
 
-  const envelope = (await req.json().catch(() => null)) as
-    | SmsGatewayWebhookEnvelope
-    | null
-  if (!envelope || typeof envelope.event !== 'string' || !envelope.payload) {
+  const raw = (await req.json().catch(() => null)) as unknown
+  if (!raw || typeof raw !== 'object') {
+    return apiError(400, 'Invalid webhook envelope.', undefined, 'invalid_request')
+  }
+  const envelope = raw as SmsGatewayWebhookEnvelope
+  if (
+    typeof envelope.event !== 'string' ||
+    !envelope.payload ||
+    typeof envelope.payload !== 'object'
+  ) {
     return apiError(400, 'Invalid webhook envelope.', undefined, 'invalid_request')
   }
 
@@ -84,8 +91,8 @@ export async function POST(req: NextRequest) {
   }
 
   const body = pickBody(envelope.payload)
-  const phone = pickCounterpartyPhone(envelope.payload)
-  if (!phone) {
+  const phones = listCounterpartyPhones(envelope.payload)
+  if (phones.length === 0) {
     return NextResponse.json({ ok: true, ignored: 'no_phone' })
   }
 
@@ -100,21 +107,23 @@ export async function POST(req: NextRequest) {
     ? new Date().toISOString()
     : occurredDate.toISOString()
 
-  const message: IncomingSms = {
-    gatewayId,
+  // Group SMS: one row per recipient so each matched contact gets its own
+  // last_interaction_at bump. external_id stays unique by suffixing index.
+  const messages: IncomingSms[] = phones.map((phone, idx) => ({
+    gatewayId: phones.length === 1 ? gatewayId : `${gatewayId}#${idx}`,
     direction,
     counterpartyPhone: phone,
     body,
     occurredAt,
-  }
+  }))
 
-  const result = await storeSmsMessages(service, userId, [message])
+  const result = await storeSmsMessages(service, userId, messages)
 
   return NextResponse.json({
     ok: true,
     imported: result.imported,
     skipped: result.skipped,
     errors: result.errors,
-    report: result.reports[0] ?? null,
+    reports: result.reports,
   })
 }

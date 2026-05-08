@@ -6,9 +6,9 @@ import {
   SMS_GATEWAY_PROVIDER,
   fetchHistoricalMessages,
   pickBody,
-  pickCounterpartyPhone,
   pickDirection,
   pickOccurredAt,
+  listCounterpartyPhones,
   type SmsGatewayConfig,
   type SmsGatewayMessage,
 } from '../../../../lib/sms/gateway'
@@ -32,8 +32,14 @@ export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => null)) as
     | { limit?: unknown }
     | null
-  const requested = typeof body?.limit === 'number' ? body.limit : DEFAULT_LIMIT
-  const limit = Math.max(1, Math.min(MAX_LIMIT, Math.floor(requested)))
+  // Number.isFinite filters NaN/Infinity — typeof NaN === 'number' but
+  // Math.floor(NaN) === NaN propagates through Math.min/max and ends up as
+  // ?limit=NaN on the wire, which the gateway rejects.
+  const rawLimit =
+    typeof body?.limit === 'number' && Number.isFinite(body.limit)
+      ? body.limit
+      : DEFAULT_LIMIT
+  const limit = Math.max(1, Math.min(MAX_LIMIT, Math.floor(rawLimit)))
 
   const service = getServiceClient()
   if (!service) {
@@ -47,7 +53,8 @@ export async function POST(req: NextRequest) {
     .eq('provider', SMS_GATEWAY_PROVIDER)
     .maybeSingle()
   if (integrationErr) {
-    return apiError(500, integrationErr.message, undefined, 'lookup_failed')
+    console.warn('[sms-sync] integration lookup failed:', integrationErr.message)
+    return apiError(500, 'Integration lookup failed.', undefined, 'lookup_failed')
   }
   if (!integration?.access_token) {
     return apiError(
@@ -90,19 +97,28 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const messages: IncomingSms[] = raw
-    .filter((m): m is SmsGatewayMessage => !!m && typeof m.id === 'string')
-    .map((m) => {
-      const phone = pickCounterpartyPhone(m) ?? ''
-      return {
-        gatewayId: m.id,
-        direction: pickDirection(m),
+  // Fan out each gateway message into one IncomingSms per counterparty
+  // phone. A group SMS with phoneNumbers: [a, b, c] becomes three rows so
+  // each matched contact gets its own messages row + last_interaction_at
+  // bump. external_id stays unique by suffixing the counterparty index.
+  const messages: IncomingSms[] = []
+  for (const m of raw) {
+    if (!m || typeof m.id !== 'string') continue
+    const phones = listCounterpartyPhones(m)
+    if (phones.length === 0) continue
+    const direction = pickDirection(m)
+    const occurredAt = pickOccurredAt(m)
+    const text = pickBody(m)
+    phones.forEach((phone, idx) => {
+      messages.push({
+        gatewayId: phones.length === 1 ? m.id : `${m.id}#${idx}`,
+        direction,
         counterpartyPhone: phone,
-        body: pickBody(m),
-        occurredAt: pickOccurredAt(m),
-      }
+        body: text,
+        occurredAt,
+      })
     })
-    .filter((m) => m.counterpartyPhone)
+  }
 
   const result = await storeSmsMessages(service, user.id, messages)
 

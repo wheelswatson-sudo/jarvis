@@ -118,8 +118,10 @@ export function pickOccurredAt(msg: SmsGatewayMessage): string {
 export function pickBody(
   msg: SmsGatewayMessage | SmsGatewayWebhookPayload,
 ): string {
-  const body = ('message' in msg ? msg.message : undefined) ?? msg.text ?? ''
-  return body
+  // Both shapes declare optional `message` and `text`. Plain property access
+  // is safe even on duck-typed payloads — `'in' operator` would throw on a
+  // non-object, which the webhook route can't fully prevent for hostile input.
+  return msg.message ?? msg.text ?? ''
 }
 
 export function pickCounterpartyPhone(
@@ -129,6 +131,23 @@ export function pickCounterpartyPhone(
   const list = msg.phoneNumbers
   if (Array.isArray(list) && list.length > 0) return list[0]
   return null
+}
+
+// All counterparties on a message — single-recipient first, then array.
+// Used to fan group-SMS sends out into one stored row per recipient so each
+// matched contact still gets a last_interaction_at bump.
+export function listCounterpartyPhones(
+  msg: SmsGatewayMessage | SmsGatewayWebhookPayload,
+): string[] {
+  const out: string[] = []
+  if (msg.phoneNumber) out.push(msg.phoneNumber)
+  const list = msg.phoneNumbers
+  if (Array.isArray(list)) {
+    for (const p of list) {
+      if (typeof p === 'string' && p && !out.includes(p)) out.push(p)
+    }
+  }
+  return out
 }
 
 export function pickDirection(

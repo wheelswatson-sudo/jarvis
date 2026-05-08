@@ -38,10 +38,24 @@ export async function POST(req: NextRequest) {
       'invalid_request',
     )
   }
+  // Restrict to http/https. The sync route fetches this URL server-side
+  // with bearer creds, so file:/javascript:/etc. would either crash or
+  // shoot creds at the wrong handler. Localhost/private IPs remain
+  // allowed because SMS Gateway "local mode" runs on the user's LAN
+  // (http://192.168.x.x is a documented config).
+  let parsedUrl: URL
   try {
-    new URL(gatewayUrl)
+    parsedUrl = new URL(gatewayUrl)
   } catch {
     return apiError(400, 'gateway_url must be a valid URL.', undefined, 'invalid_request')
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    return apiError(
+      400,
+      'gateway_url must use http or https.',
+      undefined,
+      'invalid_request',
+    )
   }
 
   const service = getServiceClient()
@@ -65,7 +79,8 @@ export async function POST(req: NextRequest) {
     )
 
   if (upsertError) {
-    return apiError(500, upsertError.message, undefined, 'persist_failed')
+    console.warn('[sms-gateway-config] upsert failed:', upsertError.message)
+    return apiError(500, 'Failed to save SMS gateway connection.', undefined, 'persist_failed')
   }
   return NextResponse.json({ ok: true })
 }
@@ -85,7 +100,8 @@ export async function DELETE() {
     .eq('provider', SMS_GATEWAY_PROVIDER)
 
   if (error) {
-    return apiError(500, error.message, undefined, 'disconnect_failed')
+    console.warn('[sms-gateway-config] delete failed:', error.message)
+    return apiError(500, 'Failed to disconnect SMS gateway.', undefined, 'disconnect_failed')
   }
   return NextResponse.json({ ok: true })
 }

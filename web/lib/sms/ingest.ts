@@ -96,33 +96,38 @@ export async function storeSmsMessages(
       sent_at: occurredAt,
     }
 
-    const { error } = await service.from('messages').upsert(row, {
-      onConflict: 'user_id,channel,external_id',
-      ignoreDuplicates: true,
-    })
+    // ON CONFLICT DO NOTHING returns success with empty data on duplicate,
+    // so we use .select() to distinguish a true insert from a dedup hit.
+    // ignoreDuplicates+23505 (the iMessage path) is broken: 23505 never
+    // fires under DO NOTHING, so every re-sync overcounts as "imported".
+    const { data: insertedRows, error } = await service
+      .from('messages')
+      .upsert(row, {
+        onConflict: 'user_id,channel,external_id',
+        ignoreDuplicates: true,
+      })
+      .select('id')
 
     if (error) {
-      if (error.code === '23505') {
-        // Already in the DB. Conservative: count as skipped, don't bump
-        // last_interaction_at since we can't tell whether this is the
-        // newest message we've seen.
-        skipped++
-        reports.push({
-          gateway_id: msg.gatewayId,
-          status: 'skipped',
-          contact_id: contactId,
-          reason: 'already_synced',
-        })
-      } else {
-        errors++
-        reports.push({
-          gateway_id: msg.gatewayId,
-          status: 'error',
-          contact_id: contactId,
-          reason: error.message,
-        })
-        console.warn('[sms-ingest] insert error:', error.message)
-      }
+      errors++
+      reports.push({
+        gateway_id: msg.gatewayId,
+        status: 'error',
+        contact_id: contactId,
+        reason: 'insert_failed',
+      })
+      console.warn('[sms-ingest] insert error:', error.message)
+    } else if (!insertedRows || insertedRows.length === 0) {
+      // Already in the DB. Conservative: count as skipped, don't bump
+      // last_interaction_at since we can't tell whether this is the
+      // newest message we've seen.
+      skipped++
+      reports.push({
+        gateway_id: msg.gatewayId,
+        status: 'skipped',
+        contact_id: contactId,
+        reason: 'already_synced',
+      })
     } else {
       imported++
       reports.push({
