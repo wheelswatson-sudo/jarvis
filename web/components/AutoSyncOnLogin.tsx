@@ -25,7 +25,7 @@ type AutoSyncResponse = {
 // 5-minute server-side throttle on top of this for cross-tab cases.
 const SESSION_KEY = 'aiea:auto-sync-fired-v1'
 
-type Status = 'idle' | 'syncing' | 'done' | 'skipped' | 'error'
+type Status = 'idle' | 'syncing' | 'done' | 'error'
 
 // Auto-sync trigger mounted in the (app) layout. On first mount per session,
 // POSTs to /api/google/auto-sync (which fans out Gmail / Calendar / Tasks /
@@ -41,6 +41,7 @@ export function AutoSyncOnLogin() {
     if (sessionStorage.getItem(SESSION_KEY) === '1') return
     sessionStorage.setItem(SESSION_KEY, '1')
 
+    const controller = new AbortController()
     let cancelled = false
 
     void (async () => {
@@ -56,6 +57,7 @@ export function AutoSyncOnLogin() {
           headers: { 'content-type': 'application/json' },
           body: '{}',
           cache: 'no-store',
+          signal: controller.signal,
         })
         if (cancelled) return
 
@@ -86,19 +88,24 @@ export function AutoSyncOnLogin() {
           'skipped' in services.tasks && services.tasks.skipped &&
           'skipped' in services.contacts && services.contacts.skipped
         if (allSkipped) {
-          setStatus('skipped')
+          // Either Google isn't connected or another tab already synced;
+          // hide the toast silently.
           setVisible(false)
           return
         }
         setStatus('done')
-      } catch {
+      } catch (err) {
         if (cancelled) return
+        // AbortError fires when the component unmounts mid-flight; that's
+        // not a real failure, so we don't surface it.
+        if (err instanceof DOMException && err.name === 'AbortError') return
         setStatus('error')
       }
     })()
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
 

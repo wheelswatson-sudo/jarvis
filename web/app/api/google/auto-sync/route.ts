@@ -1,4 +1,5 @@
-import { NextResponse, type NextRequest } from 'next/server'
+import { NextResponse } from 'next/server'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
@@ -6,6 +7,7 @@ import { getValidAccessTokenForUser } from '../../../../lib/google/oauth'
 import { fetchAndStoreGmail } from '../../../../lib/google/gmail-sync'
 import { syncCalendarForUser } from '../../../../lib/google/calendar-sync'
 import { syncTasksForUser } from '../../../../lib/google/tasks-sync'
+import { syncGoogleContactsForUser } from '../../../../lib/google/contacts-sync'
 
 export const dynamic = 'force-dynamic'
 // Worst case: contacts (~30s on a large book) + gmail extractor (~60s) +
@@ -51,7 +53,12 @@ type AutoSyncResponse = {
 //     this for an additional first-mount-only guard.
 //   - Per-service failures don't poison the whole response — Promise.allSettled
 //     so a Gmail outage still lets Calendar/Tasks/Contacts proceed.
-export async function POST(req: NextRequest) {
+//   - Race-narrowing: we eagerly write `last_synced_at` on the 'google'
+//     row BEFORE the fan-out begins, so a second tab opened a few seconds
+//     later sees the throttle even while Gmail is still streaming. The
+//     window between the SELECT throttle check and the eager-claim upsert
+//     is ~10ms, which is good enough for multi-tab UX.
+export async function POST() {
   const supabase = await createClient()
   const {
     data: { user },
@@ -126,10 +133,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(body)
   }
 
+  // Eager throttle claim. Marking the 'google' row's last_synced_at NOW
+  // (before any of the four legs touch Google) means a second tab opened
+  // mid-fan-out sees the throttle and bails. Without this, multi-tab login
+  // races through the SELECT-only check while syncs are still in flight.
+  await service.from('user_integrations').upsert(
+    {
+      user_id: user.id,
+      provider: 'google',
+      last_synced_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id,provider' },
+  )
+
   const accessToken = tok.token
   const userEmail = (user.email ?? '').toLowerCase()
-  const origin = new URL(req.url).origin
-  const cookieHeader = req.headers.get('cookie') ?? ''
 
   // Run all four in parallel. Each leg is wrapped so a thrown error becomes
   // a structured failure for that service rather than rejecting the whole
@@ -138,9 +156,7 @@ export async function POST(req: NextRequest) {
     runGmail(service, user.id, userEmail, accessToken),
     runCalendar(service, user.id, accessToken),
     runTasks(service, user.id, accessToken),
-    // Contacts logic still lives inside its route handler, so we re-enter
-    // through HTTP with the user's cookie forwarded. Same origin → no SSRF.
-    runContactsViaHttp(origin, cookieHeader),
+    runContacts(service, user.id, accessToken),
   ])
 
   const body: AutoSyncResponse = {
@@ -167,12 +183,11 @@ function settledToService(
 }
 
 async function runGmail(
-  service: ReturnType<typeof getServiceClient>,
+  service: SupabaseClient,
   userId: string,
   userEmail: string,
   accessToken: string,
 ): Promise<ServiceResult> {
-  if (!service) return { ok: false, error: 'no_service_key' }
   const store = await fetchAndStoreGmail(service, userId, userEmail, accessToken)
   await service.from('user_integrations').upsert(
     {
@@ -194,11 +209,10 @@ async function runGmail(
 }
 
 async function runCalendar(
-  service: ReturnType<typeof getServiceClient>,
+  service: SupabaseClient,
   userId: string,
   accessToken: string,
 ): Promise<ServiceResult> {
-  if (!service) return { ok: false, error: 'no_service_key' }
   const result = await syncCalendarForUser(service, userId, accessToken)
   await service.from('user_integrations').upsert(
     {
@@ -223,11 +237,10 @@ async function runCalendar(
 }
 
 async function runTasks(
-  service: ReturnType<typeof getServiceClient>,
+  service: SupabaseClient,
   userId: string,
   accessToken: string,
 ): Promise<ServiceResult> {
-  if (!service) return { ok: false, error: 'no_service_key' }
   const result = await syncTasksForUser(service, userId, accessToken)
   await service.from('user_integrations').upsert(
     {
@@ -250,33 +263,22 @@ async function runTasks(
   return { ok: true, counts }
 }
 
-async function runContactsViaHttp(
-  origin: string,
-  cookieHeader: string,
+async function runContacts(
+  service: SupabaseClient,
+  userId: string,
+  accessToken: string,
 ): Promise<ServiceResult> {
-  const res = await fetch(`${origin}/api/contacts/google`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      cookie: cookieHeader,
-    },
-    body: '{}',
-    cache: 'no-store',
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    return { ok: false, error: `contacts_http_${res.status}: ${text.slice(0, 200)}` }
+  const outcome = await syncGoogleContactsForUser(service, userId, accessToken)
+  if (!outcome.ok) {
+    return { ok: false, error: outcome.error.code }
   }
-  const data = (await res.json().catch(() => null)) as
-    | { inserted?: number; updated?: number; skipped?: number; total_fetched?: number }
-    | null
   return {
     ok: true,
     counts: {
-      inserted: data?.inserted ?? null,
-      updated: data?.updated ?? null,
-      skipped: data?.skipped ?? null,
-      total_fetched: data?.total_fetched ?? null,
+      inserted: outcome.result.inserted,
+      updated: outcome.result.updated,
+      skipped: outcome.result.skipped,
+      total_fetched: outcome.result.total_fetched,
     },
   }
 }
