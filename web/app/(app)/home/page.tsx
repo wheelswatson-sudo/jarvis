@@ -14,6 +14,11 @@ import { contactName, formatRelative } from '../../../lib/format'
 import { NETWORK_HEALTH_HELP } from '../../../lib/glossary'
 import type { Commitment, Contact } from '../../../lib/types'
 import { APOLLO_PROVIDER } from '../../../lib/apollo'
+import {
+  loadBriefings,
+  type Briefing,
+  type MatchedAttendee,
+} from '../../../lib/contacts/meeting-briefings'
 
 export const dynamic = 'force-dynamic'
 
@@ -363,7 +368,16 @@ async function loadHomeData() {
     ((apolloRes.data as { access_token: string }).access_token.length ?? 0) > 0
 
   const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
-  const activity = userId ? await loadActivity(supabase, userId, nameById) : []
+  const [activity, briefingsResult] = await Promise.all([
+    userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
+    userId
+      ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
+      : Promise.resolve({
+          briefings: [] as Briefing[],
+          calendarConnected: false,
+        }),
+  ])
+  const nextMeeting = briefingsResult.briefings[0] ?? null
 
   const total = contacts.length
   let active = 0
@@ -397,6 +411,7 @@ async function loadHomeData() {
     health: { total, active, atRisk, dormant },
     actions,
     activity,
+    nextMeeting,
   }
 }
 
@@ -409,6 +424,7 @@ export default async function HomePage() {
     health,
     actions,
     activity,
+    nextMeeting,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -487,6 +503,12 @@ export default async function HomePage() {
             tone={health.dormant > 0 ? 'rose' : 'emerald'}
             icon={<MoonIcon />}
           />
+        </div>
+      )}
+
+      {!isFirstRun && nextMeeting && (
+        <div className="animate-fade-up">
+          <NextMeetingCard meeting={nextMeeting} />
         </div>
       )}
 
@@ -786,6 +808,111 @@ function GettingStarted({
       </Card>
     </section>
   )
+}
+
+function NextMeetingCard({ meeting }: { meeting: Briefing }) {
+  const matched = meeting.attendees.filter(
+    (a): a is MatchedAttendee => a.kind === 'matched',
+  )
+  const unmatchedCount = meeting.attendees.length - matched.length
+
+  return (
+    <Link
+      href={`/briefings/${meeting.event_id}`}
+      className="group block rounded-2xl aiea-glass aiea-lift p-5"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
+            Next meeting
+          </div>
+          <div className="mt-1 truncate text-base font-medium text-zinc-100 group-hover:text-violet-200">
+            {meeting.title || 'Untitled meeting'}
+          </div>
+          <div className="mt-0.5 text-xs text-zinc-500">
+            {formatNextMeetingTime(meeting.start_at)}
+            {meeting.location ? ` · ${meeting.location}` : ''}
+          </div>
+        </div>
+        <span className="text-xs text-violet-300 transition-colors group-hover:text-violet-200">
+          Full briefing →
+        </span>
+      </div>
+
+      {matched.length > 0 && (
+        <ul className="mt-4 flex flex-wrap gap-2">
+          {matched.slice(0, 4).map((a) => (
+            <li
+              key={a.contact_id}
+              className="inline-flex items-center gap-1.5 rounded-full bg-white/[0.03] px-2.5 py-1 text-xs ring-1 ring-inset ring-white/[0.06]"
+            >
+              <span className="text-zinc-100">{a.name}</span>
+              {a.tier != null && (
+                <span className="text-[10px] text-zinc-500">
+                  · T{a.tier}
+                </span>
+              )}
+              {a.health !== 'unknown' && (
+                <span
+                  className={`text-[10px] ${
+                    a.health === 'cold' || a.health === 'cooling'
+                      ? 'text-amber-300'
+                      : 'text-emerald-300'
+                  }`}
+                >
+                  · {a.health}
+                </span>
+              )}
+            </li>
+          ))}
+          {matched.length > 4 && (
+            <li className="inline-flex items-center rounded-full bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-500 ring-1 ring-inset ring-white/[0.04]">
+              +{matched.length - 4} more
+            </li>
+          )}
+          {unmatchedCount > 0 && (
+            <li className="inline-flex items-center rounded-full border border-dashed border-white/[0.12] px-2.5 py-1 text-xs text-zinc-500">
+              {unmatchedCount} unknown
+            </li>
+          )}
+        </ul>
+      )}
+
+      {meeting.talking_points.length > 0 && (
+        <div className="mt-4 rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-3">
+          <div className="mb-1 text-[10px] font-medium uppercase tracking-[0.16em] text-violet-300">
+            Top reminder
+          </div>
+          <p className="text-sm leading-snug text-zinc-200">
+            <span className="mr-1.5 text-violet-400">→</span>
+            {meeting.talking_points[0]}
+          </p>
+        </div>
+      )}
+    </Link>
+  )
+}
+
+function formatNextMeetingTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  const after = new Date(tomorrow)
+  after.setDate(after.getDate() + 1)
+  const time = d.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  if (d >= today && d < tomorrow) return `Today, ${time}`
+  if (d >= tomorrow && d < after) return `Tomorrow, ${time}`
+  return `${d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })}, ${time}`
 }
 
 function NetworkIcon() {
