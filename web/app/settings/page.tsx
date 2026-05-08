@@ -238,7 +238,7 @@ export default async function SettingsPage() {
         <header className="mb-10 flex flex-wrap items-end justify-between gap-4">
           <div>
             <Link
-              href="/"
+              href="/home"
               className="inline-flex items-center gap-1 text-xs text-zinc-500 transition-colors hover:text-zinc-200"
             >
               <span aria-hidden="true">←</span> Back to dashboard

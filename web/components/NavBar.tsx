@@ -7,7 +7,7 @@ import { createClient } from '../lib/supabase/client'
 import { Brand } from './Brand'
 
 const NAV = [
-  { href: '/', label: 'Dashboard' },
+  { href: '/home', label: 'Dashboard' },
   { href: '/contacts', label: 'Contacts' },
   { href: '/inbox', label: 'Inbox' },
   { href: '/briefing', label: 'Briefing' },
@@ -42,7 +42,7 @@ export function NavBar({ email }: { email: string | null }) {
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-8 lg:gap-10">
           <Link
-            href="/"
+            href="/home"
             className="inline-flex items-center transition-opacity hover:opacity-80 focus-visible:opacity-100"
             aria-label="AIEA home"
           >

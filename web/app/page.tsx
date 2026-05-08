@@ -282,7 +282,7 @@ export default function LandingPage() {
       {/* Sticky nav */}
       <nav className="landing__nav">
         <div className="landing__nav-inner">
-          <Link href="/landing" className="landing__logo" aria-label="AIEA">
+          <Link href="/" className="landing__logo" aria-label="AIEA">
             <span className="landing__logo-mark" aria-hidden="true">
               <span />
               <span />

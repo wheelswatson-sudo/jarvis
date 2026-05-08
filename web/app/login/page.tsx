@@ -56,14 +56,14 @@ export default function LoginPage() {
       })
       if (error) setError(error.message)
       else {
-        router.replace('/')
+        router.replace('/home')
         router.refresh()
       }
     } else {
       const { data, error } = await supabase.auth.signUp({ email, password })
       if (error) setError(error.message)
       else if (data.session) {
-        router.replace('/')
+        router.replace('/home')
         router.refresh()
       } else {
         setMessage('Check your email to confirm your account.')

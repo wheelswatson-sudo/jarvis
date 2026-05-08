@@ -1,29 +1,29 @@
 import Link from 'next/link'
-import { createClient } from '../../lib/supabase/server'
+import { createClient } from '../../../lib/supabase/server'
 import {
   Card,
   EmptyState,
   MetricCard,
   PageHeader,
   SectionHeader,
-} from '../../components/cards'
-import { HelpDot } from '../../components/Tooltip'
-import { Greeting } from '../../components/Greeting'
-import { IntelligencePanel } from '../../components/IntelligencePanel'
-import { ContactsGrid } from '../../components/ContactsGrid'
+} from '../../../components/cards'
+import { HelpDot } from '../../../components/Tooltip'
+import { Greeting } from '../../../components/Greeting'
+import { IntelligencePanel } from '../../../components/IntelligencePanel'
+import { ContactsGrid } from '../../../components/ContactsGrid'
 import {
   contactName,
   formatCurrency,
   formatPercent,
   formatRelative,
-} from '../../lib/format'
+} from '../../../lib/format'
 import {
   LTV_HELP,
   NETWORK_HEALTH_HELP,
   COMMITMENT_HELP,
-} from '../../lib/glossary'
-import type { Commitment, Contact } from '../../lib/types'
-import { APOLLO_PROVIDER } from '../../lib/apollo'
+} from '../../../lib/glossary'
+import type { Commitment, Contact } from '../../../lib/types'
+import { APOLLO_PROVIDER } from '../../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
 

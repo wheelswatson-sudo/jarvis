@@ -1,9 +1,12 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
+// Exact-match public paths. `/` is the marketing landing page — must be
+// shareable without auth, and `startsWith('/')` would match everything.
+const PUBLIC_EXACT_PATHS = new Set<string>(['/'])
+
 const PUBLIC_PATHS = [
   '/login',
-  '/landing',
   '/auth',
   '/api/health',
   '/api/intelligence/health',
@@ -58,7 +61,9 @@ export async function updateSession(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl
-  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p))
+  const isPublic =
+    PUBLIC_EXACT_PATHS.has(pathname) ||
+    PUBLIC_PATHS.some((p) => pathname.startsWith(p))
 
   if (!user && !isPublic) {
     const url = request.nextUrl.clone()
@@ -68,7 +73,7 @@ export async function updateSession(request: NextRequest) {
 
   if (user && pathname === '/login') {
     const url = request.nextUrl.clone()
-    url.pathname = '/'
+    url.pathname = '/home'
     return NextResponse.redirect(url)
   }
 
