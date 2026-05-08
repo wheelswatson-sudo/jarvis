@@ -25,7 +25,7 @@ type AutoSyncResponse = {
 // 5-minute server-side throttle on top of this for cross-tab cases.
 const SESSION_KEY = 'aiea:auto-sync-fired-v1'
 
-type Status = 'idle' | 'syncing' | 'done' | 'error'
+type Status = 'idle' | 'syncing' | 'done' | 'error' | 'reconnect'
 
 // Auto-sync trigger mounted in the (app) layout. On first mount per session,
 // POSTs to /api/google/auto-sync (which fans out Gmail / Calendar / Tasks /
@@ -82,14 +82,23 @@ export function AutoSyncOnLogin() {
         }
 
         const services = data.services
-        const allSkipped =
-          'skipped' in services.gmail && services.gmail.skipped &&
-          'skipped' in services.calendar && services.calendar.skipped &&
-          'skipped' in services.tasks && services.tasks.skipped &&
-          'skipped' in services.contacts && services.contacts.skipped
+        const skipReasons = (Object.values(services) as ServiceState[])
+          .map((s) => ('skipped' in s && s.skipped ? s.reason : null))
+          .filter((r): r is string => r !== null)
+        const allSkipped = skipReasons.length === 4
+
+        // Revoked-grant case: Google returned invalid_grant for the
+        // refresh token. Silently hiding the toast here lets the user's
+        // sync stay broken for weeks before they notice — surface it.
+        if (allSkipped && skipReasons.every((r) => r === 'reconnect_required')) {
+          setStatus('reconnect')
+          return
+        }
+
         if (allSkipped) {
-          // Either Google isn't connected or another tab already synced;
-          // hide the toast silently.
+          // not_connected (user never linked Google), recently_synced
+          // (another tab already ran), or transient (logged server-side):
+          // hide the toast silently — none of these are actionable here.
           setVisible(false)
           return
         }
@@ -124,9 +133,11 @@ export function AutoSyncOnLogin() {
       ? 'Syncing your Google data…'
       : status === 'done'
         ? 'All synced'
-        : status === 'error'
-          ? 'Sync had issues — check Settings'
-          : ''
+        : status === 'reconnect'
+          ? 'Google connection expired — reconnect in Settings'
+          : status === 'error'
+            ? 'Sync had issues — check Settings'
+            : ''
   if (!label) return null
 
   const tone =
@@ -134,7 +145,9 @@ export function AutoSyncOnLogin() {
       ? 'border-violet-500/30 bg-violet-500/[0.10] text-violet-100'
       : status === 'done'
         ? 'border-emerald-500/30 bg-emerald-500/[0.10] text-emerald-100'
-        : 'border-rose-500/30 bg-rose-500/[0.10] text-rose-100'
+        : status === 'reconnect'
+          ? 'border-amber-500/30 bg-amber-500/[0.10] text-amber-100'
+          : 'border-rose-500/30 bg-rose-500/[0.10] text-rose-100'
 
   return (
     <div

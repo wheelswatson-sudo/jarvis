@@ -70,14 +70,24 @@ export async function POST() {
     return apiError(500, 'Service key not configured', undefined, 'no_service_key')
   }
 
-  // Connection check first — if Google isn't connected, return cleanly with
-  // every service marked skipped so the client can hide its toast.
+  // Connection check first. Three outcomes:
+  //   - not_connected: user never linked Google → hide toast silently
+  //   - reconnect_required: refresh failed with invalid_grant (user revoked
+  //     the OAuth grant in Google Account settings, or rotated accounts).
+  //     Surface this so the toast can prompt them to reconnect — silently
+  //     dropping the toast here is exactly the failure mode that lets
+  //     "my data isn't syncing" go unnoticed for weeks.
+  //   - transient: service-config or transient error. Log it; surface as a
+  //     soft failure so the user sees something went wrong and can retry.
   const tok = await getValidAccessTokenForUser(user.id)
   if ('error' in tok) {
+    if (tok.kind === 'transient') {
+      console.warn('[auto-sync] transient token lookup error for', user.id)
+    }
     const skipped: ServiceResult = {
       ok: false,
       skipped: true,
-      reason: 'not_connected',
+      reason: tok.kind,
     }
     const body: AutoSyncResponse = {
       ok: true,

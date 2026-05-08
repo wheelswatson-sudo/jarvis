@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { createClient } from '../../../../../lib/supabase/server'
 import { apiError } from '../../../../../lib/api-errors'
 import { trackEvent } from '../../../../../lib/events'
@@ -75,12 +75,14 @@ export async function PATCH(
   if (error) return apiError(400, error.message, undefined, 'update_failed')
   if (!data) return apiError(404, 'Contact not found', undefined, 'contact_not_found')
 
-  void trackEvent({
-    userId: user.id,
-    eventType: 'contact_updated',
-    contactId: id,
-    metadata: { field: 'pipeline', stage: data.pipeline_stage },
-  })
+  after(() =>
+    trackEvent({
+      userId: user.id,
+      eventType: 'contact_updated',
+      contactId: id,
+      metadata: { field: 'pipeline', stage: data.pipeline_stage },
+    }),
+  )
 
   return NextResponse.json({ contact: data })
 }

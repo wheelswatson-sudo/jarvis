@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { createClient } from '../../../lib/supabase/server'
 import { apiError, dbError } from '../../../lib/api-errors'
 import { trackEvent } from '../../../lib/events'
@@ -198,17 +198,19 @@ export async function POST(req: Request) {
     }
   }
 
-  void trackEvent({
-    userId: user.id,
-    eventType: 'contact_updated',
-    contactId,
-    metadata: {
-      action: 'interaction_logged',
-      type,
-      key_points_count: keyPoints.length,
-      action_items_count: actionItems.length,
-    },
-  })
+  after(() =>
+    trackEvent({
+      userId: user.id,
+      eventType: 'contact_updated',
+      contactId,
+      metadata: {
+        action: 'interaction_logged',
+        type,
+        key_points_count: keyPoints.length,
+        action_items_count: actionItems.length,
+      },
+    }),
+  )
 
   return NextResponse.json({ interaction: inserted })
 }

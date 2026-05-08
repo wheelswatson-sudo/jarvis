@@ -35,12 +35,19 @@ export async function fireEvent(
   if (typeof window === 'undefined') return
   try {
     const supabase = createClient()
+    // getSession() reads from local storage — no /auth/v1/user round-trip.
+    // The page-view + delegated click listeners can fire dozens of these
+    // per minute on a noisy page, so the per-request network cost adds up.
+    // RLS (auth.uid() = user_id) still rejects the insert if the JWT is
+    // invalid, so the pre-check is purely there to skip the insert when
+    // the user is signed out (saves the round-trip and a 401).
     const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) return
+      data: { session },
+    } = await supabase.auth.getSession()
+    const userId = session?.user?.id
+    if (!userId) return
     const { error } = await supabase.from('analytics_events').insert({
-      user_id: user.id,
+      user_id: userId,
       event_name: eventName,
       metadata: metadata ?? {},
     })

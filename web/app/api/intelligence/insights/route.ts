@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
 import { apiError } from '../../../../lib/api-errors'
@@ -127,17 +127,21 @@ export async function POST(request: Request) {
       return apiError(404, 'Insight not found or already resolved', undefined, 'not_found')
     }
 
-    // Fire-and-forget feedback event to feed the self-improvement loop.
-    void trackEvent({
-      userId: user.id,
-      eventType: action === 'act' ? 'insight_acted_on' : 'insight_dismissed',
-      metadata: {
-        insight_id: data.id,
-        insight_type: data.insight_type,
-        insight_key: data.insight_key,
-        capsule_id: data.capsule_id,
-      },
-    })
+    // Feedback event to feed the self-improvement loop. `after()` keeps the
+    // serverless worker alive past the response so the insert doesn't get
+    // truncated under load — `void` would let the lambda terminate first.
+    after(() =>
+      trackEvent({
+        userId: user.id,
+        eventType: action === 'act' ? 'insight_acted_on' : 'insight_dismissed',
+        metadata: {
+          insight_id: data.id,
+          insight_type: data.insight_type,
+          insight_key: data.insight_key,
+          capsule_id: data.capsule_id,
+        },
+      }),
+    )
 
     return NextResponse.json({ ok: true, status: newStatus })
   } catch (err) {
