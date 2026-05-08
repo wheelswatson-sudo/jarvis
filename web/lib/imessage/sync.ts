@@ -123,25 +123,33 @@ export async function storeImessages(
       sent_at: sentAt,
     }
 
-    const { error } = await service.from('messages').upsert(row, {
-      onConflict: 'user_id,channel,external_id',
-      ignoreDuplicates: true,
-    })
+    // ON CONFLICT DO NOTHING returns success with empty data on duplicate,
+    // so we use .select() to distinguish a true insert from a dedup hit.
+    // The previous ignoreDuplicates+23505-branch path was unreachable —
+    // 23505 never fires under DO NOTHING — so every re-sync overcounted
+    // duplicates as `imported` and bumped last_interaction_at off stale
+    // backfill rows. Mirrors the fix in lib/sms/ingest.ts.
+    const { data: insertedRows, error } = await service
+      .from('messages')
+      .upsert(row, {
+        onConflict: 'user_id,channel,external_id',
+        ignoreDuplicates: true,
+      })
+      .select('id')
 
     if (error) {
-      if (error.code === '23505') {
-        // Duplicate — the message already lives in the DB from a prior
-        // sync. Still safe to hand to the extractor (its own dedup will
-        // skip it via the interactions.source check).
-        skipped++
-        persisted.push({ ...msg, contact_id: contactId })
-      } else {
-        // Hard insert failure — the messages row never landed. Skipping
-        // the persisted.push prevents the extractor from creating an
-        // interaction whose source links back to a missing messages row.
-        errors++
-        console.warn('[imessage-sync] insert error:', error.message)
-      }
+      // Hard insert failure — the messages row never landed. Skipping
+      // the persisted.push prevents the extractor from creating an
+      // interaction whose source links back to a missing messages row.
+      errors++
+      console.warn('[imessage-sync] insert error:', error.message)
+    } else if (!insertedRows || insertedRows.length === 0) {
+      // Already in the DB from a prior sync. Safe to hand to the extractor
+      // — its own interactions.source dedup will skip the row. Don't
+      // bump last_interaction_at: a backfill window may include messages
+      // older than what we already have.
+      skipped++
+      persisted.push({ ...msg, contact_id: contactId })
     } else {
       imported++
       if (contactId) {
