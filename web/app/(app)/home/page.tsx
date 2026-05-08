@@ -10,50 +10,321 @@ import {
 import { HelpDot } from '../../../components/Tooltip'
 import { Greeting } from '../../../components/Greeting'
 import { IntelligencePanel } from '../../../components/IntelligencePanel'
-import { ContactsGrid } from '../../../components/ContactsGrid'
-import {
-  contactName,
-  formatCurrency,
-  formatPercent,
-  formatRelative,
-} from '../../../lib/format'
-import {
-  LTV_HELP,
-  NETWORK_HEALTH_HELP,
-  COMMITMENT_HELP,
-} from '../../../lib/glossary'
+import { contactName, formatRelative } from '../../../lib/format'
+import { NETWORK_HEALTH_HELP } from '../../../lib/glossary'
 import type { Commitment, Contact } from '../../../lib/types'
 import { APOLLO_PROVIDER } from '../../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
 
-type ContactWithStats = Contact & { open_commitments: number }
+const DAY_MS = 24 * 60 * 60 * 1000
+const ACTIVE_DAYS = 30
+const DORMANT_DAYS = 60
+const TIER1_SILENT_DAYS = 30
+const TIER2_SILENT_DAYS = 45
+const HALFLIFE_WARN_DAYS = 3
+const COMMITMENT_DUE_SOON_DAYS = 3
+const ACTION_LIMIT = 8
+const ACTIVITY_LIMIT = 8
+const ACTIVITY_WINDOW_DAYS = 14
+const GET_STARTED_THRESHOLD = 5
 
-async function loadDashboard() {
+type ActionTone = 'rose' | 'amber' | 'violet' | 'indigo'
+
+type ActionItem = {
+  key: string
+  href: string
+  primary: string
+  secondary: string
+  urgency: number
+  tone: ActionTone
+}
+
+type ActivityKind = 'email' | 'imessage' | 'sms' | 'meeting' | 'task'
+
+type ActivityRow = {
+  key: string
+  ts: string
+  kind: ActivityKind
+  primary: string
+  secondary: string
+  href?: string
+}
+
+type CommitmentForList = Pick<
+  Commitment,
+  'id' | 'contact_id' | 'due_at' | 'status' | 'description'
+>
+
+function daysSince(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return null
+  return Math.floor((Date.now() - t) / DAY_MS)
+}
+
+function daysUntil(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return null
+  return Math.floor((t - Date.now()) / DAY_MS)
+}
+
+// Higher score = more urgent. Bands (top wins) with linear ordering inside:
+//   100+  overdue commitment (linear in days overdue)
+//    80+  half-life elapsed (linear in days past)
+//    70-  half-life expiring within HALFLIFE_WARN_DAYS
+//    60+  T1 silent past TIER1_SILENT_DAYS
+//    50-  commitment due within COMMITMENT_DUE_SOON_DAYS
+//    40+  T2 silent past TIER2_SILENT_DAYS
+function buildActionList(
+  contacts: Contact[],
+  commitments: CommitmentForList[],
+): ActionItem[] {
+  const byId = new Map(contacts.map((c) => [c.id, c]))
+  const seenContact = new Set<string>()
+  const items: ActionItem[] = []
+
+  for (const com of commitments) {
+    if (com.status !== 'open' || !com.due_at || !com.contact_id) continue
+    const contact = byId.get(com.contact_id)
+    if (!contact) continue
+    const dUntil = daysUntil(com.due_at)
+    if (dUntil == null) continue
+    const name = contactName(contact)
+    if (dUntil < 0) {
+      const overdue = -dUntil
+      items.push({
+        key: `com-${com.id}`,
+        href: `/contacts/${contact.id}`,
+        primary: `Overdue: ${com.description}`,
+        secondary: `${name} — ${overdue}d overdue`,
+        urgency: 100 + overdue,
+        tone: 'rose',
+      })
+    } else if (dUntil <= COMMITMENT_DUE_SOON_DAYS) {
+      const when =
+        dUntil === 0 ? 'today' : dUntil === 1 ? 'tomorrow' : `in ${dUntil}d`
+      items.push({
+        key: `com-${com.id}`,
+        href: `/contacts/${contact.id}`,
+        primary: `Due ${when}: ${com.description}`,
+        secondary: name,
+        urgency: 50 + (COMMITMENT_DUE_SOON_DAYS - dUntil),
+        tone: 'violet',
+      })
+    }
+  }
+
+  for (const c of contacts) {
+    const dSince = daysSince(c.last_interaction_at)
+    if (dSince == null) continue
+    const name = contactName(c)
+
+    if (typeof c.half_life_days === 'number' && c.half_life_days > 0) {
+      const past = dSince - c.half_life_days
+      if (past >= 0 && !seenContact.has(c.id)) {
+        seenContact.add(c.id)
+        items.push({
+          key: `decay-${c.id}`,
+          href: `/contacts/${c.id}`,
+          primary: `${name}'s half-life expired ${past}d ago`,
+          secondary: `last contact ${dSince}d ago, half-life ${c.half_life_days.toFixed(0)}d`,
+          urgency: 80 + past,
+          tone: 'amber',
+        })
+        continue
+      }
+      if (past < 0 && -past <= HALFLIFE_WARN_DAYS && !seenContact.has(c.id)) {
+        seenContact.add(c.id)
+        items.push({
+          key: `decay-${c.id}`,
+          href: `/contacts/${c.id}`,
+          primary: `${name}'s half-life expires in ${-past}d`,
+          secondary: `last contact ${dSince}d ago`,
+          urgency: 70 - -past,
+          tone: 'amber',
+        })
+        continue
+      }
+    }
+
+    if (c.tier === 1 && dSince >= TIER1_SILENT_DAYS && !seenContact.has(c.id)) {
+      seenContact.add(c.id)
+      items.push({
+        key: `silent-${c.id}`,
+        href: `/contacts/${c.id}`,
+        primary: `Follow up with ${name}`,
+        secondary: `T1 — last contact ${dSince} days ago`,
+        urgency: 60 + (dSince - TIER1_SILENT_DAYS),
+        tone: 'indigo',
+      })
+    } else if (
+      c.tier === 2 &&
+      dSince >= TIER2_SILENT_DAYS &&
+      !seenContact.has(c.id)
+    ) {
+      seenContact.add(c.id)
+      items.push({
+        key: `silent-${c.id}`,
+        href: `/contacts/${c.id}`,
+        primary: `Follow up with ${name}`,
+        secondary: `T2 — last contact ${dSince} days ago`,
+        urgency: 40 + (dSince - TIER2_SILENT_DAYS),
+        tone: 'indigo',
+      })
+    }
+  }
+
+  items.sort((a, b) => b.urgency - a.urgency)
+  return items.slice(0, ACTION_LIMIT)
+}
+
+type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>
+
+async function loadActivity(
+  supabase: SupabaseServerClient,
+  userId: string,
+  nameById: Map<string, string>,
+): Promise<ActivityRow[]> {
+  const since = new Date(Date.now() - ACTIVITY_WINDOW_DAYS * DAY_MS).toISOString()
+  const nowIso = new Date().toISOString()
+
+  const [messagesRes, eventsRes, doneRes] = await Promise.all([
+    supabase
+      .from('messages')
+      .select(
+        'id, channel, direction, contact_id, subject, snippet, sender, recipient, sent_at',
+      )
+      .eq('user_id', userId)
+      .gte('sent_at', since)
+      .order('sent_at', { ascending: false })
+      .limit(15),
+    supabase
+      .from('calendar_events')
+      .select('id, title, start_at, contact_id')
+      .eq('user_id', userId)
+      .lt('start_at', nowIso)
+      .gte('start_at', since)
+      .order('start_at', { ascending: false })
+      .limit(10),
+    supabase
+      .from('commitments')
+      .select('id, description, contact_id, completed_at')
+      .eq('user_id', userId)
+      .eq('status', 'done')
+      .gte('completed_at', since)
+      .order('completed_at', { ascending: false })
+      .limit(10),
+  ])
+
+  const rows: ActivityRow[] = []
+
+  type MessageRow = {
+    id: string
+    channel: 'email' | 'imessage' | 'sms'
+    direction: 'inbound' | 'outbound'
+    contact_id: string | null
+    subject: string | null
+    snippet: string | null
+    sender: string | null
+    recipient: string | null
+    sent_at: string
+  }
+  for (const m of (messagesRes.data ?? []) as MessageRow[]) {
+    const who =
+      (m.contact_id && nameById.get(m.contact_id)) ||
+      (m.direction === 'inbound' ? m.sender : m.recipient) ||
+      'Unknown'
+    const verb = m.direction === 'inbound' ? 'from' : 'to'
+    const label =
+      m.channel === 'email'
+        ? 'Email'
+        : m.channel === 'imessage'
+          ? 'iMessage'
+          : 'SMS'
+    rows.push({
+      key: `msg-${m.id}`,
+      ts: m.sent_at,
+      kind: m.channel,
+      primary: `${label} ${verb} ${who}`,
+      secondary: (m.subject || m.snippet || '').trim() || '—',
+      href: m.contact_id ? `/contacts/${m.contact_id}` : undefined,
+    })
+  }
+
+  type EventRow = {
+    id: string
+    title: string | null
+    start_at: string
+    contact_id: string | null
+  }
+  for (const e of (eventsRes.data ?? []) as EventRow[]) {
+    rows.push({
+      key: `evt-${e.id}`,
+      ts: e.start_at,
+      kind: 'meeting',
+      primary: `Meeting — ${e.title || 'Untitled'}`,
+      secondary: e.contact_id ? (nameById.get(e.contact_id) ?? '—') : '—',
+      href: e.contact_id ? `/contacts/${e.contact_id}` : undefined,
+    })
+  }
+
+  type DoneRow = {
+    id: string
+    description: string
+    contact_id: string | null
+    completed_at: string
+  }
+  for (const t of (doneRes.data ?? []) as DoneRow[]) {
+    rows.push({
+      key: `task-${t.id}`,
+      ts: t.completed_at,
+      kind: 'task',
+      primary: `Completed: ${t.description}`,
+      secondary: t.contact_id ? (nameById.get(t.contact_id) ?? '—') : '—',
+      href: t.contact_id ? `/contacts/${t.contact_id}` : undefined,
+    })
+  }
+
+  rows.sort((a, b) => b.ts.localeCompare(a.ts))
+  return rows.slice(0, ACTIVITY_LIMIT)
+}
+
+function firstNameFromUser(user: {
+  user_metadata?: {
+    full_name?: string
+    name?: string
+    first_name?: string
+  } | null
+  email?: string | null
+}): string | null {
+  const md = user.user_metadata ?? {}
+  if (md.first_name) return md.first_name
+  const full = md.full_name ?? md.name
+  if (full) return full.split(' ')[0]
+  if (user.email) {
+    const handle = user.email.split('@')[0]
+    const part = handle.split(/[._-]/)[0]
+    return part.charAt(0).toUpperCase() + part.slice(1)
+  }
+  return null
+}
+
+async function loadHomeData() {
   const supabase = await createClient()
-  const now = new Date().toISOString()
 
   const {
     data: { user },
   } = await supabase.auth.getUser()
+  const userId = user?.id ?? null
 
-  const [contactsRes, commitmentsRes, apolloRes, googleRes] = await Promise.all([
-    supabase
-      .from('contacts')
-      .select('*')
-      .order('ltv_estimate', { ascending: false, nullsFirst: false })
-      .limit(120),
+  const [contactsRes, commitmentsRes, googleRes, apolloRes] = await Promise.all([
+    supabase.from('contacts').select('*').limit(2000),
     supabase
       .from('commitments')
-      .select('id, contact_id, due_at, status, description'),
-    user
-      ? supabase
-          .from('user_integrations')
-          .select('access_token')
-          .eq('user_id', user.id)
-          .eq('provider', APOLLO_PROVIDER)
-          .maybeSingle()
-      : Promise.resolve({ data: null }),
+      .select('id, contact_id, due_at, status, description')
+      .limit(2000),
     user
       ? supabase
           .from('user_integrations')
@@ -66,125 +337,115 @@ async function loadDashboard() {
             'google_gmail',
           ])
       : Promise.resolve({ data: [] }),
+    user
+      ? supabase
+          .from('user_integrations')
+          .select('access_token')
+          .eq('user_id', user.id)
+          .eq('provider', APOLLO_PROVIDER)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
   ])
 
-  const apolloConnected =
-    typeof (apolloRes.data as { access_token?: unknown } | null)
-      ?.access_token === 'string' &&
-    ((apolloRes.data as { access_token: string }).access_token.length ?? 0) > 0
-
   const contacts = (contactsRes.data ?? []) as Contact[]
-  const commitments = (commitmentsRes.data ?? []) as Pick<
-    Commitment,
-    'id' | 'contact_id' | 'due_at' | 'status' | 'description'
-  >[]
-
-  const openByContact = new Map<string, number>()
-  let openCount = 0
-  let overdueCount = 0
-  for (const c of commitments) {
-    if (c.status !== 'open') continue
-    openCount++
-    if (c.due_at && c.due_at < now) overdueCount++
-    if (c.contact_id) {
-      openByContact.set(c.contact_id, (openByContact.get(c.contact_id) ?? 0) + 1)
-    }
-  }
-
-  const enriched: ContactWithStats[] = contacts.map((c) => ({
-    ...c,
-    open_commitments: openByContact.get(c.id) ?? 0,
-  }))
-
-  const totalLtv = enriched.reduce((sum, c) => sum + (c.ltv_estimate ?? 0), 0)
-
-  const halfLifes = enriched
-    .map((c) => c.half_life_days)
-    .filter((v): v is number => typeof v === 'number')
-  const networkHealth = halfLifes.length
-    ? Math.max(
-        0,
-        Math.min(1, halfLifes.reduce((s, v) => s + v, 0) / halfLifes.length / 90),
-      )
-    : null
-
-  const cooling = enriched.filter(
-    (c) => c.half_life_days != null && c.half_life_days < 21,
-  )
-  const reactivation = enriched.filter(
-    (c) =>
-      c.tier === 1 &&
-      c.last_interaction_at &&
-      Date.now() - new Date(c.last_interaction_at).getTime() >
-        60 * 24 * 60 * 60 * 1000,
-  )
-
-  const overdue = commitments
-    .filter((c) => c.status === 'open' && c.due_at && c.due_at < now)
-    .slice(0, 5)
-
-  const topByLtv = [...enriched]
-    .filter((c) => (c.ltv_estimate ?? 0) > 0)
-    .slice(0, 8)
+  const commitments = (commitmentsRes.data ?? []) as CommitmentForList[]
 
   const googleProviders = new Set(
     (googleRes.data ?? []).map(
       (row: { provider: string }) => row.provider,
     ),
   )
+  const googleConnected = googleProviders.size > 0
+
+  const apolloConnected =
+    typeof (apolloRes.data as { access_token?: unknown } | null)
+      ?.access_token === 'string' &&
+    ((apolloRes.data as { access_token: string }).access_token.length ?? 0) > 0
+
+  const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
+  const activity = userId ? await loadActivity(supabase, userId, nameById) : []
+
+  const total = contacts.length
+  let active = 0
+  let atRisk = 0
+  let dormant = 0
+  for (const c of contacts) {
+    const dSince = daysSince(c.last_interaction_at)
+    if (dSince == null) {
+      dormant += 1
+      continue
+    }
+    if (dSince <= ACTIVE_DAYS) active += 1
+    if (
+      typeof c.half_life_days === 'number' &&
+      c.half_life_days > 0 &&
+      dSince >= c.half_life_days - HALFLIFE_WARN_DAYS
+    ) {
+      atRisk += 1
+    }
+    if (dSince >= DORMANT_DAYS) dormant += 1
+  }
+
+  const actions = buildActionList(contacts, commitments)
+  const firstName = user ? firstNameFromUser(user) : null
 
   return {
-    enriched,
+    firstName,
+    googleConnected,
     apolloConnected,
-    googleConnected: googleProviders.size > 0,
-    metrics: {
-      activeRelationships: enriched.length,
-      networkHealth,
-      openCount,
-      overdueCount,
-      totalLtv,
-    },
-    needsAttention: { overdue, cooling, reactivation },
-    topByLtv,
+    contactsTotal: total,
+    health: { total, active, atRisk, dormant },
+    actions,
+    activity,
   }
 }
 
-export default async function DashboardPage() {
-  const data = await loadDashboard()
+export default async function HomePage() {
   const {
-    metrics,
-    needsAttention,
-    topByLtv,
-    enriched,
-    apolloConnected,
+    firstName,
     googleConnected,
-  } = data
-  const maxLtv = topByLtv[0]?.ltv_estimate ?? 1
-  const isFirstRun = enriched.length === 0 && !googleConnected
+    apolloConnected,
+    contactsTotal,
+    health,
+    actions,
+    activity,
+  } = await loadHomeData()
+
+  const isFirstRun = contactsTotal === 0 && !googleConnected
+  const showGetStarted = contactsTotal < GET_STARTED_THRESHOLD
+
+  const eyebrow = (
+    <>
+      <Greeting />
+      {firstName ? `, ${firstName}` : ''}
+    </>
+  )
+
+  const subtitle =
+    contactsTotal === 0
+      ? isFirstRun
+        ? "Three steps and you're set up. AIEA needs a few signals before it can start surfacing what your network needs."
+        : 'No contacts yet. Import a CSV or connect Google to seed your network.'
+      : actions.length === 0
+        ? `Tracking ${contactsTotal} relationships. Network is in steady state — no urgent follow-ups today.`
+        : `${actions.length} relationship${actions.length === 1 ? '' : 's'} need attention today.`
 
   return (
     <div className="space-y-10">
-      {/* Hero */}
       <div className="animate-fade-up">
         <PageHeader
-          eyebrow={<Greeting />}
-          title={isFirstRun ? 'Welcome to AIEA' : "Here's what your network needs"}
-          subtitle={
-            metrics.activeRelationships > 0
-              ? `Tracking ${metrics.activeRelationships} relationships. ${metrics.openCount} open commitment${metrics.openCount === 1 ? '' : 's'}${metrics.overdueCount ? ` — ${metrics.overdueCount} overdue.` : '.'}`
-              : isFirstRun
-                ? "Three steps and you're set up. AIEA needs a few signals before it can start surfacing what your network needs."
-                : 'No contacts yet. Import a CSV or connect Google to seed your network.'
-          }
+          eyebrow={eyebrow}
+          title={isFirstRun ? 'Welcome to AIEA' : "Today's briefing"}
+          subtitle={subtitle}
           action={
-            !isFirstRun && (
+            !isFirstRun && contactsTotal > 0 ? (
               <Link
                 href="/contacts/import"
                 className="inline-flex items-center gap-1.5 rounded-xl aiea-cta px-4 py-2 text-sm font-medium text-white"
               >
                 <span aria-hidden="true">＋</span> Import contacts
               </Link>
-            )
+            ) : null
           }
         />
       </div>
@@ -193,215 +454,224 @@ export default async function DashboardPage() {
         <GettingStarted
           googleConnected={googleConnected}
           apolloConnected={apolloConnected}
-          hasContacts={enriched.length > 0}
+          hasContacts={contactsTotal > 0}
         />
       )}
 
-      {/* Metrics row */}
-      {!isFirstRun && (
+      {!isFirstRun && contactsTotal > 0 && (
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4 aiea-stagger">
           <MetricCard
-            label="Active relationships"
-            value={metrics.activeRelationships.toString()}
+            label="Total contacts"
+            value={health.total.toString()}
             tone="indigo"
             icon={<NetworkIcon />}
           />
           <MetricCard
-            label="Network health"
-            value={formatPercent(metrics.networkHealth)}
-            hint={NETWORK_HEALTH_HELP}
+            label="Active (30d)"
+            value={health.active.toString()}
+            hint={`${health.total ? Math.round((health.active / health.total) * 100) : 0}% of network · ${NETWORK_HEALTH_HELP}`}
             tone="violet"
             icon={<PulseIcon />}
           />
           <MetricCard
-            label="Commitments due"
-            value={metrics.openCount.toString()}
-            hint={
-              metrics.overdueCount > 0
-                ? `${metrics.overdueCount} overdue · ${COMMITMENT_HELP}`
-                : COMMITMENT_HELP
-            }
-            tone={metrics.overdueCount > 0 ? 'rose' : 'emerald'}
-            icon={<CheckIcon />}
+            label="At risk"
+            value={health.atRisk.toString()}
+            hint="half-life expiring"
+            tone={health.atRisk > 0 ? 'amber' : 'emerald'}
+            icon={<AlertIcon />}
           />
           <MetricCard
-            label="Predicted network LTV"
-            value={formatCurrency(metrics.totalLtv)}
-            hint={LTV_HELP}
-            tone="fuchsia"
-            icon={<SparklesIcon />}
+            label="Dormant (60d+)"
+            value={health.dormant.toString()}
+            hint="no recent contact"
+            tone={health.dormant > 0 ? 'rose' : 'emerald'}
+            icon={<MoonIcon />}
           />
         </div>
       )}
 
-      {/* Intelligence — self-improving insights */}
-      {!isFirstRun && (
+      {!isFirstRun && contactsTotal > 0 && (
+        <section className="animate-fade-up">
+          <SectionHeader
+            eyebrow="Today"
+            title={
+              <span className="inline-flex items-center gap-2">
+                Daily action list
+                <HelpDot content="Ranked by urgency: overdue commitments first, then expiring half-lives, then silent T1/T2 contacts." />
+              </span>
+            }
+            subtitle="Your top relationship moves, ranked by urgency."
+          />
+          {actions.length === 0 ? (
+            <Card>
+              <p className="text-sm text-zinc-400">
+                Nothing pressing right now. Your network is in steady state.
+              </p>
+            </Card>
+          ) : (
+            <div className="grid gap-3 aiea-stagger">
+              {actions.map((a, idx) => (
+                <Link key={a.key} href={a.href} className="group block">
+                  <Card interactive>
+                    <div className="flex items-start gap-4">
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white/[0.04] font-mono text-[11px] tabular-nums text-zinc-400">
+                        {(idx + 1).toString().padStart(2, '0')}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="truncate text-sm font-medium text-zinc-100 group-hover:text-white">
+                            {a.primary}
+                          </span>
+                          <ToneDot tone={a.tone} />
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-zinc-500">
+                          {a.secondary}
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </Link>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && (
+        <section className="animate-fade-up">
+          <SectionHeader
+            eyebrow="Pulse"
+            title="Recent activity"
+            subtitle="Emails, meetings, and tasks across your network."
+          />
+          {activity.length === 0 ? (
+            <Card>
+              <p className="text-sm text-zinc-500">
+                No recent interactions in the last {ACTIVITY_WINDOW_DAYS} days.
+              </p>
+            </Card>
+          ) : (
+            <Card>
+              <ul className="divide-y divide-white/[0.04]">
+                {activity.map((row) => {
+                  const inner = (
+                    <div className="flex items-baseline justify-between gap-3 py-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2">
+                          <KindChip kind={row.kind} />
+                          <span className="truncate text-sm text-zinc-100">
+                            {row.primary}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-zinc-500">
+                          {row.secondary}
+                        </div>
+                      </div>
+                      <span className="shrink-0 text-xs tabular-nums text-zinc-500">
+                        {formatRelative(row.ts)}
+                      </span>
+                    </div>
+                  )
+                  return row.href ? (
+                    <li key={row.key}>
+                      <Link
+                        href={row.href}
+                        className="-mx-2 block rounded-md px-2 transition-colors hover:bg-white/[0.025]"
+                      >
+                        {inner}
+                      </Link>
+                    </li>
+                  ) : (
+                    <li key={row.key}>{inner}</li>
+                  )
+                })}
+              </ul>
+            </Card>
+          )}
+        </section>
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && (
         <div className="animate-fade-up">
           <IntelligencePanel />
         </div>
       )}
 
-      {/* Needs attention */}
-      {!isFirstRun && (
-      <section className="animate-fade-up">
-        <SectionHeader
-          eyebrow="Triage"
-          title="Needs attention"
-          subtitle="Where to spend your time first."
-        />
-        <div className="grid gap-4 md:grid-cols-3 aiea-stagger">
-          <AttentionList
-            tone="rose"
-            title="Overdue commitments"
-            empty="Nothing overdue."
-            items={needsAttention.overdue.map((c) => ({
-              key: c.id,
-              primary: c.description,
-              secondary: `due ${formatRelative(c.due_at)}`,
-            }))}
-          />
-          <AttentionList
-            tone="amber"
-            title="Cooling relationships"
-            empty="Network is warm."
-            items={needsAttention.cooling.slice(0, 5).map((c) => ({
-              key: c.id,
-              href: `/contacts/${c.id}`,
-              primary: contactName(c),
-              secondary: `half-life ${c.half_life_days?.toFixed(0)}d`,
-            }))}
-          />
-          <AttentionList
-            tone="indigo"
-            title="Reactivation opportunities"
-            empty="No Tier 1 contacts have gone cold."
-            items={needsAttention.reactivation.slice(0, 5).map((c) => ({
-              key: c.id,
-              href: `/contacts/${c.id}`,
-              primary: contactName(c),
-              secondary: `last seen ${formatRelative(c.last_interaction_at)}`,
-            }))}
-          />
-        </div>
-      </section>
-      )}
-
-      {/* LTV ranking */}
-      {!isFirstRun && (
-      <section className="animate-fade-up">
-        <SectionHeader
-          eyebrow="Compounding"
-          title={
-            <span className="inline-flex items-center gap-2">
-              Relationship LTV ranking
-              <HelpDot content={LTV_HELP} />
-            </span>
-          }
-          subtitle="Top contacts by predicted lifetime value."
-        />
-        <Card>
-          {topByLtv.length === 0 ? (
-            <div className="py-8 text-center">
-              <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-500/15 via-violet-500/15 to-fuchsia-500/15 ring-1 ring-inset ring-white/10 text-violet-200">
-                <SparklesIcon />
-              </div>
-              <p className="text-sm font-medium text-zinc-200">
-                No LTV estimates yet
-              </p>
-              <p className="mx-auto mt-1 max-w-sm text-xs text-zinc-500">
-                LTV scores appear once contacts have enough interaction
-                history. Log a few meetings to start the model.
-              </p>
-            </div>
-          ) : (
-            <ul className="space-y-4 aiea-stagger">
-              {topByLtv.map((c, idx) => {
-                const pct = Math.max(
-                  0,
-                  Math.min(1, (c.ltv_estimate ?? 0) / maxLtv),
-                )
-                return (
-                  <li key={c.id}>
-                    <Link
-                      href={`/contacts/${c.id}`}
-                      className="group block rounded-lg p-2 -m-2 transition-colors hover:bg-white/[0.025]"
-                    >
-                      <div className="flex items-baseline justify-between gap-3 text-sm">
-                        <span className="flex items-baseline gap-3 truncate">
-                          <span className="w-5 shrink-0 font-mono text-[11px] tabular-nums text-zinc-600">
-                            {(idx + 1).toString().padStart(2, '0')}
-                          </span>
-                          <span className="truncate font-medium text-zinc-100 transition-colors group-hover:text-white">
-                            {contactName(c)}
-                          </span>
-                        </span>
-                        <span className="shrink-0 tabular-nums text-zinc-400 transition-colors group-hover:text-zinc-200">
-                          {formatCurrency(c.ltv_estimate)}
-                        </span>
-                      </div>
-                      <div className="mt-2 ml-8 h-1.5 w-[calc(100%-2rem)] overflow-hidden rounded-full bg-white/[0.04]">
-                        <div
-                          className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 shadow-[0_0_8px_rgba(139,92,246,0.45)] transition-[width] duration-700"
-                          style={{ width: `${pct * 100}%` }}
-                        />
-                      </div>
-                    </Link>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </Card>
-      </section>
-      )}
-
-      {/* Contact grid */}
-      {!isFirstRun && (
-      <section className="animate-fade-up">
-        <SectionHeader
-          eyebrow="People"
-          title="Your network"
-          subtitle="Click a card to drill in."
-          action={
-            <Link
-              href="/contacts/import"
-              className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-3.5 py-1.5 text-sm font-medium text-white"
-            >
-              <span aria-hidden="true">＋</span> Import
-            </Link>
-          }
-        />
-        {enriched.length === 0 ? (
+      {!isFirstRun && showGetStarted && contactsTotal > 0 && (
+        <section className="animate-fade-up">
           <EmptyState
-            icon={<NetworkIcon />}
-            title="No contacts yet"
-            body="Import a CSV to seed your network, or connect Google in Settings to sync automatically."
+            title="Add more contacts to unlock insights"
+            body="Connect Google in Settings to seed contacts, or import a CSV. Once you have a few people in here, your daily briefing fills out automatically."
             action={
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                <Link
-                  href="/contacts/import"
-                  className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-4 py-2 text-sm font-medium text-white"
-                >
-                  Import your first contacts →
-                </Link>
+              <div className="flex items-center gap-2">
                 <Link
                   href="/settings"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-white/20 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-lg aiea-cta px-4 py-2 text-sm font-medium text-white"
                 >
-                  Open settings
+                  Open settings →
+                </Link>
+                <Link
+                  href="/contacts/import"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-zinc-200 hover:border-violet-500/40 hover:bg-white/[0.06]"
+                >
+                  Import CSV
                 </Link>
               </div>
             }
           />
-        ) : (
-          <ContactsGrid
-            contacts={enriched}
-            apolloConnected={apolloConnected}
-          />
-        )}
-      </section>
+        </section>
       )}
     </div>
+  )
+}
+
+function ToneDot({ tone }: { tone: ActionTone }) {
+  const cls =
+    tone === 'rose'
+      ? 'bg-rose-400 shadow-rose-500/50'
+      : tone === 'amber'
+        ? 'bg-amber-400 shadow-amber-500/50'
+        : tone === 'violet'
+          ? 'bg-violet-400 shadow-violet-500/50'
+          : 'bg-indigo-400 shadow-indigo-500/50'
+  return (
+    <span
+      className={`inline-block h-2 w-2 shrink-0 rounded-full shadow-[0_0_8px_currentColor] ${cls}`}
+      aria-hidden="true"
+    />
+  )
+}
+
+function KindChip({ kind }: { kind: ActivityKind }) {
+  const map: Record<ActivityKind, { label: string; cls: string }> = {
+    email: {
+      label: 'Email',
+      cls: 'text-indigo-300 bg-indigo-500/10 ring-indigo-500/20',
+    },
+    imessage: {
+      label: 'iMessage',
+      cls: 'text-violet-300 bg-violet-500/10 ring-violet-500/20',
+    },
+    sms: {
+      label: 'SMS',
+      cls: 'text-violet-300 bg-violet-500/10 ring-violet-500/20',
+    },
+    meeting: {
+      label: 'Meeting',
+      cls: 'text-fuchsia-300 bg-fuchsia-500/10 ring-fuchsia-500/20',
+    },
+    task: {
+      label: 'Done',
+      cls: 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/20',
+    },
+  }
+  const t = map[kind]
+  return (
+    <span
+      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ring-1 ring-inset ${t.cls}`}
+    >
+      {t.label}
+    </span>
   )
 }
 
@@ -518,76 +788,6 @@ function GettingStarted({
   )
 }
 
-type AttentionItem = {
-  key: string
-  href?: string
-  primary: string
-  secondary: string
-}
-
-function AttentionList({
-  title,
-  tone,
-  items,
-  empty,
-}: {
-  title: string
-  tone: 'rose' | 'amber' | 'indigo'
-  items: AttentionItem[]
-  empty: string
-}) {
-  const dot =
-    tone === 'rose'
-      ? 'bg-rose-400 shadow-rose-500/50'
-      : tone === 'amber'
-        ? 'bg-amber-400 shadow-amber-500/50'
-        : 'bg-indigo-400 shadow-indigo-500/50'
-  return (
-    <Card>
-      <div className="mb-4 flex items-center gap-2">
-        <span
-          className={`inline-block h-2 w-2 rounded-full shadow-[0_0_8px_currentColor] ${dot}`}
-          aria-hidden="true"
-        />
-        <h3 className="text-sm font-medium text-zinc-200">{title}</h3>
-        <span className="ml-auto text-[10px] tabular-nums text-zinc-600">
-          {items.length}
-        </span>
-      </div>
-      {items.length === 0 ? (
-        <p className="text-sm text-zinc-500">{empty}</p>
-      ) : (
-        <ul className="space-y-3">
-          {items.map((item) => {
-            const inner = (
-              <>
-                <div className="truncate text-sm font-medium text-zinc-100">
-                  {item.primary}
-                </div>
-                <div className="text-xs text-zinc-500">{item.secondary}</div>
-              </>
-            )
-            return (
-              <li key={item.key}>
-                {item.href ? (
-                  <Link
-                    href={item.href}
-                    className="-mx-2 block rounded-md px-2 py-1.5 transition-colors hover:bg-white/[0.025]"
-                  >
-                    {inner}
-                  </Link>
-                ) : (
-                  <div className="px-0">{inner}</div>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-      )}
-    </Card>
-  )
-}
-
 function NetworkIcon() {
   return (
     <svg
@@ -610,6 +810,7 @@ function NetworkIcon() {
     </svg>
   )
 }
+
 function PulseIcon() {
   return (
     <svg
@@ -627,24 +828,8 @@ function PulseIcon() {
     </svg>
   )
 }
-function CheckIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="m4 12 5 5L20 6" />
-    </svg>
-  )
-}
-function SparklesIcon() {
+
+function AlertIcon() {
   return (
     <svg
       width="14"
@@ -657,8 +842,26 @@ function SparklesIcon() {
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z" />
-      <path d="M19 16l.6 1.6L21 18l-1.4.4L19 20l-.6-1.6L17 18l1.4-.4z" />
+      <path d="M12 9v4M12 17h.01" />
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
     </svg>
   )
 }
