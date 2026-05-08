@@ -144,9 +144,9 @@ export function SectionHeader({
   eyebrow,
 }: {
   title: ReactNode
-  subtitle?: string
+  subtitle?: ReactNode
   action?: ReactNode
-  eyebrow?: string
+  eyebrow?: ReactNode
 }) {
   return (
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -175,7 +175,7 @@ export function PageHeader({
   subtitle,
   action,
 }: {
-  eyebrow?: string
+  eyebrow?: ReactNode
   title: ReactNode
   subtitle?: ReactNode
   action?: ReactNode

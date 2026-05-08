@@ -8,6 +8,7 @@ import {
   SectionHeader,
 } from '../../components/cards'
 import { HelpDot } from '../../components/Tooltip'
+import { Greeting } from '../../components/Greeting'
 import { IntelligencePanel } from '../../components/IntelligencePanel'
 import { ContactsGrid } from '../../components/ContactsGrid'
 import {
@@ -148,15 +149,6 @@ async function loadDashboard() {
   }
 }
 
-function greeting(): string {
-  const h = new Date().getHours()
-  if (h < 5) return 'Up late'
-  if (h < 12) return 'Good morning'
-  if (h < 17) return 'Good afternoon'
-  if (h < 21) return 'Good evening'
-  return 'Working late'
-}
-
 export default async function DashboardPage() {
   const data = await loadDashboard()
   const {
@@ -175,7 +167,7 @@ export default async function DashboardPage() {
       {/* Hero */}
       <div className="animate-fade-up">
         <PageHeader
-          eyebrow={greeting()}
+          eyebrow={<Greeting />}
           title={isFirstRun ? 'Welcome to AIEA' : "Here's what your network needs"}
           subtitle={
             metrics.activeRelationships > 0
