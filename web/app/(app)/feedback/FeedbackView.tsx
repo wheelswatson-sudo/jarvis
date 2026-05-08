@@ -283,14 +283,12 @@ function FeedbackItem({
   async function save() {
     setError(null)
     const supabase = createClient()
+    // resolved_at is owned by the sync_feedback_resolved_at trigger
+    // (migration 019) — set on transition into shipped|wont-fix, cleared
+    // on the way out. The .select() below pulls the trigger's value back.
     const patch: Partial<FeedbackRow> = {
       status: draftStatus,
       admin_response: draftResponse.trim() || null,
-    }
-    if (draftStatus === 'shipped' || draftStatus === 'wont-fix') {
-      patch.resolved_at = row.resolved_at ?? new Date().toISOString()
-    } else {
-      patch.resolved_at = null
     }
     const { data, error: updateError } = await supabase
       .from('feedback')
