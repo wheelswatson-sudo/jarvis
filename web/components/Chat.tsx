@@ -18,6 +18,9 @@ export function Chat() {
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Session id ties all turns of one conversation together in telemetry.
+  // Lazy-minted on first send to keep render pure.
+  const sessionIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -26,6 +29,9 @@ export function Chat() {
   async function send(textOverride?: string) {
     const text = (textOverride ?? draft).trim()
     if (!text || sending) return
+    if (sessionIdRef.current == null) {
+      sessionIdRef.current = crypto.randomUUID()
+    }
     const next: Message[] = [...messages, { role: 'user', content: text }]
     setMessages(next)
     setDraft('')
@@ -37,7 +43,10 @@ export function Chat() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: next }),
+        body: JSON.stringify({
+          messages: next,
+          session_id: sessionIdRef.current,
+        }),
       })
 
       if (!res.ok || !res.body) {
