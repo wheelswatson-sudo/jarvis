@@ -22,6 +22,16 @@ const MAX_CONTACTS_IN_CONTEXT = 40
 const MAX_COMMITMENTS_IN_CONTEXT = 30
 const MAX_INTERACTIONS_IN_CONTEXT = 20
 
+// Telemetry caps — store enough to understand intent without bloating jsonb.
+// Length stays available verbatim via `*_chars` fields when truncated.
+const MAX_QUERY_LOG_CHARS = 2048
+const MAX_RESPONSE_LOG_CHARS = 4096
+
+function capForLog(s: string, max: number): string {
+  if (s.length <= max) return s
+  return `${s.slice(0, max)}…[+${s.length - max}]`
+}
+
 type RelationshipContext = {
   userName: string
   totals: {
@@ -338,9 +348,13 @@ export async function POST(request: Request) {
   const limited = rateLimitOr429(`chat:${user.id}`, LIMITS.CHAT.limit, LIMITS.CHAT.windowMs)
   if (limited) return limited
 
-  let body: { message?: unknown; messages?: unknown }
+  let body: { message?: unknown; messages?: unknown; session_id?: unknown }
   try {
-    body = (await request.json()) as { message?: unknown; messages?: unknown }
+    body = (await request.json()) as {
+      message?: unknown
+      messages?: unknown
+      session_id?: unknown
+    }
   } catch {
     return apiError(400, 'Invalid JSON', undefined, 'invalid_json')
   }
@@ -359,6 +373,14 @@ export async function POST(request: Request) {
     messages = [{ role: 'user', content: single }]
   }
 
+  // Client-supplied conversation id — joins multiple turns into one thread.
+  const sessionId =
+    typeof body.session_id === 'string' &&
+    body.session_id.length > 0 &&
+    body.session_id.length <= 64
+      ? body.session_id
+      : null
+
   const resolved = await loadModelAndKey(supabase, user.id)
   if ('error' in resolved) {
     return apiError(400, resolved.error, undefined, 'no_api_key')
@@ -375,17 +397,17 @@ export async function POST(request: Request) {
   const context = await loadContext(supabase, user.id, user.email ?? '', userMetaName)
   const systemPrompt = buildSystemPrompt(context)
 
-  // Fire-and-forget: log the chat query for the intelligence engine.
-  void trackChatQuery(user.id, {
-    last_message_chars: messages[messages.length - 1]!.content.length,
-    turn_count: messages.length,
-    model: resolved.model.id,
-  })
+  const lastUserMessage = messages[messages.length - 1]!.content
+  const turnCount = messages.length
+  const startedAt = Date.now()
+  const modelId = resolved.model.id
 
   const abortController = new AbortController()
   const encoder = new TextEncoder()
   const readable = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let responseText = ''
+      let errorMessage: string | null = null
       try {
         for await (const chunk of streamCompletion({
           apiKey: resolved.apiKey,
@@ -395,14 +417,27 @@ export async function POST(request: Request) {
           maxTokens: MAX_TOKENS,
           signal: abortController.signal,
         })) {
+          responseText += chunk
           controller.enqueue(encoder.encode(chunk))
         }
       } catch (err) {
         Sentry.captureException(err)
-        const msg = err instanceof Error ? err.message : 'Stream error'
-        controller.enqueue(encoder.encode(`\n\n[error: ${msg}]`))
+        errorMessage = err instanceof Error ? err.message : 'Stream error'
+        controller.enqueue(encoder.encode(`\n\n[error: ${errorMessage}]`))
       } finally {
         controller.close()
+        void trackChatQuery(user.id, {
+          session_id: sessionId,
+          query_text: capForLog(lastUserMessage, MAX_QUERY_LOG_CHARS),
+          query_chars: lastUserMessage.length,
+          response_text: capForLog(responseText, MAX_RESPONSE_LOG_CHARS),
+          response_chars: responseText.length,
+          turn_count: turnCount,
+          model: modelId,
+          latency_ms: Date.now() - startedAt,
+          error: errorMessage,
+          aborted: abortController.signal.aborted,
+        })
       }
     },
     cancel() {

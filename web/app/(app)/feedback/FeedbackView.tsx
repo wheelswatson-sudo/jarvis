@@ -27,7 +27,6 @@ type Props = {
   initialRows: FeedbackRow[]
 }
 
-const CATEGORIES: FeedbackRow['category'][] = ['bug', 'feature', 'improvement']
 const STATUSES: FeedbackRow['status'][] = [
   'open',
   'in-progress',
@@ -55,6 +54,21 @@ const CATEGORY_STYLE: Record<FeedbackRow['category'], string> = {
   improvement: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-200',
 }
 
+// Derive a list-view title from the body's first non-empty line, capped at
+// ~80 chars to keep the requests list scannable. Watson can re-title in admin
+// review.
+function deriveTitle(body: string): string {
+  const firstLine = body
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.length > 0)
+  if (!firstLine) return 'Untitled feedback'
+  if (firstLine.length <= 80) return firstLine
+  const cut = firstLine.slice(0, 80)
+  const lastSpace = cut.lastIndexOf(' ')
+  return (lastSpace > 40 ? cut.slice(0, lastSpace) : cut) + '…'
+}
+
 export function FeedbackView({
   currentUserId,
   currentUserEmail,
@@ -63,9 +77,7 @@ export function FeedbackView({
 }: Props) {
   const [rows, setRows] = useState<FeedbackRow[]>(initialRows)
   const [tab, setTab] = useState<'requests' | 'changelog'>('requests')
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [category, setCategory] = useState<FeedbackRow['category']>('feature')
+  const [body, setBody] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const track = useTrackEvent()
@@ -78,21 +90,24 @@ export function FeedbackView({
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!currentUserId) return
-    if (!title.trim() || !description.trim()) {
-      setSubmitError('Title and description are required.')
+    const trimmed = body.trim()
+    if (!trimmed) {
+      setSubmitError('Tell us what you were trying to do or what went wrong.')
       return
     }
+    const category: FeedbackRow['category'] = 'improvement'
+    const title = deriveTitle(trimmed)
     setSubmitError(null)
     setSubmitting(true)
-    track('feedback_submit', { category })
+    track('feedback_submit', { category, source: 'feedback_page' })
     const supabase = createClient()
     const { data, error } = await supabase
       .from('feedback')
       .insert({
         user_id: currentUserId,
         requester_email: currentUserEmail,
-        title: title.trim(),
-        description: description.trim(),
+        title,
+        description: trimmed,
         category,
       })
       .select(
@@ -105,9 +120,7 @@ export function FeedbackView({
       return
     }
     setRows((prev) => [data as FeedbackRow, ...prev])
-    setTitle('')
-    setDescription('')
-    setCategory('feature')
+    setBody('')
   }
 
   return (
@@ -119,79 +132,32 @@ export function FeedbackView({
       />
 
       <Card>
-        <h2 className="text-base font-medium text-zinc-100">Submit a request</h2>
+        <h2 className="text-base font-medium text-zinc-100">Send feedback</h2>
         <p className="mt-1 text-sm text-zinc-400">
-          Be specific about the problem and the outcome you want.
+          What were you trying to do? What worked, what didn&apos;t, what would
+          you change?
         </p>
-        <form onSubmit={onSubmit} className="mt-5 space-y-4">
-          <div>
-            <label
-              htmlFor="feedback-title"
-              className="block text-xs font-medium uppercase tracking-wider text-zinc-400"
-            >
-              Title
-            </label>
-            <input
-              id="feedback-title"
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              maxLength={200}
-              required
-              placeholder="One-line summary"
-              className="mt-1.5 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-500/20"
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="feedback-description"
-              className="block text-xs font-medium uppercase tracking-wider text-zinc-400"
-            >
-              Description
-            </label>
-            <textarea
-              id="feedback-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              required
-              rows={4}
-              placeholder="What were you trying to do? What happened? What did you expect?"
-              className="mt-1.5 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-500/20"
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="feedback-category"
-              className="block text-xs font-medium uppercase tracking-wider text-zinc-400"
-            >
-              Category
-            </label>
-            <select
-              id="feedback-category"
-              value={category}
-              onChange={(e) =>
-                setCategory(e.target.value as FeedbackRow['category'])
-              }
-              className="mt-1.5 w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-500/20"
-            >
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c} className="bg-[#0b0b12]">
-                  {c.charAt(0).toUpperCase() + c.slice(1)}
-                </option>
-              ))}
-            </select>
-          </div>
+        <form onSubmit={onSubmit} className="mt-4 space-y-3">
+          <textarea
+            id="feedback-body"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={5}
+            placeholder="Type whatever's on your mind — bug, idea, friction. One sentence is fine."
+            aria-label="Feedback"
+            className="w-full rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-400/40 focus:outline-none focus:ring-2 focus:ring-violet-500/20"
+          />
           {submitError && (
             <p className="text-sm text-rose-300">{submitError}</p>
           )}
           <div className="flex items-center justify-end">
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || !body.trim()}
               data-track-click="feedback_submit_button"
-              className="rounded-lg border border-violet-400/30 bg-gradient-to-r from-indigo-500/20 via-violet-500/20 to-fuchsia-500/20 px-4 py-2 text-sm font-medium text-violet-100 transition-colors hover:border-violet-400/50 hover:text-white disabled:opacity-50"
+              className="rounded-lg border border-violet-400/30 bg-gradient-to-r from-indigo-500/20 via-violet-500/20 to-fuchsia-500/20 px-4 py-2 text-sm font-medium text-violet-100 transition-colors hover:border-violet-400/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {submitting ? 'Submitting…' : 'Submit request'}
+              {submitting ? 'Sending…' : 'Send feedback'}
             </button>
           </div>
         </form>
