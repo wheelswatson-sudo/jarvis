@@ -9,6 +9,7 @@ import {
 } from '../../../components/cards'
 import { HelpDot } from '../../../components/Tooltip'
 import { Greeting } from '../../../components/Greeting'
+import { ForgottenLoops } from '../../../components/ForgottenLoops'
 import { IntelligencePanel } from '../../../components/IntelligencePanel'
 import { contactName, formatRelative } from '../../../lib/format'
 import { NETWORK_HEALTH_HELP } from '../../../lib/glossary'
@@ -19,6 +20,8 @@ import {
   type Briefing,
   type MatchedAttendee,
 } from '../../../lib/contacts/meeting-briefings'
+import { findForgottenLoops, type ForgottenLoop } from '../../../lib/intelligence/forgotten-loops'
+import { getServiceClient } from '../../../lib/supabase/service'
 
 export const dynamic = 'force-dynamic'
 
@@ -384,7 +387,8 @@ async function loadHomeData() {
     ((apolloRes.data as { access_token: string }).access_token.length ?? 0) > 0
 
   const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
-  const [activity, briefingsResult] = await Promise.all([
+  const service = getServiceClient()
+  const [activity, briefingsResult, forgottenLoops] = await Promise.all([
     userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
     userId
       ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
@@ -392,6 +396,12 @@ async function loadHomeData() {
           briefings: [] as Briefing[],
           calendarConnected: false,
         }),
+    userId && service
+      ? findForgottenLoops(service, userId).catch((err) => {
+          console.warn('[home] forgotten-loops failed', err)
+          return [] as ForgottenLoop[]
+        })
+      : Promise.resolve([] as ForgottenLoop[]),
   ])
   const nextMeeting = briefingsResult.briefings[0] ?? null
 
@@ -428,6 +438,7 @@ async function loadHomeData() {
     actions,
     activity,
     nextMeeting,
+    forgottenLoops,
   }
 }
 
@@ -441,6 +452,7 @@ export default async function HomePage() {
     actions,
     activity,
     nextMeeting,
+    forgottenLoops,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -526,6 +538,10 @@ export default async function HomePage() {
         <div className="animate-fade-up">
           <NextMeetingCard meeting={nextMeeting} />
         </div>
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && forgottenLoops.length > 0 && (
+        <ForgottenLoops loops={forgottenLoops} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && (
