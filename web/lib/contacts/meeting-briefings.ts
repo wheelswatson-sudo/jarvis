@@ -68,6 +68,19 @@ export type UnmatchedAttendee = {
 
 export type Attendee = MatchedAttendee | UnmatchedAttendee
 
+// LLM-generated narrative briefing, cached on the calendar_events row.
+// See lib/intelligence/generate-meeting-brief.ts. Optional — older events
+// or events with no matched contacts won't have one.
+export type AiBriefNarrative = {
+  context: string
+  why_now: string
+  open_with: string
+  watch: string[]
+  goal: string
+  model?: string | null
+  computed_at?: string
+}
+
 export type Briefing = {
   event_id: string
   title: string | null
@@ -81,6 +94,8 @@ export type Briefing = {
   // Composed talking points / things to remember. Deterministic — built
   // from open commitments, pipeline notes, and the most recent messages.
   talking_points: string[]
+  // LLM-generated narrative; null when the cron hasn't generated one yet.
+  ai_brief: AiBriefNarrative | null
 }
 
 export type BriefingsResult = {
@@ -105,6 +120,30 @@ function daysSince(iso: string | null): number | null {
   const t = new Date(iso).getTime()
   if (Number.isNaN(t)) return null
   return Math.floor((Date.now() - t) / DAY_MS)
+}
+
+// Parse the jsonb ai_brief column. Defensive — anything unexpected returns
+// null rather than rendering broken UI.
+function parseAiBrief(raw: unknown): AiBriefNarrative | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const context = typeof o.context === 'string' ? o.context : ''
+  const why_now = typeof o.why_now === 'string' ? o.why_now : ''
+  const open_with = typeof o.open_with === 'string' ? o.open_with : ''
+  const goal = typeof o.goal === 'string' ? o.goal : ''
+  const watch = Array.isArray(o.watch)
+    ? (o.watch as unknown[]).filter((s): s is string => typeof s === 'string')
+    : []
+  if (!context && !why_now && !open_with) return null
+  return {
+    context,
+    why_now,
+    open_with,
+    watch,
+    goal,
+    model: typeof o.model === 'string' ? o.model : null,
+    computed_at: typeof o.computed_at === 'string' ? o.computed_at : undefined,
+  }
 }
 
 function bucketHealth(
@@ -193,7 +232,7 @@ export async function loadBriefings(
   const eventsRes = await supabase
     .from('calendar_events')
     .select(
-      'id, title, description, start_at, end_at, location, conference_url, html_link, attendees',
+      'id, title, description, start_at, end_at, location, conference_url, html_link, attendees, ai_brief',
     )
     .eq('user_id', userId)
     .gte('start_at', now.toISOString())
@@ -216,6 +255,7 @@ export async function loadBriefings(
     conference_url: string | null
     html_link: string | null
     attendees: unknown
+    ai_brief: unknown
   }
   const events = (eventsRes.data ?? []) as EventRow[]
 
@@ -260,6 +300,7 @@ export async function loadBriefings(
         description: ev.description,
         attendees: [],
         talking_points: [],
+        ai_brief: parseAiBrief(ev.ai_brief),
       })),
       calendarConnected: true,
     }
@@ -414,6 +455,7 @@ export async function loadBriefings(
       description: ev.description,
       attendees,
       talking_points: composeTalkingPoints(matched),
+      ai_brief: parseAiBrief(ev.ai_brief),
     }
   })
 

@@ -9,6 +9,7 @@ import type {
   MatchedAttendee,
   UnmatchedAttendee,
 } from '../lib/contacts/meeting-briefings'
+import { AiBriefPanel } from './AiBriefPanel'
 
 const HEALTH_TONE: Record<MatchedAttendee['health'], string> = {
   strong: 'text-emerald-300 bg-emerald-500/10 ring-emerald-500/30',
@@ -77,6 +78,20 @@ export function MeetingBriefingCard({
           </a>
         )}
       </div>
+
+      {/* AI brief — the headline insight. Drafting placeholder appears
+          when the meeting has matched contacts but the cron hasn't yet
+          generated a brief. */}
+      {(briefing.ai_brief ||
+        briefing.attendees.some((a) => a.kind === 'matched')) && (
+        <div className="relative mt-4">
+          <AiBriefPanel
+            narrative={briefing.ai_brief}
+            variant={isDetail ? 'detail' : 'compact'}
+            meetingTitle={briefing.title ?? undefined}
+          />
+        </div>
+      )}
 
       {briefing.talking_points.length > 0 && (
         <div className="relative mt-4 rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-3">

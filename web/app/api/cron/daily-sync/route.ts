@@ -13,6 +13,7 @@ import { buildDailyBriefing } from '../../../../lib/intelligence/daily-briefing'
 import { computeUserProfile } from '../../../../lib/intelligence/compute-profiles'
 import { computeRelationshipEdges } from '../../../../lib/intelligence/compute-relationships'
 import { computeContactScores } from '../../../../lib/intelligence/compute-scores'
+import { refreshUpcomingMeetingBriefs } from '../../../../lib/intelligence/generate-meeting-brief'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -171,6 +172,31 @@ export async function GET(req: NextRequest) {
         })
       }
 
+      // AI meeting briefs — generate "the read" for upcoming meetings with
+      // matched contacts. Bounded internally (MAX_PER_RUN=8) so a packed
+      // calendar doesn't blow the cron budget.
+      let briefsSummary: {
+        considered: number
+        generated: number
+        skipped: number
+        errors: number
+      } = { considered: 0, generated: 0, skipped: 0, errors: 0 }
+      try {
+        const userName = u.account_email
+          ? u.account_email.split('@')[0] ?? 'me'
+          : 'me'
+        briefsSummary = await refreshUpcomingMeetingBriefs(
+          service,
+          u.user_id,
+          userName,
+        )
+      } catch (err) {
+        console.error('[cron daily-sync] refreshUpcomingMeetingBriefs failed', {
+          user_id: u.user_id,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+
       const briefing = await buildDailyBriefing(service, u.user_id)
       const { error: briefingErr } = await service
         .from('daily_briefings')
@@ -221,6 +247,7 @@ export async function GET(req: NextRequest) {
         profile: profileSummary,
         edges: edgesSummary,
         scores: scoresSummary,
+        meeting_briefs: briefsSummary,
         briefing: {
           briefing_date: briefing.payload.briefing_date,
           counts: briefing.payload.counts,
