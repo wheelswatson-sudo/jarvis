@@ -105,6 +105,26 @@ export type PersonalDetails = {
   schema_version?: number | null
 }
 
+export type DraftStatus = 'pending' | 'approved' | 'sent' | 'discarded'
+export type DraftTrigger = 'forgotten_loop' | 'manual' | 'auto'
+
+export type Draft = {
+  id: string
+  user_id: string
+  contact_id: string | null
+  message_id: string | null
+  trigger: DraftTrigger
+  subject: string | null
+  body: string
+  model: string | null
+  reasoning: string | null
+  status: DraftStatus
+  generated_at: string
+  reviewed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
 // Per-component breakdown of relationship_score. Every signal is optional
 // because the geometric-mean compute skips signals with no underlying data
 // (e.g. a contact with no commitments has no follow_through entry). UI

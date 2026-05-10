@@ -39,6 +39,10 @@ export type ForgottenLoop = {
   type: ForgottenLoopType
   contact_id: string
   contact_name: string
+  // The anchor message_id, when the loop is anchored to a message (unreplied
+  // or stalled). NULL for silent_overdue_commitment — those tie back to a
+  // commitment row, not a message.
+  message_id: string | null
   days: number
   severity: 'critical' | 'high' | 'medium'
   hint: string
@@ -158,6 +162,7 @@ export async function findForgottenLoops(
         type: 'unreplied_inbound',
         contact_id: contactId,
         contact_name: name,
+        message_id: latest.id,
         days: ageDays,
         severity: severityFromAgeAndScore(ageDays, contact.relationship_score),
         hint: `${name} wrote ${ageDays}d ago — no reply yet.`,
@@ -183,6 +188,7 @@ export async function findForgottenLoops(
         type: 'stalled_outbound',
         contact_id: contactId,
         contact_name: name,
+        message_id: latest.id,
         days: ageDays,
         severity: severityFromAgeAndScore(ageDays, contact.relationship_score),
         hint: `You wrote ${name} ${ageDays}d ago — no response.`,
@@ -223,6 +229,7 @@ export async function findForgottenLoops(
       type: 'silent_overdue_commitment',
       contact_id: c.contact_id,
       contact_name: name,
+      message_id: null,
       days: overdueDays,
       // Silent overdue commitments to high-value contacts are critical —
       // these are reputation hits in slow motion.
