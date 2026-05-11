@@ -10,6 +10,8 @@ import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
 import { RelationshipMomentum } from '../../../../components/RelationshipMomentum'
 import { loadContactMomentum } from '../../../../lib/intelligence/contact-momentum'
+import { ContactWeeklyDelta } from '../../../../components/ContactWeeklyDelta'
+import { loadContactWeeklyDelta } from '../../../../lib/intelligence/contact-weekly-delta'
 import { CadenceBadge } from '../../../../components/CadenceBadge'
 import { Card, SectionHeader } from '../../../../components/cards'
 import { TierSelector } from '../../../../components/ContactEditor'
@@ -99,6 +101,7 @@ export default async function ContactDetailPage({
     pastEventsRes,
     messagesRes,
     momentum,
+    weeklyDelta,
   ] = await Promise.all([
     supabase.from('contacts').select('*').eq('id', id).maybeSingle(),
     supabase
@@ -139,6 +142,9 @@ export default async function ContactDetailPage({
       .limit(20),
     user
       ? loadContactMomentum(supabase, user.id, id).catch(() => null)
+      : Promise.resolve(null),
+    user
+      ? loadContactWeeklyDelta(supabase, user.id, id).catch(() => null)
       : Promise.resolve(null),
   ])
 
@@ -373,6 +379,8 @@ export default async function ContactDetailPage({
           </Card>
 
           {momentum && <RelationshipMomentum momentum={momentum} />}
+
+          {weeklyDelta && <ContactWeeklyDelta delta={weeklyDelta} />}
 
           <MeetingPrepBrief contactId={contact.id} />
         </div>
