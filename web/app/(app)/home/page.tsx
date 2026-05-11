@@ -21,6 +21,51 @@ import {
   type MatchedAttendee,
 } from '../../../lib/contacts/meeting-briefings'
 import { findForgottenLoops, type ForgottenLoop } from '../../../lib/intelligence/forgotten-loops'
+import {
+  findSentimentShifts,
+  type SentimentShift,
+} from '../../../lib/intelligence/sentiment-shifts'
+import {
+  findUpcomingMilestones,
+  type UpcomingMilestone,
+} from '../../../lib/intelligence/milestone-radar'
+import {
+  findRecentLifeEvents,
+  type RecentLifeEvent,
+} from '../../../lib/intelligence/recent-life-events'
+import {
+  findOwedToYou,
+  type OwedToYou as OwedToYouItem,
+} from '../../../lib/intelligence/owed-to-you'
+import {
+  findReciprocityFlags,
+  type ReciprocityFlag,
+} from '../../../lib/intelligence/reciprocity-flags'
+import {
+  findTopicWatchHits,
+  type TopicWatchHit,
+} from '../../../lib/intelligence/topic-watch'
+import {
+  loadOutboundVelocity,
+  type OutboundVelocity as OutboundVelocityData,
+} from '../../../lib/intelligence/outbound-velocity'
+import {
+  findNewVoices,
+  type NewVoice,
+} from '../../../lib/intelligence/new-voices'
+import {
+  findConnectorSuggestions,
+  type ConnectorSuggestion,
+} from '../../../lib/intelligence/connector-suggestions'
+import { SentimentShifts } from '../../../components/SentimentShifts'
+import { MilestoneRadar } from '../../../components/MilestoneRadar'
+import { RecentLifeEvents } from '../../../components/RecentLifeEvents'
+import { OwedToYou } from '../../../components/OwedToYou'
+import { ReciprocityFlags } from '../../../components/ReciprocityFlags'
+import { TopicWatch } from '../../../components/TopicWatch'
+import { OutboundVelocity } from '../../../components/OutboundVelocity'
+import { NewVoices } from '../../../components/NewVoices'
+import { ConnectorSuggestions } from '../../../components/ConnectorSuggestions'
 import { getServiceClient } from '../../../lib/supabase/service'
 
 export const dynamic = 'force-dynamic'
@@ -388,7 +433,20 @@ async function loadHomeData() {
 
   const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
   const service = getServiceClient()
-  const [activity, briefingsResult, forgottenLoops] = await Promise.all([
+  const [
+    activity,
+    briefingsResult,
+    forgottenLoops,
+    sentimentShifts,
+    milestones,
+    recentLifeEvents,
+    owedToYou,
+    reciprocityFlags,
+    topicWatchHits,
+    outboundVelocity,
+    newVoices,
+    connectorSuggestions,
+  ] = await Promise.all([
     userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
     userId
       ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
@@ -402,6 +460,60 @@ async function loadHomeData() {
           return [] as ForgottenLoop[]
         })
       : Promise.resolve([] as ForgottenLoop[]),
+    userId && service
+      ? findSentimentShifts(service, userId).catch((err) => {
+          console.warn('[home] sentiment-shifts failed', err)
+          return [] as SentimentShift[]
+        })
+      : Promise.resolve([] as SentimentShift[]),
+    userId && service
+      ? findUpcomingMilestones(service, userId).catch((err) => {
+          console.warn('[home] milestone-radar failed', err)
+          return [] as UpcomingMilestone[]
+        })
+      : Promise.resolve([] as UpcomingMilestone[]),
+    userId && service
+      ? findRecentLifeEvents(service, userId).catch((err) => {
+          console.warn('[home] recent-life-events failed', err)
+          return [] as RecentLifeEvent[]
+        })
+      : Promise.resolve([] as RecentLifeEvent[]),
+    userId && service
+      ? findOwedToYou(service, userId).catch((err) => {
+          console.warn('[home] owed-to-you failed', err)
+          return [] as OwedToYouItem[]
+        })
+      : Promise.resolve([] as OwedToYouItem[]),
+    userId && service
+      ? findReciprocityFlags(service, userId).catch((err) => {
+          console.warn('[home] reciprocity-flags failed', err)
+          return [] as ReciprocityFlag[]
+        })
+      : Promise.resolve([] as ReciprocityFlag[]),
+    userId && service
+      ? findTopicWatchHits(service, userId).catch((err) => {
+          console.warn('[home] topic-watch failed', err)
+          return [] as TopicWatchHit[]
+        })
+      : Promise.resolve([] as TopicWatchHit[]),
+    userId && service
+      ? loadOutboundVelocity(service, userId).catch((err) => {
+          console.warn('[home] outbound-velocity failed', err)
+          return null
+        })
+      : Promise.resolve(null as OutboundVelocityData | null),
+    userId && service
+      ? findNewVoices(service, userId).catch((err) => {
+          console.warn('[home] new-voices failed', err)
+          return [] as NewVoice[]
+        })
+      : Promise.resolve([] as NewVoice[]),
+    userId && service
+      ? findConnectorSuggestions(service, userId).catch((err) => {
+          console.warn('[home] connector-suggestions failed', err)
+          return [] as ConnectorSuggestion[]
+        })
+      : Promise.resolve([] as ConnectorSuggestion[]),
   ])
   const nextMeeting = briefingsResult.briefings[0] ?? null
 
@@ -439,6 +551,15 @@ async function loadHomeData() {
     activity,
     nextMeeting,
     forgottenLoops,
+    sentimentShifts,
+    milestones,
+    recentLifeEvents,
+    owedToYou,
+    reciprocityFlags,
+    topicWatchHits,
+    outboundVelocity,
+    newVoices,
+    connectorSuggestions,
   }
 }
 
@@ -453,6 +574,15 @@ export default async function HomePage() {
     activity,
     nextMeeting,
     forgottenLoops,
+    sentimentShifts,
+    milestones,
+    recentLifeEvents,
+    owedToYou,
+    reciprocityFlags,
+    topicWatchHits,
+    outboundVelocity,
+    newVoices,
+    connectorSuggestions,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -540,8 +670,48 @@ export default async function HomePage() {
         </div>
       )}
 
+      {!isFirstRun && contactsTotal > 0 && newVoices.length > 0 && (
+        <NewVoices voices={newVoices} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && recentLifeEvents.length > 0 && (
+        <RecentLifeEvents events={recentLifeEvents} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && milestones.length > 0 && (
+        <MilestoneRadar milestones={milestones} />
+      )}
+
+      {!isFirstRun &&
+        contactsTotal > 0 &&
+        connectorSuggestions.length > 0 && (
+          <ConnectorSuggestions suggestions={connectorSuggestions} />
+        )}
+
+      {!isFirstRun && contactsTotal > 0 && topicWatchHits.length > 0 && (
+        <TopicWatch hits={topicWatchHits} />
+      )}
+
       {!isFirstRun && contactsTotal > 0 && forgottenLoops.length > 0 && (
         <ForgottenLoops loops={forgottenLoops} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && owedToYou.length > 0 && (
+        <OwedToYou items={owedToYou} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && reciprocityFlags.length > 0 && (
+        <ReciprocityFlags flags={reciprocityFlags} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && sentimentShifts.length > 0 && (
+        <SentimentShifts shifts={sentimentShifts} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && outboundVelocity && (
+        <section className="animate-fade-up">
+          <OutboundVelocity velocity={outboundVelocity} />
+        </section>
       )}
 
       {!isFirstRun && contactsTotal > 0 && (
