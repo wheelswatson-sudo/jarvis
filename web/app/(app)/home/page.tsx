@@ -21,6 +21,11 @@ import {
   type MatchedAttendee,
 } from '../../../lib/contacts/meeting-briefings'
 import { findForgottenLoops, type ForgottenLoop } from '../../../lib/intelligence/forgotten-loops'
+import {
+  findSentimentShifts,
+  type SentimentShift,
+} from '../../../lib/intelligence/sentiment-shifts'
+import { SentimentShifts } from '../../../components/SentimentShifts'
 import { getServiceClient } from '../../../lib/supabase/service'
 
 export const dynamic = 'force-dynamic'
@@ -388,21 +393,28 @@ async function loadHomeData() {
 
   const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
   const service = getServiceClient()
-  const [activity, briefingsResult, forgottenLoops] = await Promise.all([
-    userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
-    userId
-      ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
-      : Promise.resolve({
-          briefings: [] as Briefing[],
-          calendarConnected: false,
-        }),
-    userId && service
-      ? findForgottenLoops(service, userId).catch((err) => {
-          console.warn('[home] forgotten-loops failed', err)
-          return [] as ForgottenLoop[]
-        })
-      : Promise.resolve([] as ForgottenLoop[]),
-  ])
+  const [activity, briefingsResult, forgottenLoops, sentimentShifts] =
+    await Promise.all([
+      userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
+      userId
+        ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
+        : Promise.resolve({
+            briefings: [] as Briefing[],
+            calendarConnected: false,
+          }),
+      userId && service
+        ? findForgottenLoops(service, userId).catch((err) => {
+            console.warn('[home] forgotten-loops failed', err)
+            return [] as ForgottenLoop[]
+          })
+        : Promise.resolve([] as ForgottenLoop[]),
+      userId && service
+        ? findSentimentShifts(service, userId).catch((err) => {
+            console.warn('[home] sentiment-shifts failed', err)
+            return [] as SentimentShift[]
+          })
+        : Promise.resolve([] as SentimentShift[]),
+    ])
   const nextMeeting = briefingsResult.briefings[0] ?? null
 
   const total = contacts.length
@@ -439,6 +451,7 @@ async function loadHomeData() {
     activity,
     nextMeeting,
     forgottenLoops,
+    sentimentShifts,
   }
 }
 
@@ -453,6 +466,7 @@ export default async function HomePage() {
     activity,
     nextMeeting,
     forgottenLoops,
+    sentimentShifts,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -542,6 +556,10 @@ export default async function HomePage() {
 
       {!isFirstRun && contactsTotal > 0 && forgottenLoops.length > 0 && (
         <ForgottenLoops loops={forgottenLoops} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && sentimentShifts.length > 0 && (
+        <SentimentShifts shifts={sentimentShifts} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && (

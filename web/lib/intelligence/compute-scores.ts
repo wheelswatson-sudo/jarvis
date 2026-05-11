@@ -35,8 +35,11 @@ const FREQUENCY_WINDOW_DAYS = 30
 export type ScoreSummary = {
   scored: number
   tier_distribution: { T1: number; T2: number; T3: number; T4: number }
+  snapshots_inserted: number
   duration_ms: number
 }
+
+const SNAPSHOT_BATCH_SIZE = 500
 
 type ContactRow = {
   id: string
@@ -168,9 +171,43 @@ export async function computeContactScores(
     }
   }
 
+  // Append-only snapshot history. Written AFTER the contacts.update pass so
+  // a snapshot row only exists for contacts whose denormalized "latest"
+  // also reflects this compute. Failure here doesn't roll back the scores
+  // (delta detection degrades gracefully if a snapshot is missing) but we
+  // log so cron observability catches systemic write failures.
+  let snapshotsInserted = 0
+  const snapshotRows = plans.map((p) => ({
+    user_id: userId,
+    contact_id: p.id,
+    composite: p.relationship_score,
+    recency: p.components.recency ?? null,
+    frequency: p.components.frequency ?? null,
+    sentiment: p.components.sentiment ?? null,
+    follow_through: p.components.follow_through ?? null,
+    computed_at: computedAt,
+  }))
+  for (let i = 0; i < snapshotRows.length; i += SNAPSHOT_BATCH_SIZE) {
+    const batch = snapshotRows.slice(i, i + SNAPSHOT_BATCH_SIZE)
+    const { error } = await service
+      .from('relationship_score_snapshots')
+      .insert(batch)
+    if (error) {
+      console.warn('[compute-scores] snapshot insert failed', {
+        user_id: userId,
+        batch_start: i,
+        batch_size: batch.length,
+        message: error.message,
+      })
+      continue
+    }
+    snapshotsInserted += batch.length
+  }
+
   return {
     scored: scoredCount,
     tier_distribution: distribution,
+    snapshots_inserted: snapshotsInserted,
     duration_ms: Math.round(performance.now() - started),
   }
 }
