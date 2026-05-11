@@ -37,10 +37,20 @@ import {
   findOwedToYou,
   type OwedToYou as OwedToYouItem,
 } from '../../../lib/intelligence/owed-to-you'
+import {
+  findReciprocityFlags,
+  type ReciprocityFlag,
+} from '../../../lib/intelligence/reciprocity-flags'
+import {
+  findTopicWatchHits,
+  type TopicWatchHit,
+} from '../../../lib/intelligence/topic-watch'
 import { SentimentShifts } from '../../../components/SentimentShifts'
 import { MilestoneRadar } from '../../../components/MilestoneRadar'
 import { RecentLifeEvents } from '../../../components/RecentLifeEvents'
 import { OwedToYou } from '../../../components/OwedToYou'
+import { ReciprocityFlags } from '../../../components/ReciprocityFlags'
+import { TopicWatch } from '../../../components/TopicWatch'
 import { getServiceClient } from '../../../lib/supabase/service'
 
 export const dynamic = 'force-dynamic'
@@ -416,6 +426,8 @@ async function loadHomeData() {
     milestones,
     recentLifeEvents,
     owedToYou,
+    reciprocityFlags,
+    topicWatchHits,
   ] = await Promise.all([
     userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
     userId
@@ -454,6 +466,18 @@ async function loadHomeData() {
           return [] as OwedToYouItem[]
         })
       : Promise.resolve([] as OwedToYouItem[]),
+    userId && service
+      ? findReciprocityFlags(service, userId).catch((err) => {
+          console.warn('[home] reciprocity-flags failed', err)
+          return [] as ReciprocityFlag[]
+        })
+      : Promise.resolve([] as ReciprocityFlag[]),
+    userId && service
+      ? findTopicWatchHits(service, userId).catch((err) => {
+          console.warn('[home] topic-watch failed', err)
+          return [] as TopicWatchHit[]
+        })
+      : Promise.resolve([] as TopicWatchHit[]),
   ])
   const nextMeeting = briefingsResult.briefings[0] ?? null
 
@@ -495,6 +519,8 @@ async function loadHomeData() {
     milestones,
     recentLifeEvents,
     owedToYou,
+    reciprocityFlags,
+    topicWatchHits,
   }
 }
 
@@ -513,6 +539,8 @@ export default async function HomePage() {
     milestones,
     recentLifeEvents,
     owedToYou,
+    reciprocityFlags,
+    topicWatchHits,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -608,12 +636,20 @@ export default async function HomePage() {
         <MilestoneRadar milestones={milestones} />
       )}
 
+      {!isFirstRun && contactsTotal > 0 && topicWatchHits.length > 0 && (
+        <TopicWatch hits={topicWatchHits} />
+      )}
+
       {!isFirstRun && contactsTotal > 0 && forgottenLoops.length > 0 && (
         <ForgottenLoops loops={forgottenLoops} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && owedToYou.length > 0 && (
         <OwedToYou items={owedToYou} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && reciprocityFlags.length > 0 && (
+        <ReciprocityFlags flags={reciprocityFlags} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && sentimentShifts.length > 0 && (
