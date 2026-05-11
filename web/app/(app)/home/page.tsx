@@ -29,8 +29,18 @@ import {
   findUpcomingMilestones,
   type UpcomingMilestone,
 } from '../../../lib/intelligence/milestone-radar'
+import {
+  findRecentLifeEvents,
+  type RecentLifeEvent,
+} from '../../../lib/intelligence/recent-life-events'
+import {
+  findOwedToYou,
+  type OwedToYou as OwedToYouItem,
+} from '../../../lib/intelligence/owed-to-you'
 import { SentimentShifts } from '../../../components/SentimentShifts'
 import { MilestoneRadar } from '../../../components/MilestoneRadar'
+import { RecentLifeEvents } from '../../../components/RecentLifeEvents'
+import { OwedToYou } from '../../../components/OwedToYou'
 import { getServiceClient } from '../../../lib/supabase/service'
 
 export const dynamic = 'force-dynamic'
@@ -398,34 +408,53 @@ async function loadHomeData() {
 
   const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
   const service = getServiceClient()
-  const [activity, briefingsResult, forgottenLoops, sentimentShifts, milestones] =
-    await Promise.all([
-      userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
-      userId
-        ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
-        : Promise.resolve({
-            briefings: [] as Briefing[],
-            calendarConnected: false,
-          }),
-      userId && service
-        ? findForgottenLoops(service, userId).catch((err) => {
-            console.warn('[home] forgotten-loops failed', err)
-            return [] as ForgottenLoop[]
-          })
-        : Promise.resolve([] as ForgottenLoop[]),
-      userId && service
-        ? findSentimentShifts(service, userId).catch((err) => {
-            console.warn('[home] sentiment-shifts failed', err)
-            return [] as SentimentShift[]
-          })
-        : Promise.resolve([] as SentimentShift[]),
-      userId && service
-        ? findUpcomingMilestones(service, userId).catch((err) => {
-            console.warn('[home] milestone-radar failed', err)
-            return [] as UpcomingMilestone[]
-          })
-        : Promise.resolve([] as UpcomingMilestone[]),
-    ])
+  const [
+    activity,
+    briefingsResult,
+    forgottenLoops,
+    sentimentShifts,
+    milestones,
+    recentLifeEvents,
+    owedToYou,
+  ] = await Promise.all([
+    userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
+    userId
+      ? loadBriefings(supabase, userId, { windowHours: 48, limit: 1 })
+      : Promise.resolve({
+          briefings: [] as Briefing[],
+          calendarConnected: false,
+        }),
+    userId && service
+      ? findForgottenLoops(service, userId).catch((err) => {
+          console.warn('[home] forgotten-loops failed', err)
+          return [] as ForgottenLoop[]
+        })
+      : Promise.resolve([] as ForgottenLoop[]),
+    userId && service
+      ? findSentimentShifts(service, userId).catch((err) => {
+          console.warn('[home] sentiment-shifts failed', err)
+          return [] as SentimentShift[]
+        })
+      : Promise.resolve([] as SentimentShift[]),
+    userId && service
+      ? findUpcomingMilestones(service, userId).catch((err) => {
+          console.warn('[home] milestone-radar failed', err)
+          return [] as UpcomingMilestone[]
+        })
+      : Promise.resolve([] as UpcomingMilestone[]),
+    userId && service
+      ? findRecentLifeEvents(service, userId).catch((err) => {
+          console.warn('[home] recent-life-events failed', err)
+          return [] as RecentLifeEvent[]
+        })
+      : Promise.resolve([] as RecentLifeEvent[]),
+    userId && service
+      ? findOwedToYou(service, userId).catch((err) => {
+          console.warn('[home] owed-to-you failed', err)
+          return [] as OwedToYouItem[]
+        })
+      : Promise.resolve([] as OwedToYouItem[]),
+  ])
   const nextMeeting = briefingsResult.briefings[0] ?? null
 
   const total = contacts.length
@@ -464,6 +493,8 @@ async function loadHomeData() {
     forgottenLoops,
     sentimentShifts,
     milestones,
+    recentLifeEvents,
+    owedToYou,
   }
 }
 
@@ -480,6 +511,8 @@ export default async function HomePage() {
     forgottenLoops,
     sentimentShifts,
     milestones,
+    recentLifeEvents,
+    owedToYou,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -567,12 +600,20 @@ export default async function HomePage() {
         </div>
       )}
 
+      {!isFirstRun && contactsTotal > 0 && recentLifeEvents.length > 0 && (
+        <RecentLifeEvents events={recentLifeEvents} />
+      )}
+
       {!isFirstRun && contactsTotal > 0 && milestones.length > 0 && (
         <MilestoneRadar milestones={milestones} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && forgottenLoops.length > 0 && (
         <ForgottenLoops loops={forgottenLoops} />
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && owedToYou.length > 0 && (
+        <OwedToYou items={owedToYou} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && sentimentShifts.length > 0 && (
