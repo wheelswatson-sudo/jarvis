@@ -141,6 +141,46 @@ export function ExecutiveDigestView({ digest }: { digest: DigestViewModel }) {
         </section>
       )}
 
+      {p.milestones && p.milestones.length > 0 && (
+        <section className="animate-fade-up">
+          <SectionHeader
+            eyebrow="Radar"
+            title="Milestones coming up"
+            subtitle="Birthdays and key milestones in the next two weeks."
+          />
+          <Card>
+            <ul className="divide-y divide-white/[0.04]">
+              {p.milestones.map((m, i) => (
+                <li key={i} className="py-3">
+                  <Link
+                    href={`/contacts/${m.contact_id}`}
+                    className="block transition-colors hover:text-violet-200"
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <span className="text-sm text-zinc-100">
+                          {m.contact_name}
+                        </span>
+                        <span className="ml-2 text-xs text-zinc-500">
+                          — {m.kind === 'birthday' ? 'birthday' : m.label}
+                        </span>
+                      </div>
+                      <span className="shrink-0 text-xs tabular-nums text-zinc-500">
+                        {m.days_until === 0
+                          ? 'today'
+                          : m.days_until === 1
+                            ? 'tomorrow'
+                            : `${m.days_until}d`}
+                      </span>
+                    </div>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </section>
+      )}
+
       <section className="animate-fade-up">
         <SectionHeader
           eyebrow="Copy out"

@@ -99,8 +99,26 @@ const PAYLOAD: ExecutiveDigestPayload = {
       due_at: '2026-05-16T18:00:00Z',
     },
   ],
+  milestones: [
+    {
+      contact_id: 'c-kris',
+      contact_name: 'Kris Cravens',
+      kind: 'birthday',
+      label: 'Birthday',
+      days_until: 0,
+      next_date: '2026-05-11',
+    },
+    {
+      contact_id: 'c-sarah',
+      contact_name: 'Sarah Chen',
+      kind: 'milestone',
+      label: 'Work anniversary at Stripe',
+      days_until: 3,
+      next_date: '2026-05-14',
+    },
+  ],
   narrative:
-    "Mark Jensen is the highest-risk relationship on the board — the Q3 deck has been overdue 22 days and his sentiment has dropped 31 points in two weeks. Get that out Monday morning, even in draft form, before another email goes unanswered. The Kris and Jamie warming trend is real and worth feeding; one substantive message each next week locks it in.",
+    "Mark Jensen is the highest-risk relationship on the board — the Q3 deck has been overdue 22 days and his sentiment has dropped 31 points in two weeks. Get that out Monday morning, even in draft form, before another email goes unanswered. The Kris and Jamie warming trend is real and worth feeding; one substantive message each next week locks it in. Kris's birthday is today — a single warm message before noon costs nothing and compounds.",
   model: 'claude-sonnet-4-6',
 }
 

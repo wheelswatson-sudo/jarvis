@@ -24,6 +24,10 @@ import {
 } from '../providers'
 import { findForgottenLoops } from './forgotten-loops'
 import { findSentimentShifts } from './sentiment-shifts'
+import {
+  findUpcomingMilestones,
+  type UpcomingMilestone,
+} from './milestone-radar'
 
 const DEFAULT_MODEL_ID = 'claude-sonnet-4-6'
 const FALLBACK_MODEL_ID = 'groq-llama-4-scout'
@@ -68,6 +72,15 @@ export type DueCommitmentSummary = {
   due_at: string
 }
 
+export type DigestMilestone = {
+  contact_id: string
+  contact_name: string
+  kind: 'birthday' | 'milestone'
+  label: string
+  days_until: number
+  next_date: string
+}
+
 export type ExecutiveDigestPayload = {
   user_id: string
   week_starting: string // ISO date (Monday)
@@ -78,6 +91,9 @@ export type ExecutiveDigestPayload = {
   cooling: RelationshipMove[]
   open_loops: OpenLoopSummary[]
   due_next_week: DueCommitmentSummary[]
+  // Optional — older rows persisted before migration 024+milestones may
+  // not have it. Readers must tolerate undefined.
+  milestones?: DigestMilestone[]
   narrative: string
   model: string | null
 }
@@ -112,6 +128,7 @@ export async function buildExecutiveDigest(
     nextWeekCommitmentsRes,
     forgottenLoops,
     sentimentShifts,
+    upcomingMilestones,
   ] = await Promise.all([
     service
       .from('messages')
@@ -151,6 +168,11 @@ export async function buildExecutiveDigest(
       .limit(50),
     findForgottenLoops(service, userId).catch(() => []),
     findSentimentShifts(service, userId).catch(() => []),
+    // Look forward 14 days from now — that's "next week" in the digest's
+    // mental model. The /home radar uses the same default.
+    findUpcomingMilestones(service, userId, { lookaheadDays: 14, now }).catch(
+      () => [] as UpcomingMilestone[],
+    ),
   ])
 
   type MessageRow = {
@@ -271,6 +293,17 @@ export async function buildExecutiveDigest(
       due_at: c.due_at ?? '',
     }))
 
+  const milestones: DigestMilestone[] = upcomingMilestones
+    .slice(0, MAX_DIGEST_ITEMS)
+    .map((m) => ({
+      contact_id: m.contact_id,
+      contact_name: m.contact_name,
+      kind: m.kind,
+      label: m.label,
+      days_until: m.days_until,
+      next_date: m.next_date,
+    }))
+
   // ---------------- LLM narrative ----------------
   const narrativeResult = await synthesizeNarrative({
     userName,
@@ -279,6 +312,7 @@ export async function buildExecutiveDigest(
     cooling: cooling.slice(0, 3),
     openLoops: openLoops.slice(0, 3),
     dueNextWeek: dueNextWeek.slice(0, 3),
+    milestones: milestones.slice(0, 3),
   })
 
   const payload: ExecutiveDigestPayload = {
@@ -291,6 +325,7 @@ export async function buildExecutiveDigest(
     cooling: cooling.slice(0, 3),
     open_loops: openLoops,
     due_next_week: dueNextWeek,
+    milestones,
     narrative: narrativeResult.text,
     model: narrativeResult.model,
   }
@@ -312,6 +347,7 @@ type NarrativeInput = {
   cooling: RelationshipMove[]
   openLoops: OpenLoopSummary[]
   dueNextWeek: DueCommitmentSummary[]
+  milestones: DigestMilestone[]
 }
 
 async function synthesizeNarrative(
@@ -379,6 +415,17 @@ Commitments due next week: ${
           .map(
             (d) =>
               `${d.description}${d.contact_name ? ` (${d.contact_name})` : ''}`,
+          )
+          .join('; ') + '.'
+  }
+
+Upcoming milestones (next 14 days): ${
+    input.milestones.length === 0
+      ? 'none.'
+      : input.milestones
+          .map(
+            (m) =>
+              `${m.contact_name} — ${m.kind === 'birthday' ? 'birthday' : m.label}${m.days_until === 0 ? ' today' : m.days_until === 1 ? ' tomorrow' : ` in ${m.days_until}d`}`,
           )
           .join('; ') + '.'
   }
@@ -493,6 +540,20 @@ function renderMarkdown(
         ? ` — due ${new Date(d.due_at).toLocaleDateString()}`
         : ''
       lines.push(`- ${d.description}${who}${when}`)
+    }
+  }
+  if (payload.milestones && payload.milestones.length > 0) {
+    lines.push('')
+    lines.push('## On the radar')
+    for (const m of payload.milestones) {
+      const when =
+        m.days_until === 0
+          ? 'today'
+          : m.days_until === 1
+            ? 'tomorrow'
+            : `in ${m.days_until}d`
+      const label = m.kind === 'birthday' ? 'birthday' : m.label
+      lines.push(`- ${m.contact_name} — ${label} (${when})`)
     }
   }
   return lines.join('\n')

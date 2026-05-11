@@ -25,7 +25,12 @@ import {
   findSentimentShifts,
   type SentimentShift,
 } from '../../../lib/intelligence/sentiment-shifts'
+import {
+  findUpcomingMilestones,
+  type UpcomingMilestone,
+} from '../../../lib/intelligence/milestone-radar'
 import { SentimentShifts } from '../../../components/SentimentShifts'
+import { MilestoneRadar } from '../../../components/MilestoneRadar'
 import { getServiceClient } from '../../../lib/supabase/service'
 
 export const dynamic = 'force-dynamic'
@@ -393,7 +398,7 @@ async function loadHomeData() {
 
   const nameById = new Map(contacts.map((c) => [c.id, contactName(c)]))
   const service = getServiceClient()
-  const [activity, briefingsResult, forgottenLoops, sentimentShifts] =
+  const [activity, briefingsResult, forgottenLoops, sentimentShifts, milestones] =
     await Promise.all([
       userId ? loadActivity(supabase, userId, nameById) : Promise.resolve([]),
       userId
@@ -414,6 +419,12 @@ async function loadHomeData() {
             return [] as SentimentShift[]
           })
         : Promise.resolve([] as SentimentShift[]),
+      userId && service
+        ? findUpcomingMilestones(service, userId).catch((err) => {
+            console.warn('[home] milestone-radar failed', err)
+            return [] as UpcomingMilestone[]
+          })
+        : Promise.resolve([] as UpcomingMilestone[]),
     ])
   const nextMeeting = briefingsResult.briefings[0] ?? null
 
@@ -452,6 +463,7 @@ async function loadHomeData() {
     nextMeeting,
     forgottenLoops,
     sentimentShifts,
+    milestones,
   }
 }
 
@@ -467,6 +479,7 @@ export default async function HomePage() {
     nextMeeting,
     forgottenLoops,
     sentimentShifts,
+    milestones,
   } = await loadHomeData()
 
   const isFirstRun = contactsTotal === 0 && !googleConnected
@@ -552,6 +565,10 @@ export default async function HomePage() {
         <div className="animate-fade-up">
           <NextMeetingCard meeting={nextMeeting} />
         </div>
+      )}
+
+      {!isFirstRun && contactsTotal > 0 && milestones.length > 0 && (
+        <MilestoneRadar milestones={milestones} />
       )}
 
       {!isFirstRun && contactsTotal > 0 && forgottenLoops.length > 0 && (
