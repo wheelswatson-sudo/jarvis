@@ -26,8 +26,23 @@ import {
 const DEFAULT_MODEL_ID = 'claude-sonnet-4-6'
 const FALLBACK_MODEL_ID = 'groq-llama-4-scout'
 const RECENT_THREAD_MSGS = 5
-const USER_STYLE_SAMPLE = 5
+// Per-recipient style anchor — how many past outbound messages to this
+// SPECIFIC contact we read for register calibration. We over-fetch a few
+// (8 vs 5) so the register signal is statistically stable when present.
+const RECIPIENT_STYLE_SAMPLE = 8
+// General-network style anchor — used for cold-start when recipient
+// history is thin. Same 5 as before.
+const GENERAL_STYLE_SAMPLE = 5
+// Strategy thresholds. Below MIN_RECIPIENT_SAMPLES we BLEND
+// recipient + general; above MIN_RECIPIENT_ONLY we drop the general
+// noise entirely and anchor on per-recipient samples only.
+const MIN_RECIPIENT_SAMPLES = 1
+const MIN_RECIPIENT_ONLY = 3
 const MAX_BODY_CHARS = 16000
+
+// Style-anchor strategy actually used for a draft. Exported so callers and
+// downstream surfaces (drafts review UI, telemetry) can show it.
+export type DraftStyleAnchor = 'recipient_only' | 'recipient_blend' | 'general'
 
 export type DraftReplyInput = {
   service: SupabaseClient
@@ -47,6 +62,11 @@ export type DraftReplyOutput = {
   body: string
   reasoning: string | null
   model: ModelInfo
+  // How the model was style-anchored for this draft. Surfaces to the
+  // review UI so the user knows whether the draft was tuned to THEM
+  // specifically or to general voice.
+  style_anchor: DraftStyleAnchor
+  style_sample_count: number
 }
 
 type MessageRow = {
@@ -79,42 +99,56 @@ export async function generateDraftReply(
 ): Promise<DraftReplyOutput> {
   const { service, userId, userName, userEmail, messageId, contactId } = input
 
-  const [anchorRes, contactRes, threadRes, sentRes] = await Promise.all([
-    service
-      .from('messages')
-      .select(
-        'id, contact_id, direction, sender, recipient, subject, snippet, body, sent_at, thread_id',
-      )
-      .eq('id', messageId)
-      .eq('user_id', userId)
-      .maybeSingle(),
-    service
-      .from('contacts')
-      .select(
-        'id, first_name, last_name, email, company, title, tier, relationship_score, last_interaction_at',
-      )
-      .eq('id', contactId)
-      .eq('user_id', userId)
-      .maybeSingle(),
-    // Last few messages with this contact for thread context.
-    service
-      .from('messages')
-      .select(
-        'id, direction, sender, recipient, subject, snippet, body, sent_at',
-      )
-      .eq('user_id', userId)
-      .eq('contact_id', contactId)
-      .order('sent_at', { ascending: false })
-      .limit(RECENT_THREAD_MSGS),
-    // User's recent outbound to ANY contact for tone calibration.
-    service
-      .from('messages')
-      .select('sender, recipient, subject, snippet, body, sent_at')
-      .eq('user_id', userId)
-      .eq('direction', 'outbound')
-      .order('sent_at', { ascending: false })
-      .limit(USER_STYLE_SAMPLE),
-  ])
+  const [anchorRes, contactRes, threadRes, recipientStyleRes, generalStyleRes] =
+    await Promise.all([
+      service
+        .from('messages')
+        .select(
+          'id, contact_id, direction, sender, recipient, subject, snippet, body, sent_at, thread_id',
+        )
+        .eq('id', messageId)
+        .eq('user_id', userId)
+        .maybeSingle(),
+      service
+        .from('contacts')
+        .select(
+          'id, first_name, last_name, email, company, title, tier, relationship_score, last_interaction_at',
+        )
+        .eq('id', contactId)
+        .eq('user_id', userId)
+        .maybeSingle(),
+      // Last few messages with this contact for thread context.
+      service
+        .from('messages')
+        .select(
+          'id, direction, sender, recipient, subject, snippet, body, sent_at',
+        )
+        .eq('user_id', userId)
+        .eq('contact_id', contactId)
+        .order('sent_at', { ascending: false })
+        .limit(RECENT_THREAD_MSGS),
+      // User's outbound to THIS contact — primary register signal. When
+      // we have enough of these we anchor entirely on them, since people
+      // talk to different people differently and a Watson-to-investor
+      // tone is materially different from a Watson-to-Kris tone.
+      service
+        .from('messages')
+        .select('sender, recipient, subject, snippet, body, sent_at')
+        .eq('user_id', userId)
+        .eq('contact_id', contactId)
+        .eq('direction', 'outbound')
+        .order('sent_at', { ascending: false })
+        .limit(RECIPIENT_STYLE_SAMPLE),
+      // User's recent outbound to ANY contact — cold-start fallback when
+      // recipient history is thin. Still useful when blending.
+      service
+        .from('messages')
+        .select('sender, recipient, subject, snippet, body, sent_at')
+        .eq('user_id', userId)
+        .eq('direction', 'outbound')
+        .order('sent_at', { ascending: false })
+        .limit(GENERAL_STYLE_SAMPLE),
+    ])
 
   const anchor = anchorRes.data as MessageRow | null
   if (!anchor) throw new Error('anchor message not found')
@@ -122,10 +156,16 @@ export async function generateDraftReply(
   if (!contact) throw new Error('contact not found')
 
   const threadMsgs = (threadRes.data ?? []) as MessageRow[]
-  const sentMsgs = (sentRes.data ?? []) as Pick<
+  type StyleSample = Pick<
     MessageRow,
     'sender' | 'recipient' | 'subject' | 'snippet' | 'body' | 'sent_at'
-  >[]
+  >
+  const recipientSamples = (recipientStyleRes.data ?? []) as StyleSample[]
+  const generalSamples = (generalStyleRes.data ?? []) as StyleSample[]
+  const { anchor: styleAnchor, samples: styleSamples } = pickStyleAnchor(
+    recipientSamples,
+    generalSamples,
+  )
 
   const model = await pickModel(input.modelId)
   const apiKey = getProviderEnvKey(model.model.provider)
@@ -133,7 +173,13 @@ export async function generateDraftReply(
     throw new Error(`No API key configured for provider ${model.model.provider}`)
   }
 
-  const system = buildSystemPrompt(userName, userEmail, contact, sentMsgs)
+  const system = buildSystemPrompt(
+    userName,
+    userEmail,
+    contact,
+    styleSamples,
+    styleAnchor,
+  )
   const user = buildUserPrompt(anchor, threadMsgs)
 
   const messages: ChatMessage[] = [{ role: 'user', content: user }]
@@ -152,9 +198,67 @@ export async function generateDraftReply(
   return {
     subject: parsed.subject,
     body: parsed.body.slice(0, MAX_BODY_CHARS),
-    reasoning: parsed.reasoning,
+    reasoning: annotateReasoning(parsed.reasoning, styleAnchor, styleSamples.length),
     model: model.model,
+    style_anchor: styleAnchor,
+    style_sample_count: styleSamples.length,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Style anchor selection — picks WHICH samples to feed the model, based on
+// how much prior recipient-specific history we have. Exported for testing.
+// ---------------------------------------------------------------------------
+
+export function pickStyleAnchor<
+  T extends Pick<
+    MessageRow,
+    'sender' | 'recipient' | 'subject' | 'snippet' | 'body' | 'sent_at'
+  >,
+>(
+  recipientSamples: T[],
+  generalSamples: T[],
+): { anchor: DraftStyleAnchor; samples: T[] } {
+  const r = recipientSamples.length
+  if (r >= MIN_RECIPIENT_ONLY) {
+    return { anchor: 'recipient_only', samples: recipientSamples }
+  }
+  if (r >= MIN_RECIPIENT_SAMPLES) {
+    // Blend: recipient-specific first (model leans on freshest signal),
+    // then general samples to fill out the picture. Dedupe in case a
+    // general sample happens to be one of the recipient ones.
+    const seen = new Set<string>(
+      recipientSamples.map(
+        (m) => `${m.sent_at}|${(m.subject ?? '').slice(0, 50)}`,
+      ),
+    )
+    const blended: T[] = [...recipientSamples]
+    for (const m of generalSamples) {
+      const key = `${m.sent_at}|${(m.subject ?? '').slice(0, 50)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      blended.push(m)
+    }
+    return { anchor: 'recipient_blend', samples: blended }
+  }
+  return { anchor: 'general', samples: generalSamples }
+}
+
+function annotateReasoning(
+  modelReasoning: string | null,
+  anchor: DraftStyleAnchor,
+  sampleCount: number,
+): string | null {
+  // Keep model's framing reasoning first if present, then append a short
+  // provenance note for the user. Pure data — no editorialising.
+  const provenance =
+    anchor === 'recipient_only'
+      ? `Anchored on ${sampleCount} past email${sampleCount === 1 ? '' : 's'} you sent to this contact.`
+      : anchor === 'recipient_blend'
+        ? `Blended anchor — ${sampleCount} samples, partial recipient history.`
+        : 'Anchored on general voice — no prior emails to this contact yet.'
+  if (!modelReasoning) return provenance
+  return `${modelReasoning} · ${provenance}`
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +270,7 @@ function buildSystemPrompt(
   userEmail: string,
   contact: ContactRow,
   sentMsgs: Pick<MessageRow, 'subject' | 'snippet' | 'body' | 'sent_at'>[],
+  anchor: DraftStyleAnchor,
 ): string {
   const styleAnchor =
     sentMsgs.length === 0
@@ -176,6 +281,13 @@ function buildSystemPrompt(
             return `--- sample ${i + 1} (${formatRelative(m.sent_at)}) ---\n${text}`
           })
           .join('\n\n')
+
+  const anchorLabel =
+    anchor === 'recipient_only'
+      ? `THESE ARE ${userName.toUpperCase()}'S EMAILS TO THIS SPECIFIC RECIPIENT — mirror this register exactly. The recipient relationship has its own tone (warmth, formality, opener style, sign-off). Match it.`
+      : anchor === 'recipient_blend'
+        ? `Mixed samples — the first few are emails to this specific recipient (lean on these for register), the rest are general voice. Prefer the recipient-specific samples when they conflict.`
+        : `General voice samples — no emails to this specific recipient yet. Use the broader voice and adjust formality from the recipient's role/tier (below) and the recent thread.`
 
   const contactName =
     [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() ||
@@ -211,7 +323,7 @@ RECIPIENT
 - ${role}
 - Relationship: ${tierLabel} · score ${score}
 
-${userName}'S RECENT SENT MESSAGES — use as the style anchor
+STYLE ANCHOR — ${anchorLabel}
 ${styleAnchor}
 
 OUTPUT FORMAT — output ONLY this, nothing before or after
