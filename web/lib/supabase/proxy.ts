@@ -3,9 +3,9 @@ import { NextResponse, type NextRequest } from 'next/server'
 
 // Exact-match public paths. `/` is the marketing landing page — must be
 // shareable without auth, and `startsWith('/')` would match everything.
-const PUBLIC_EXACT_PATHS = new Set<string>(['/'])
+export const PUBLIC_EXACT_PATHS = new Set<string>(['/'])
 
-const PUBLIC_PATHS = [
+export const PUBLIC_PATHS = [
   '/login',
   '/auth',
   '/api/health',
