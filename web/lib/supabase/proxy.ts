@@ -22,6 +22,10 @@ const PUBLIC_PATHS = [
   // Pinned to the exact path so future /api/imessage/* routes don't
   // inherit the bypass by accident.
   '/api/imessage/sync',
+  // SMS Gateway for Android webhook — authenticated via
+  // Authorization: Bearer <SMS_GATEWAY_WEBHOOK_SECRET> + ?user_id=<uuid>.
+  // Without this bypass the proxy 307s the gateway to /login.
+  '/api/sms/webhook',
 ]
 
 export async function updateSession(request: NextRequest) {
