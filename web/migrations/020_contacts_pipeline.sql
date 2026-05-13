@@ -1,4 +1,4 @@
--- Migration 017 — pipeline tracking columns on contacts
+-- Migration 020 — pipeline tracking columns on contacts
 --
 -- Turns AIEA from a relationship monitor into a relationship manager: every
 -- tracked person can now sit in a stage of the user's outreach pipeline
