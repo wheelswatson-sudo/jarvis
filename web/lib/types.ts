@@ -172,6 +172,8 @@ export type CommitmentStatus = 'open' | 'done' | 'snoozed' | 'cancelled'
 
 export type CommitmentOwner = 'me' | 'them'
 
+export type CommitmentType = 'intro' | 'follow-up' | 'general'
+
 export type Commitment = {
   id: string
   user_id: string
@@ -184,6 +186,37 @@ export type Commitment = {
   status: CommitmentStatus
   completed_at: string | null
   created_at: string
+  // Added in migration 022. Nullable to tolerate rows read before the
+  // migration runs in a given environment.
+  commitment_type?: CommitmentType | null
+}
+
+// ---------- Outbound actions (intro drafts, suggested follow-ups) ----------
+// Distinct from `approvals` (which gates auto-sync overwrites) — this is the
+// queue of things AIEA wants to send on the user's behalf.
+
+export type OutboundActionStatus =
+  | 'draft'
+  | 'queued'
+  | 'sent'
+  | 'cancelled'
+  | 'failed'
+
+export type OutboundAction = {
+  id: string
+  user_id: string
+  contact_id: string | null
+  channel: string
+  recipient: string | null
+  subject: string | null
+  draft: string
+  context: string | null
+  status: OutboundActionStatus
+  suggested_send_at: string | null
+  sent_at: string | null
+  event_hash: string | null
+  created_at: string
+  updated_at: string
 }
 
 export type MeetingBrief = {
