@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { apiError } from '../../../../lib/api-errors'
 import { trackEvent } from '../../../../lib/events'
@@ -347,17 +347,19 @@ export async function POST(req: Request) {
     new Map([[overrideContactId, occurredAt]]),
   )
 
-  void trackEvent({
-    userId: user.id,
-    eventType: 'import_completed',
-    contactId: overrideContactId,
-    metadata: {
-      source: 'transcript',
-      transcript_source: parsed.source,
-      action_items: parsed.action_items.length,
-      key_points: parsed.key_points.length,
-    },
-  })
+  after(() =>
+    trackEvent({
+      userId: user.id,
+      eventType: 'import_completed',
+      contactId: overrideContactId,
+      metadata: {
+        source: 'transcript',
+        transcript_source: parsed.source,
+        action_items: parsed.action_items.length,
+        key_points: parsed.key_points.length,
+      },
+    }),
+  )
 
   return NextResponse.json({
     interaction: inserted,

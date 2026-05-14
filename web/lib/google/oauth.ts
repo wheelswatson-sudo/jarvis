@@ -149,18 +149,35 @@ type StoredTokenRow = {
   scopes: string[] | null
 }
 
+// Three reasons a token lookup can fail. The auto-sync route surfaces each
+// to the client differently (silent skip vs. "reconnect Google" toast vs.
+// transient error toast), so we discriminate here instead of collapsing
+// everything into one opaque `error` envelope. Existing callers that just
+// want a NextResponse can still do `if ('error' in tok) return tok.error`.
+export type TokenLookupKind = 'not_connected' | 'reconnect_required' | 'transient'
+
 type TokenLookup =
   | { token: string }
-  | { error: NextResponse }
+  | { error: NextResponse; kind: TokenLookupKind }
 
 /**
  * Returns a valid access token for the user, refreshing it via Google's
  * oauth2 endpoint if the cached one is expired (or about to expire).
  *
- * Caller pattern:
+ * Caller pattern (NextResponse short-circuit):
  *   const tok = await getValidAccessTokenForUser(user.id)
  *   if ('error' in tok) return tok.error
  *   const client = buildOAuthClient(tok.token)
+ *
+ * Caller pattern (kind-aware, e.g. auto-sync that wants to distinguish
+ * "user never connected" from "user revoked the OAuth grant"):
+ *   if ('error' in tok) {
+ *     switch (tok.kind) {
+ *       case 'not_connected':       // hide UI silently
+ *       case 'reconnect_required':  // tell user to reconnect
+ *       case 'transient':           // log + soft-fail
+ *     }
+ *   }
  */
 export async function getValidAccessTokenForUser(
   userId: string,
@@ -168,6 +185,7 @@ export async function getValidAccessTokenForUser(
   const service = getServiceClient()
   if (!service) {
     return {
+      kind: 'transient',
       error: apiError(
         500,
         'Service role key not configured.',
@@ -186,6 +204,7 @@ export async function getValidAccessTokenForUser(
 
   if (error) {
     return {
+      kind: 'transient',
       error: apiError(
         500,
         `Failed to read Google token: ${error.message}`,
@@ -197,11 +216,12 @@ export async function getValidAccessTokenForUser(
   const row = data as StoredTokenRow | null
   if (!row || !row.refresh_token) {
     return {
+      kind: 'not_connected',
       error: apiError(
         401,
         'Google not connected. Visit Settings to connect your Google account.',
         undefined,
-        'reconnect_required',
+        'not_connected',
       ),
     }
   }
@@ -225,6 +245,7 @@ export async function getValidAccessTokenForUser(
       // Refresh token has been revoked / expired — caller should send the
       // user through Reconnect.
       return {
+        kind: 'reconnect_required',
         error: apiError(
           401,
           'Google connection has been revoked. Please reconnect Google in Settings.',
@@ -234,6 +255,7 @@ export async function getValidAccessTokenForUser(
       }
     }
     return {
+      kind: 'transient',
       error: apiError(
         502,
         `Failed to refresh Google access token: ${refreshed.error}`,
