@@ -88,6 +88,13 @@ export async function GET(req: NextRequest) {
     tasks?: unknown
     profile?: { computed: boolean; top_contacts: number }
     edges?: { computed: number }
+    scores?: { scored: number }
+    meeting_briefs?: {
+      considered: number
+      generated: number
+      skipped: number
+      errors: number
+    }
     briefing?: { briefing_date: string; counts: Record<string, number> }
     error?: string
   }> = []

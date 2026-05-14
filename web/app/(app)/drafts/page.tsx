@@ -65,7 +65,6 @@ export default async function DraftsPage({
           subtitle="Generated drafts queue here for your review and edit before you send."
         />
         <EmptyState
-          eyebrow="Empty"
           title="No drafts pending"
           body="Drafts appear here after you click 'Draft reply' on a forgotten loop or trigger one from a contact's page."
         />
