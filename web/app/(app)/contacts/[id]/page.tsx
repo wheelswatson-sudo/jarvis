@@ -5,6 +5,7 @@ import { PageViewTracker } from '../../../../components/PageViewTracker'
 import { PersonalDetailsEditor } from '../../../../components/PersonalDetailsEditor'
 import { PipelineSelector } from '../../../../components/PipelineSelector'
 import { QuickAddInteraction } from '../../../../components/QuickAddInteraction'
+import { IntroduceTo } from '../../../../components/IntroduceTo'
 import { InteractionTimeline } from '../../../../components/InteractionTimeline'
 import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
@@ -22,7 +23,9 @@ import type {
   Commitment,
   Contact,
   Interaction,
+  OutboundAction,
 } from '../../../../lib/types'
+import { detectIntroIntent } from '../../../../lib/intro-detection'
 
 export const dynamic = 'force-dynamic'
 
@@ -93,6 +96,7 @@ export default async function ContactDetailPage({
     upcomingEventsRes,
     pastEventsRes,
     messagesRes,
+    introsRes,
   ] = await Promise.all([
     supabase.from('contacts').select('*').eq('id', id).maybeSingle(),
     supabase
@@ -131,6 +135,15 @@ export default async function ContactDetailPage({
       .eq('is_archived', false)
       .order('sent_at', { ascending: false })
       .limit(20),
+    // outbound_actions may be missing in environments where migration 022
+    // hasn't run yet. Tolerate the error so the page still renders.
+    supabase
+      .from('outbound_actions')
+      .select('*')
+      .eq('contact_id', id)
+      .eq('channel', 'intro')
+      .in('status', ['draft', 'queued'])
+      .order('created_at', { ascending: false }),
   ])
 
   const contact = contactData as Contact | null
@@ -156,6 +169,16 @@ export default async function ContactDetailPage({
   const messages = (
     messagesRes.error ? [] : (messagesRes.data ?? [])
   ) as MessageRow[]
+  const pendingIntros = (
+    introsRes.error ? [] : (introsRes.data ?? [])
+  ) as OutboundAction[]
+  // Surface open commitments whose wording suggests an intro intent. The
+  // user can either edit the commitment or click "Introduce to…" to act
+  // on it now.
+  const introCommitments = openCommitments.filter((c) => {
+    const sig = detectIntroIntent(c.description)
+    return sig.matched
+  })
 
   // Last contact across every signal we know about. interactions covers
   // logged calls / extracted emails; messages covers raw inbox; calendar
@@ -242,10 +265,13 @@ export default async function ContactDetailPage({
               </div>
             </div>
           </div>
-          <QuickAddInteraction
-            contactId={contact.id}
-            contactName={displayName}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <IntroduceTo sourceContact={contact} />
+            <QuickAddInteraction
+              contactId={contact.id}
+              contactName={displayName}
+            />
+          </div>
         </div>
       </header>
 
@@ -430,6 +456,72 @@ export default async function ContactDetailPage({
                     >
                       Join →
                     </a>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        </section>
+      )}
+
+      {(introCommitments.length > 0 || pendingIntros.length > 0) && (
+        <section>
+          <SectionHeader
+            eyebrow="Intros"
+            title={
+              <>
+                Intro opportunities{' '}
+                <span className="text-zinc-600 font-normal">
+                  ({introCommitments.length + pendingIntros.length})
+                </span>
+              </>
+            }
+            subtitle="Promises to introduce, and drafts waiting on your review."
+          />
+          <Card>
+            <ul className="divide-y divide-white/[0.05]">
+              {introCommitments.map((c) => (
+                <li
+                  key={`introsuggest-${c.id}`}
+                  className="-mx-2 px-2 py-3 text-sm first:pt-0 last:pb-0"
+                >
+                  <div className="flex items-baseline justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <span className="mr-2 rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-200 ring-1 ring-inset ring-violet-500/30">
+                        Suggested
+                      </span>
+                      <span className="text-zinc-100">{c.description}</span>
+                    </div>
+                  </div>
+                  {c.due_at && (
+                    <div className="mt-0.5 text-xs text-zinc-500">
+                      due {new Date(c.due_at).toLocaleDateString()}
+                    </div>
+                  )}
+                </li>
+              ))}
+              {pendingIntros.map((p) => (
+                <li
+                  key={`introdraft-${p.id}`}
+                  className="-mx-2 px-2 py-3 text-sm first:pt-0 last:pb-0"
+                >
+                  <div className="flex items-baseline justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <span className="mr-2 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-indigo-200 ring-1 ring-inset ring-indigo-500/30">
+                        Draft
+                      </span>
+                      <span className="text-zinc-100">
+                        {p.subject ?? 'Intro draft ready'}
+                      </span>
+                    </div>
+                    <span className="shrink-0 text-xs text-zinc-500 tabular-nums">
+                      {formatRelative(p.created_at)}
+                    </span>
+                  </div>
+                  {p.recipient && (
+                    <div className="mt-0.5 truncate font-mono text-[11px] text-zinc-500">
+                      {p.recipient}
+                    </div>
                   )}
                 </li>
               ))}

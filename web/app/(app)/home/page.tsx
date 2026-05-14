@@ -12,7 +12,12 @@ import { Greeting } from '../../../components/Greeting'
 import { IntelligencePanel } from '../../../components/IntelligencePanel'
 import { contactName, formatRelative } from '../../../lib/format'
 import { NETWORK_HEALTH_HELP } from '../../../lib/glossary'
-import type { Commitment, Contact } from '../../../lib/types'
+import type {
+  Commitment,
+  Contact,
+  OutboundAction,
+} from '../../../lib/types'
+import { detectIntroIntent } from '../../../lib/intro-detection'
 import { APOLLO_PROVIDER } from '../../../lib/apollo'
 import {
   loadBriefings,
@@ -61,6 +66,11 @@ type CommitmentForList = Pick<
   'id' | 'contact_id' | 'due_at' | 'status' | 'description'
 >
 
+type IntroDraftForList = Pick<
+  OutboundAction,
+  'id' | 'contact_id' | 'subject' | 'created_at'
+>
+
 function daysSince(iso: string | null | undefined): number | null {
   if (!iso) return null
   const t = new Date(iso).getTime()
@@ -90,18 +100,39 @@ function daysUntil(iso: string | null | undefined): number | null {
 function buildActionList(
   contacts: Contact[],
   commitments: CommitmentForList[],
+  introDrafts: IntroDraftForList[],
 ): ActionItem[] {
   const byId = new Map(contacts.map((c) => [c.id, c]))
   type Candidate = ActionItem & { contactId: string }
   const candidates: Candidate[] = []
 
   for (const com of commitments) {
-    if (com.status !== 'open' || !com.due_at || !com.contact_id) continue
+    if (com.status !== 'open' || !com.contact_id) continue
     const contact = byId.get(com.contact_id)
     if (!contact) continue
+    const name = contactName(contact)
+
+    // Intro intent detected in commitment text — surface regardless of
+    // due date because the value of an intro decays fast (the user
+    // remembered for a reason). Urgency 75 sits between half-life
+    // expired and T1 silent so intros bubble up but don't crowd out
+    // overdue work.
+    const intro = detectIntroIntent(com.description)
+    if (intro.matched) {
+      candidates.push({
+        contactId: contact.id,
+        key: `intro-com-${com.id}`,
+        href: `/contacts/${contact.id}`,
+        primary: `Make this intro: ${com.description}`,
+        secondary: name,
+        urgency: 75,
+        tone: 'violet',
+      })
+    }
+
+    if (!com.due_at) continue
     const dUntil = daysUntil(com.due_at)
     if (dUntil == null) continue
-    const name = contactName(contact)
     if (dUntil < 0) {
       const overdue = -dUntil
       candidates.push({
@@ -126,6 +157,27 @@ function buildActionList(
         tone: 'violet',
       })
     }
+  }
+
+  // Pending intro drafts — the user already opened the modal and AIEA
+  // built the draft, but they never marked it sent. Surface at urgency
+  // 78 (just above the "make this intro" suggestion) so the half-finished
+  // work bubbles ahead of fresh suggestions.
+  for (const draft of introDrafts) {
+    if (!draft.contact_id) continue
+    const contact = byId.get(draft.contact_id)
+    if (!contact) continue
+    candidates.push({
+      contactId: contact.id,
+      key: `intro-draft-${draft.id}`,
+      href: `/contacts/${contact.id}`,
+      primary: draft.subject
+        ? `Send intro: ${draft.subject}`
+        : 'Send intro draft',
+      secondary: `${contactName(contact)} — draft ready`,
+      urgency: 78,
+      tone: 'violet',
+    })
   }
 
   for (const c of contacts) {
@@ -340,7 +392,13 @@ async function loadHomeData() {
   } = await supabase.auth.getUser()
   const userId = user?.id ?? null
 
-  const [contactsRes, commitmentsRes, googleRes, apolloRes] = await Promise.all([
+  const [
+    contactsRes,
+    commitmentsRes,
+    googleRes,
+    apolloRes,
+    introsRes,
+  ] = await Promise.all([
     supabase.from('contacts').select('*').limit(2000),
     supabase
       .from('commitments')
@@ -366,10 +424,26 @@ async function loadHomeData() {
           .eq('provider', APOLLO_PROVIDER)
           .maybeSingle()
       : Promise.resolve({ data: null }),
+    // outbound_actions may not exist if migration 022 hasn't run in this
+    // environment yet. Tolerate the error so the home page still renders.
+    user
+      ? supabase
+          .from('outbound_actions')
+          .select('id, contact_id, subject, created_at')
+          .eq('user_id', user.id)
+          .eq('channel', 'intro')
+          .eq('status', 'draft')
+          .limit(50)
+      : Promise.resolve({ data: [] }),
   ])
 
   const contacts = (contactsRes.data ?? []) as Contact[]
   const commitments = (commitmentsRes.data ?? []) as CommitmentForList[]
+  const introDrafts = (
+    introsRes && 'error' in introsRes && introsRes.error
+      ? []
+      : (introsRes.data ?? [])
+  ) as IntroDraftForList[]
 
   const googleProviders = new Set(
     (googleRes.data ?? []).map(
@@ -416,7 +490,7 @@ async function loadHomeData() {
     if (dSince >= DORMANT_DAYS) dormant += 1
   }
 
-  const actions = buildActionList(contacts, commitments)
+  const actions = buildActionList(contacts, commitments, introDrafts)
   const firstName = user ? firstNameFromUser(user) : null
 
   return {
