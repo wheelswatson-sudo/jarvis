@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import type { PersonalDetails, RelationshipSentimentPoint, Tier } from '../../../../lib/types'
 
 export const dynamic = 'force-dynamic'
@@ -57,7 +57,11 @@ export async function POST() {
 
   const service = getServiceClient()
   if (!service) {
-    return apiError(500, 'Service role key not configured', undefined, 'no_service_key')
+    return apiServerError(
+      'contacts.compute-scores.POST',
+      new Error('Service role key not configured'),
+      'no_service_key',
+    )
   }
 
   const now = Date.now()
@@ -80,12 +84,10 @@ export async function POST() {
   ])
 
   if (contactsRes.error) {
-    console.error('[compute-scores] contacts query failed', contactsRes.error)
-    return apiError(500, 'Failed to load contacts', undefined, 'query_failed')
+    return apiServerError('contacts.compute-scores.POST', contactsRes.error, 'query_failed')
   }
   if (interactionsRes.error) {
-    console.error('[compute-scores] interactions query failed', interactionsRes.error)
-    return apiError(500, 'Failed to load interactions', undefined, 'query_failed')
+    return apiServerError('contacts.compute-scores.POST', interactionsRes.error, 'query_failed')
   }
 
   const contacts = (contactsRes.data ?? []) as ContactRow[]

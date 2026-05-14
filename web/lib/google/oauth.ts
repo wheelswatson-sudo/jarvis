@@ -3,8 +3,11 @@
 //
 // Auth model:
 //   1. Login page calls Supabase signInWithOAuth({ provider: 'google',
-//      access_type: 'offline', prompt: 'consent' }). On the FIRST consent
-//      Google issues both an access token AND a refresh token.
+//      access_type: 'offline' }). Google issues a refresh token on FIRST
+//      consent; on subsequent sign-ins it silently authenticates without
+//      re-prompting (no `prompt: 'consent'`) and we keep the existing
+//      refresh token. ?reconnect=1 on the login URL forces consent for
+//      explicit re-authorization (revoked tokens, new scopes).
 //   2. /auth/callback exchanges the auth code, then calls
 //      `persistGoogleTokens` below to write refresh_token / access_token /
 //      access_token_expires_at into user_integrations(provider='google').

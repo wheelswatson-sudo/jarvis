@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '../../lib/supabase/client'
 import { Brand } from '../../components/Brand'
 import { GOOGLE_OAUTH_SCOPES } from '../../lib/google/scopes'
@@ -11,6 +11,12 @@ type Mode = 'signin' | 'signup'
 
 export default function LoginPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  // ?reconnect=1 forces Google's consent screen — used when scopes change or
+  // the refresh token has been revoked. Default sign-in omits `prompt` so
+  // Google silently authenticates returning users (and only shows consent
+  // for first-time connects), preserving the silent-refresh flow.
+  const reconnect = searchParams.get('reconnect') === '1'
   const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -24,18 +30,19 @@ export default function LoginPage() {
     setError(null)
     setMessage(null)
     const supabase = createClient()
-    // Only force `prompt=consent` on first connect — returning users skip
-    // the consent screen. Explicit re-consent lives on Settings → Reconnect
-    // Google. `access_type=offline` alone still asks Google for a refresh
-    // token; Google reuses the previously-granted scopes silently.
+    // Default sign-in omits `prompt` so Google silently authenticates
+    // returning users. `?reconnect=1` opts into the consent screen for
+    // explicit re-authorization (revoked tokens, new scopes).
+    const queryParams: Record<string, string> = {
+      access_type: 'offline',
+    }
+    if (reconnect) queryParams.prompt = 'consent'
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
         scopes: GOOGLE_OAUTH_SCOPES.join(' '),
-        queryParams: {
-          access_type: 'offline',
-        },
+        queryParams,
       },
     })
     if (error) {

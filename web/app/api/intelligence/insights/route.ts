@@ -1,7 +1,7 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import { trackEvent } from '../../../../lib/events'
 import type { IntelligenceInsight } from '../../../../lib/types'
 
@@ -46,13 +46,12 @@ export async function GET() {
         details: error.details,
         hint: error.hint,
       })
-      return apiError(500, 'Failed to load insights', undefined, 'query_failed')
+      return apiServerError('intelligence.insights.GET', error, 'query_failed')
     }
 
     return NextResponse.json({ insights: (data ?? []) as IntelligenceInsight[] })
   } catch (err) {
-    console.error('[insights] GET unhandled', err)
-    return apiError(500, 'Internal error', undefined, 'unhandled')
+    return apiServerError('intelligence.insights.GET', err, 'unhandled')
   }
 }
 
@@ -94,10 +93,9 @@ export async function POST(request: Request) {
     // with the service-role client. Defense-in-depth: still scope to user_id.
     const service = getServiceClient()
     if (!service) {
-      return apiError(
-        500,
-        'Service role key not configured',
-        undefined,
+      return apiServerError(
+        'intelligence.insights.POST',
+        new Error('Service role key not configured'),
         'no_service_key',
       )
     }
@@ -121,15 +119,12 @@ export async function POST(request: Request) {
         details: error.details,
         hint: error.hint,
       })
-      return apiError(500, 'Failed to update insight', undefined, 'update_failed')
+      return apiServerError('intelligence.insights.POST', error, 'update_failed')
     }
     if (!data) {
       return apiError(404, 'Insight not found or already resolved', undefined, 'not_found')
     }
 
-    // Feedback event to feed the self-improvement loop. `after()` keeps the
-    // serverless worker alive past the response so the insert doesn't get
-    // truncated under load — `void` would let the lambda terminate first.
     after(() =>
       trackEvent({
         userId: user.id,
@@ -145,7 +140,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true, status: newStatus })
   } catch (err) {
-    console.error('[insights] POST unhandled', err)
-    return apiError(500, 'Internal error', undefined, 'unhandled')
+    return apiServerError('intelligence.insights.POST', err, 'unhandled')
   }
 }

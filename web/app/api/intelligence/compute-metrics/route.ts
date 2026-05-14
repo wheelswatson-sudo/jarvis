@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { timingSafeEqual } from 'crypto'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import { computeContactMetricsForUser } from '../../../../lib/intelligence/contact-metrics'
 
 export const dynamic = 'force-dynamic'
@@ -48,10 +48,9 @@ export async function POST(request: Request) {
 
   const service = getServiceClient()
   if (!service) {
-    return apiError(
-      500,
-      'Service role key not configured',
-      undefined,
+    return apiServerError(
+      'intelligence.compute-metrics.POST',
+      new Error('Service role key not configured'),
       'no_service_key',
     )
   }
@@ -66,8 +65,7 @@ export async function POST(request: Request) {
         .select('user_id')
         .gte('created_at', cutoff)
       if (error) {
-        console.error('[compute-metrics] events query failed', error)
-        return apiError(500, 'Failed to enumerate users', undefined, 'query_failed')
+        return apiServerError('intelligence.compute-metrics.POST', error, 'query_failed')
       }
       const userIds = [
         ...new Set(
@@ -115,8 +113,6 @@ export async function POST(request: Request) {
     const run = await computeContactMetricsForUser(service, user.id)
     return NextResponse.json({ ok: true, mode: 'user', run })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Internal error'
-    console.error('[compute-metrics] failed', err)
-    return apiError(500, message, undefined, 'compute_failed')
+    return apiServerError('intelligence.compute-metrics.POST', err, 'compute_failed')
   }
 }

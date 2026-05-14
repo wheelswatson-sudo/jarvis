@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { createClient } from '../../../../lib/supabase/server'
 import { getServiceClient } from '../../../../lib/supabase/service'
-import { apiError } from '../../../../lib/api-errors'
+import { apiError, apiServerError } from '../../../../lib/api-errors'
 import { APOLLO_PROVIDER } from '../../../../lib/apollo'
 
 export const dynamic = 'force-dynamic'
@@ -29,10 +29,9 @@ export async function POST(req: NextRequest) {
 
   const service = getServiceClient()
   if (!service) {
-    return apiError(
-      500,
-      'Service role key not configured.',
-      undefined,
+    return apiServerError(
+      'integrations.apollo.POST',
+      new Error('Service role key not configured.'),
       'service_unavailable',
     )
   }
@@ -54,8 +53,7 @@ export async function POST(req: NextRequest) {
     )
 
   if (upsertError) {
-    console.error('[integrations/apollo] upsert failed', upsertError)
-    return apiError(500, 'Failed to save Apollo credential', undefined, 'persist_failed')
+    return apiServerError('integrations.apollo.POST', upsertError, 'persist_failed')
   }
 
   return NextResponse.json({ ok: true })
@@ -80,8 +78,7 @@ export async function DELETE() {
     .eq('provider', APOLLO_PROVIDER)
 
   if (error) {
-    console.error('[integrations/apollo] disconnect failed', error)
-    return apiError(500, 'Failed to disconnect Apollo', undefined, 'disconnect_failed')
+    return apiServerError('integrations.apollo.DELETE', error, 'disconnect_failed')
   }
 
   return NextResponse.json({ ok: true })
