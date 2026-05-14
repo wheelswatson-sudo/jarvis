@@ -67,7 +67,14 @@ export async function updateSession(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl
+  // /dev/* is a sandbox for component fixtures (see app/dev/score-preview).
+  // The pages themselves call notFound() outside development, so even if
+  // this bypass leaks to prod the routes return 404. Belt-and-suspenders:
+  // gate the bypass on NODE_ENV here too.
+  const isDevSandbox =
+    process.env.NODE_ENV === 'development' && pathname.startsWith('/dev/')
   const isPublic =
+    isDevSandbox ||
     PUBLIC_EXACT_PATHS.has(pathname) ||
     PUBLIC_PATHS.some((p) => pathname.startsWith(p))
 

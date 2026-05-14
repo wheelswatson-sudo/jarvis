@@ -9,6 +9,10 @@ import { IntroduceTo } from '../../../../components/IntroduceTo'
 import { InteractionTimeline } from '../../../../components/InteractionTimeline'
 import { MeetingPrepBrief } from '../../../../components/MeetingPrepBrief'
 import { RelationshipHealthBar } from '../../../../components/RelationshipHealth'
+import { RelationshipMomentum } from '../../../../components/RelationshipMomentum'
+import { loadContactMomentum } from '../../../../lib/intelligence/contact-momentum'
+import { ContactWeeklyDelta } from '../../../../components/ContactWeeklyDelta'
+import { loadContactWeeklyDelta } from '../../../../lib/intelligence/contact-weekly-delta'
 import { CadenceBadge } from '../../../../components/CadenceBadge'
 import { Card, SectionHeader } from '../../../../components/cards'
 import { TierSelector } from '../../../../components/ContactEditor'
@@ -83,6 +87,9 @@ export default async function ContactDetailPage({
 }) {
   const { id } = await params
   const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
 
   // The contact profile is the single pane of glass — pull every signal that
   // links back to this contact: interactions, commitments, calendar events,
@@ -97,6 +104,8 @@ export default async function ContactDetailPage({
     pastEventsRes,
     messagesRes,
     introsRes,
+    momentum,
+    weeklyDelta,
   ] = await Promise.all([
     supabase.from('contacts').select('*').eq('id', id).maybeSingle(),
     supabase
@@ -135,7 +144,7 @@ export default async function ContactDetailPage({
       .eq('is_archived', false)
       .order('sent_at', { ascending: false })
       .limit(20),
-    // outbound_actions may be missing in environments where migration 022
+    // outbound_actions may be missing in environments where the migration
     // hasn't run yet. Tolerate the error so the page still renders.
     supabase
       .from('outbound_actions')
@@ -144,6 +153,12 @@ export default async function ContactDetailPage({
       .eq('channel', 'intro')
       .in('status', ['draft', 'queued'])
       .order('created_at', { ascending: false }),
+    user
+      ? loadContactMomentum(supabase, user.id, id).catch(() => null)
+      : Promise.resolve(null),
+    user
+      ? loadContactWeeklyDelta(supabase, user.id, id).catch(() => null)
+      : Promise.resolve(null),
   ])
 
   const contact = contactData as Contact | null
@@ -388,6 +403,10 @@ export default async function ContactDetailPage({
               commitments={commitments}
             />
           </Card>
+
+          {momentum && <RelationshipMomentum momentum={momentum} />}
+
+          {weeklyDelta && <ContactWeeklyDelta delta={weeklyDelta} />}
 
           <MeetingPrepBrief contactId={contact.id} />
         </div>

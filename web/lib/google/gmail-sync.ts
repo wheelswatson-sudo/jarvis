@@ -26,7 +26,15 @@ import { mergeSignalsIntoDetails } from '../intelligence/relationship-merge'
 import { makeSnippet } from '../util/snippet'
 import type { PersonalDetails } from '../types'
 
+// Gmail tabs are CATEGORIES, not labels. `-label:promotions` is a no-op; the
+// correct syntax is `-category:promotions`. Without this, ~80% of an average
+// inbox (newsletters, social notifications, transactional updates) leaks
+// through the sync and crowds real correspondence out of the 25-message budget.
 const DEFAULT_FILTER_TOKENS = [
+  '-category:promotions',
+  '-category:social',
+  '-category:updates',
+  '-category:forums',
   '-from:noreply',
   '-from:no-reply',
   '-from:notifications',
@@ -40,8 +48,6 @@ const DEFAULT_FILTER_TOKENS = [
   '-from:venmo.com',
   '-from:square.com',
   '-from:paypal.com',
-  '-label:promotions',
-  '-label:social',
 ] as const
 
 export type GmailSyncOptions = {
