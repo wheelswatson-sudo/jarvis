@@ -7,6 +7,8 @@ export const PUBLIC_EXACT_PATHS = new Set<string>(['/'])
 
 export const PUBLIC_PATHS = [
   '/login',
+  '/forgot-password',
+  '/reset-password',
   '/auth',
   '/api/health',
   '/api/intelligence/health',
